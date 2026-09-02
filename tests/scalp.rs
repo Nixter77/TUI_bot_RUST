@@ -117,12 +117,13 @@ fn exits_on_stop() {
 fn trails_stop_up_once_in_profit() {
     let bars = grind_then_pullback(london_ms());
     let mark = bars.last().unwrap().close;
+    // ~1R at mark, below 1.5R bank so AmendStop still fires.
     let pos = Position {
         symbol: "BTCUSDT".into(),
         side: Side::Long,
         qty: Decimal::ONE,
-        entry_price: mark * d("0.98"),
-        stop_loss: Some(mark * d("0.975")),
+        entry_price: mark * d("0.995"),
+        stop_loss: Some(mark * d("0.990")),
         take_profit: Some(mark * d("1.05")),
         unrealized_pnl: Decimal::ZERO,
         opened_bar_time: Some(bars[bars.len() - 3].open_time),
@@ -134,7 +135,7 @@ fn trails_stop_up_once_in_profit() {
             assert!(stop_loss > mark * d("0.95"));
             assert!(stop_loss < mark);
         }
-        other => panic!("{other:?}"),
+        other => panic!("{} {:?}", other.reason(), other),
     }
 }
 
@@ -253,5 +254,80 @@ fn time_stop_uses_max_hold_eight() {
     match decision {
         Decision::ExitPosition { reason, .. } => assert!(reason.contains("time stop"), "{reason}"),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn banks_at_one_and_half_r() {
+    let bars = grind_then_pullback(london_ms());
+    let mark = bars.last().unwrap().close;
+    let entry = mark * d("0.98");
+    let risk = mark * d("0.01");
+    let pos = Position {
+        symbol: "BTCUSDT".into(),
+        side: Side::Long,
+        qty: Decimal::ONE,
+        entry_price: entry,
+        stop_loss: Some(entry - risk),
+        take_profit: Some(mark * d("1.10")),
+        unrealized_pnl: Decimal::ZERO,
+        opened_bar_time: Some(bars[bars.len() - 3].open_time),
+        leverage: 0,
+    };
+    let decision = scalp_decision(&bars, Some(&pos), "BTCUSDT", Some(&scalp_loose()), None);
+    match decision {
+        Decision::ExitPosition { reason, .. } => assert!(reason.contains("1.5R"), "{reason}"),
+        other => panic!("{} {:?}", other.reason(), other),
+    }
+}
+
+#[test]
+fn fee_aware_breakeven_beats_raw_entry() {
+    use tui_bot::money::round_trip_taker_pct;
+    let bars = grind_then_pullback(london_ms());
+    let mark = bars.last().unwrap().close;
+    let entry = mark * d("0.995");
+    let risk = mark * d("0.004");
+    let mut params = scalp_loose();
+    params.trail_atr = d("10");
+    let pos = Position {
+        symbol: "BTCUSDT".into(),
+        side: Side::Long,
+        qty: Decimal::ONE,
+        entry_price: entry,
+        stop_loss: Some(entry - risk),
+        take_profit: Some(mark * d("1.10")),
+        unrealized_pnl: Decimal::ZERO,
+        opened_bar_time: Some(bars[bars.len() - 2].open_time),
+        leverage: 0,
+    };
+    let decision = scalp_decision(&bars, Some(&pos), "BTCUSDT", Some(&params), None);
+    match decision {
+        Decision::AmendStop { stop_loss, .. } => {
+            let fee_be = entry * (Decimal::ONE + round_trip_taker_pct());
+            assert!(stop_loss >= fee_be, "sl={stop_loss} fee_be={fee_be}");
+            assert!(stop_loss > entry);
+        }
+        other => panic!("{} {:?}", other.reason(), other),
+    }
+}
+
+#[test]
+fn entry_tp_is_fee_padded() {
+    use tui_bot::money::round_trip_taker_pct;
+    let bars = grind_then_pullback(london_ms());
+    let decision = scalp_decision(&bars, None, "BTCUSDT", Some(&scalp_loose()), None);
+    match decision {
+        Decision::EnterLong {
+            take_profit,
+            stop_loss,
+            ..
+        } => {
+            let mark = bars.last().unwrap().close;
+            let risk = mark - stop_loss;
+            let padded = (mark + risk * d("2")) * (Decimal::ONE + round_trip_taker_pct());
+            assert!(take_profit >= padded * d("0.999"), "tp={take_profit} padded={padded}");
+        }
+        other => panic!("{} {:?}", other.reason(), other),
     }
 }

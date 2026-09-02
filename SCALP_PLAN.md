@@ -17,10 +17,12 @@
 ## Отгружено (ship-now)
 1. **Сессия:** `STRATEGY2_ENTRY_HOURS` / `STRATEGY2_ALWAYS_ENTER` → `Config.s2_*` → `ScalpParams::from_config`. Вне окна открытый лонг → Exit «конец сессии». Monitor session knobs для sid=2.
 2. **Тайм-стоп:** default `max_hold_bars=8`; env `STRATEGY2_MAX_HOLD_BARS` (1–240).
-3. **Откат с пика (pre-BE):** peak ≥ 0.8R и mark < entry+0.25R → AmendStop «откат с пика — замок 0.25R» или Exit «откат с пика». Существующий 1R BE+trail сохранён.
+3. **Откат с пика (pre-BE):** peak ≥ 0.8R и mark < entry+0.25R → AmendStop «откат с пика — замок 0.25R» или Exit «откат с пика».
+4. **1.5R bank:** mark (или peak≥1.5R при mark≥1R) → Exit «scalp 1.5R — фиксирую».
+5. **Fee-aware BE** + **fee-padded entry TP** (S4 money helpers).
 
 ## НЕ делали (бриф)
-RISK_PCT для S2 · dump filter · exclude majors · scale-out / 1.5R bank pile · fee-pad TP · новые индикаторы · шорты · websocket-first · ratatui · telegram · sqlite-as-alpha · grid search.
+RISK_PCT для S2 · dump filter · exclude majors · ReduceLong scale-out · новые индикаторы · шорты · websocket-first · ratatui · telegram · sqlite-as-alpha · grid search.
 
 ## Риски остатка
 - Нет live closes → EV гипотетический; после сессии сверить close reasons («конец сессии» / «откат с пика» / time stop).

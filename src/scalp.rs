@@ -4,6 +4,7 @@ use crate::config::{Config, DEFAULT_S2_MAX_HOLD_BARS};
 use crate::indicators::{ema_series, last_atr, last_ema, last_rsi, mean_volume, vwap};
 use crate::models::{Decision, Position, Side};
 use crate::models::Bar;
+use crate::money::round_trip_taker_pct;
 use crate::sessions::{in_entry_window, HourWindow};
 use crate::trail::{long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
@@ -170,7 +171,7 @@ pub fn scalp_decision(
     if risk <= Decimal::ZERO {
         return Decision::hold("risk is zero");
     }
-    let tp = mark + p.reward_r * risk;
+    let tp = (mark + p.reward_r * risk) * (Decimal::ONE + round_trip_taker_pct());
     Decision::EnterLong {
         symbol: symbol.to_string(),
         reason: "скальп: откат к VWAP/EMA9".into(),
@@ -358,10 +359,24 @@ fn manage_long(
         }
     }
 
-    // Existing 1R BE + trail (unchanged geometry).
+    // Bank 1.5R (S4 latch) — do not wait for full 2R TP on a scalp.
+    if risk > Decimal::ZERO {
+        let target_15 = entry + Decimal::new(15, 1) * risk;
+        let peak = peak_since_entry(bars, position, mark);
+        if mark >= target_15 || (peak >= target_15 && mark >= entry + risk) {
+            return Decision::ExitPosition {
+                reason: "scalp 1.5R — фиксирую".into(),
+                symbol: String::new(),
+            };
+        }
+    }
+
+    // 1R BE + trail; fee-aware BE floor so "breakeven" is not a net loser.
     let in_profit = risk > Decimal::ZERO && mark >= entry + risk;
     if in_profit {
-        let breakeven = entry + atr * Decimal::new(5, 2);
+        let fee_be = entry * (Decimal::ONE + round_trip_taker_pct());
+        let atr_be = entry + atr * Decimal::new(5, 2);
+        let breakeven = if fee_be > atr_be { fee_be } else { atr_be };
         let trail = mark - p.trail_atr * atr;
         let candidate = if trail > breakeven { trail } else { breakeven };
         if let Ok(new_sl) = trail_stop_upward(sl, candidate, "LONG") {
