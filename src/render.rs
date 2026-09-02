@@ -430,6 +430,12 @@ pub fn line_tone(line: &str, account_profit: Decimal) -> Option<LineTone> {
     if let Some(tone) = one_r_tone(line) {
         return Some(tone);
     }
+    if line.contains("до входа:") {
+        if line.contains("сейчас") {
+            return Some(LineTone::Profit);
+        }
+        return Some(LineTone::Warn);
+    }
     if line.contains("last=") && line.contains('%') {
         if let Some(v) = number_after(line, " ").or_else(|| {
             line.split_whitespace()

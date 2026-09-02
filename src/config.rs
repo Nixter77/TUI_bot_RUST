@@ -64,6 +64,15 @@ impl TradeInterval {
         }
     }
 
+    pub fn duration_ms(self) -> i64 {
+        match self {
+            Self::Minute5 => 5 * 60_000,
+            Self::Minute15 => 15 * 60_000,
+            Self::Minute30 => 30 * 60_000,
+            Self::Hour1 => 60 * 60_000,
+        }
+    }
+
     pub fn fetch_limit(self) -> usize {
         50
     }

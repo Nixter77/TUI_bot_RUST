@@ -1,18 +1,20 @@
 //! Watch-only radar: waiting names, 24h tape, open/closed P&L. Never sends orders.
 
-use crate::config::Config;
+use crate::config::{Config, TradeInterval};
 use crate::continuation::{liquid_universe, s4_setup_skip, ContinuationParams};
 use crate::dayrisk::utc_day_key;
 use crate::engine::strategy_title;
+use crate::indicators::{last_ema, vwap};
 use crate::journal::{event_unix, parse_pnl, TradeEvent};
-use crate::models::{EngineState, MarketSnapshot, Position, Side, Ticker};
+use crate::models::{near_24h_high, EngineState, MarketSnapshot, Position, Side, Ticker};
 use crate::momentum::{s1_setup_skip, MomentumParams};
 use crate::profit::{account_profit, current_equity};
 use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
 use crate::render::{cooldown_lines, one_r_status, top_movers, OneRStatus};
 use crate::scalp::scalp_decision;
 use crate::sessions::{
-    format_windows, in_entry_window, outside_entry_reason, session_status, HourWindow,
+    format_windows, in_entry_window, next_window_start, outside_entry_reason, session_status,
+    utc_datetime, HourWindow,
 };
 use crate::trend::trend_decision;
 use crate::view::view_positions_with;
@@ -64,6 +66,8 @@ pub struct WaitRow {
     pub volume: Decimal,
     pub kind: WaitKind,
     pub reason: String,
+    /// Body after «до входа:» — time, 24h %, or price gap.
+    pub until: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -336,6 +340,231 @@ fn pause_reason(state: &EngineState, symbol: &str, now: f64) -> Option<String> {
     }
 }
 
+fn until_clock(until: f64, now: f64) -> String {
+    format!(
+        "ещё {} → {} UTC",
+        fmt_remain(until - now),
+        utc_datetime(until).format("%H:%M")
+    )
+}
+
+fn next_utc_midnight(now: f64) -> f64 {
+    let t = utc_datetime(now);
+    let tomorrow = t.date_naive() + chrono::Duration::days(1);
+    tomorrow
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp() as f64
+}
+
+fn next_bar_until(snapshot: &MarketSnapshot, symbol: &str, interval: TradeInterval, now: f64) -> String {
+    let bars = snapshot.bars_for(symbol);
+    let Some(last) = bars.last() else {
+        if let Some(bar) = snapshot.last_bars.get(symbol) {
+            return bar_close_until(bar.open_time, interval, now);
+        }
+        return format!("ждёт свечу {}", interval.as_ru());
+    };
+    bar_close_until(last.open_time, interval, now)
+}
+
+fn bar_close_until(open_time_ms: i64, interval: TradeInterval, now: f64) -> String {
+    let close = (open_time_ms + interval.duration_ms()) as f64 / 1000.0;
+    if close > now {
+        format!(
+            "ещё {} до закрытия {}",
+            fmt_remain(close - now),
+            interval.as_ru()
+        )
+    } else {
+        format!("ждёт свечу {}", interval.as_ru())
+    }
+}
+
+fn scan_until(state: &EngineState, poll_sec: f64, now: f64) -> String {
+    if state.last_scan_ts <= 0.0 || poll_sec <= 0.0 {
+        return "сейчас".into();
+    }
+    let due = state.last_scan_ts + poll_sec;
+    if now >= due {
+        "сейчас".into()
+    } else {
+        format!("ещё {} до скана", fmt_remain(due - now))
+    }
+}
+
+fn pct_gap(value: Decimal) -> String {
+    format!("{}", value.abs().round_dp(1).normalize())
+}
+
+/// How far 24h % is from the S4 buy band [min_change, stretch).
+fn tape_until(change: Decimal, p: &ContinuationParams) -> Option<String> {
+    let lo = if p.min_change_percent > Decimal::ZERO {
+        p.min_change_percent
+    } else {
+        Decimal::ZERO
+    };
+    let mut hi = p.stretch_pct;
+    if let Some(max_c) = p.max_change_percent {
+        if max_c < hi {
+            hi = max_c;
+        }
+    }
+    if change >= p.stretch_pct || p.max_change_percent.is_some_and(|m| change > m) {
+        let gap = (change - hi).max(Decimal::new(1, 1));
+        return Some(format!(
+            "ещё {}% 24h вниз (надо < {}%)",
+            pct_gap(gap),
+            pct_gap(hi)
+        ));
+    }
+    if change <= -p.stretch_pct || change < lo {
+        let need = (lo - change).max(Decimal::new(1, 1));
+        return Some(format!(
+            "ещё {}% 24h вверх (надо ≥ {}%)",
+            pct_gap(need),
+            pct_gap(lo)
+        ));
+    }
+    None
+}
+
+fn price_until(last: Decimal, target: Decimal, label: &str) -> String {
+    if last <= Decimal::ZERO || target <= Decimal::ZERO {
+        return format!("ждёт {label}");
+    }
+    if last >= target {
+        return format!("сейчас ({label})");
+    }
+    let usdt = target - last;
+    let pct = usdt / last * Decimal::from(100);
+    format!(
+        "ещё {} USDT ({}%) до {label}",
+        fmt_price(usdt),
+        pct_gap(pct)
+    )
+}
+
+fn s4_setup_until(
+    snapshot: &MarketSnapshot,
+    ticker: &Ticker,
+    p: &ContinuationParams,
+    now: f64,
+) -> String {
+    if let Some(text) = tape_until(ticker.price_change_percent, p) {
+        return text;
+    }
+    if near_24h_high(ticker, p.near_high_frac) && ticker.high_price > Decimal::ZERO {
+        let cap = ticker.high_price * (Decimal::ONE - p.near_high_frac);
+        if ticker.last_price > cap && ticker.last_price > Decimal::ZERO {
+            let pct = (ticker.last_price - cap) / ticker.last_price * Decimal::from(100);
+            return format!("ещё {}% вниз от 24h high", pct_gap(pct));
+        }
+    }
+    if snapshot.bars_for(&ticker.symbol).is_empty() && !snapshot.last_bars.contains_key(&ticker.symbol)
+    {
+        return next_bar_until(snapshot, &ticker.symbol, p.interval, now);
+    }
+    let htf = snapshot.htf_bars_for(&ticker.symbol);
+    if htf.len() >= 21 {
+        let closes: Vec<Decimal> = htf.iter().map(|b| b.close).collect();
+        if let (Some(ema), Some(last)) = (last_ema(&closes, 20), htf.last()) {
+            if last.close <= ema {
+                return price_until(last.close, ema, "4ч EMA20");
+            }
+        }
+    } else {
+        return "ждёт 4ч историю".into();
+    }
+    let bars = snapshot.bars_for(&ticker.symbol);
+    if bars.len() >= 21 {
+        let closes: Vec<Decimal> = bars.iter().map(|b| b.close).collect();
+        if let (Some(ema), Some(last)) = (last_ema(&closes, 20), bars.last()) {
+            if last.close <= ema {
+                return price_until(last.close, ema, "EMA20");
+            }
+        }
+    }
+    if let Some(vwap_price) = vwap(bars) {
+        if ticker.last_price < vwap_price {
+            return price_until(ticker.last_price, vwap_price, "VWAP");
+        }
+    }
+    next_bar_until(snapshot, &ticker.symbol, p.interval, now)
+}
+
+fn until_entry(
+    cfg: &Config,
+    state: &EngineState,
+    snapshot: &MarketSnapshot,
+    ticker: &Ticker,
+    kind: WaitKind,
+    now: f64,
+) -> String {
+    match kind {
+        WaitKind::Pause => {
+            let until = state
+                .cooldowns
+                .get(&ticker.symbol.to_ascii_uppercase())
+                .copied()
+                .unwrap_or(0.0);
+            if until > now {
+                until_clock(until, now)
+            } else {
+                "сейчас".into()
+            }
+        }
+        WaitKind::Gate => {
+            if state.daily_halt {
+                return until_clock(next_utc_midnight(now), now);
+            }
+            if now < state.retry_until {
+                return until_clock(state.retry_until, now);
+            }
+            if now < state.cooldown_until {
+                return until_clock(state.cooldown_until, now);
+            }
+            let (windows, always) = session_knobs(cfg, state.strategy_id);
+            if !in_entry_window(now, Some(&windows), always) {
+                if let Some(nxt) = next_window_start(now, &windows) {
+                    return until_clock(nxt.timestamp() as f64, now);
+                }
+            }
+            if state.entries_paused {
+                return "пока r в торговом TUI".into();
+            }
+            "ждёт свободный слот".into()
+        }
+        WaitKind::Setup => {
+            if state.strategy_id == 4 {
+                s4_setup_until(snapshot, ticker, &s4_params(cfg), now)
+            } else if state.strategy_id == 1 {
+                if near_24h_high(ticker, Decimal::new(2, 2)) && ticker.high_price > Decimal::ZERO {
+                    let cap = ticker.high_price * Decimal::new(98, 2);
+                    if ticker.last_price > cap {
+                        return format!(
+                            "ещё {}% вниз от 24h high",
+                            pct_gap((ticker.last_price - cap) / ticker.last_price * Decimal::from(100))
+                        );
+                    }
+                }
+                next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
+            } else {
+                next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
+            }
+        }
+        WaitKind::Ready => {
+            let poll = if state.strategy_id == 4 {
+                60.0
+            } else {
+                cfg.poll_seconds.max(1) as f64
+            };
+            scan_until(state, poll, now)
+        }
+    }
+}
+
 pub fn classify_waiting(
     cfg: &Config,
     state: &EngineState,
@@ -364,6 +593,14 @@ pub fn classify_waiting(
         } else {
             (WaitKind::Ready, "готов к входу".into())
         };
+        let until = until_entry(
+            cfg,
+            state,
+            snapshot,
+            &ticker,
+            kind,
+            now,
+        );
         rows.push(WaitRow {
             symbol: ticker.symbol.clone(),
             change_pct: ticker.price_change_percent,
@@ -371,6 +608,7 @@ pub fn classify_waiting(
             volume: ticker.quote_volume,
             kind,
             reason,
+            until,
         });
     }
     rows.sort_by(|a, b| {
@@ -434,9 +672,16 @@ fn fmt_remain(seconds: f64) -> String {
     if sec < 60 {
         return format!("{sec} с");
     }
-    let mins = sec / 60;
+    let hours = sec / 3600;
+    let mins = (sec % 3600) / 60;
     let rem = sec % 60;
-    if rem == 0 {
+    if hours > 0 {
+        if mins == 0 {
+            format!("{hours} ч")
+        } else {
+            format!("{hours} ч {mins} мин")
+        }
+    } else if rem == 0 {
         format!("{mins} мин")
     } else {
         format!("{mins} мин {rem} с")
@@ -706,6 +951,7 @@ pub fn render_monitor(view: &MonitorView) -> String {
                 row.kind.tag(),
                 row.reason
             ));
+            wait_lines.push(format!("    до входа: {}", row.until));
         }
     }
 

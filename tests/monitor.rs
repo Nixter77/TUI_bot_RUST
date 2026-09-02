@@ -136,6 +136,12 @@ fn waiting_and_growth_and_pnl() {
     assert!(frame.contains("нетто=-8.0500") || frame.contains("нетто=-8.05"), "{frame}");
     assert!(frame.contains("APTUSDT"), "{frame}");
     assert!(frame.contains("[сетап]") || frame.contains("улетело"), "{frame}");
+    assert!(frame.contains("до входа:"), "{frame}");
+    assert!(
+        apt.until.contains("24h") || apt.until.contains("ещё"),
+        "stretched name must show remaining to entry band: {}",
+        apt.until
+    );
 }
 
 #[test]
@@ -154,4 +160,28 @@ fn s1_wait_lists_book_not_held() {
         waiting.iter().all(|w| w.symbol != "SKRUSDT"),
         "S1 max-change filter must drop SKR from the wait book: {waiting:?}"
     );
+}
+
+#[test]
+fn wait_until_entry_shows_cooldown() {
+    let cfg = cfg_always();
+    let mut state = EngineState::new(4);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = tape();
+    let now = make_utc_ts(2026, 9, 2, 10, 0, 0);
+    state.cooldowns.insert("AAVEUSDT".into(), now + 11.0 * 60.0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    let aave = waiting
+        .iter()
+        .find(|w| w.symbol == "AAVEUSDT")
+        .expect("AAVE in wait");
+    assert_eq!(aave.kind, WaitKind::Pause, "{aave:?}");
+    assert!(
+        aave.until.contains("11 мин") && aave.until.contains("UTC"),
+        "{}",
+        aave.until
+    );
+    let frame = render_monitor(&build_monitor(&cfg, &state, &snap, &[], now));
+    assert!(frame.contains("до входа:"), "{frame}");
+    assert!(frame.contains("11 мин"), "{frame}");
 }
