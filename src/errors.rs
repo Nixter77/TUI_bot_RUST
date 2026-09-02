@@ -1,6 +1,8 @@
 //! Binance / TestNet error catalog.
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::OnceLock;
 
 pub const ACTION_RETRY: &str = "retry";
 pub const ACTION_SKIP: &str = "skip_symbol";
@@ -9,6 +11,20 @@ pub const ACTION_IGNORE: &str = "ignore";
 pub const ACTION_OPERATOR: &str = "operator";
 pub const ACTION_KEEP: &str = "keep";
 pub const COOLDOWN_SEC: f64 = 1800.0;
+/// After a retryable transport fault, do not mill new entries every 5s poll.
+pub const RETRY_BACKOFF_SEC: f64 = 20.0;
+/// Cap for exponential retry backoff (20s → 40s → 60s).
+pub const RETRY_BACKOFF_CAP_SEC: f64 = 60.0;
+
+/// Consecutive retryable faults: 20s, 40s, then 60s.
+pub fn retry_backoff_sec(strikes: u8) -> f64 {
+    let n = strikes.max(1).min(3);
+    (RETRY_BACKOFF_SEC * f64::from(1u32 << (n - 1))).min(RETRY_BACKOFF_CAP_SEC)
+}
+/// After a losing close, keep that symbol off the buy list for 12 hours.
+/// 12h so a loser skips the next UTC session window; 4h reprinted BCH same day;
+/// 24h emptied the liquid book.
+pub const LOSS_SYMBOL_COOLDOWN_SEC: f64 = 43_200.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifiedError {
@@ -53,7 +69,7 @@ fn policy_message(code: i32) -> (&'static str, String) {
         ),
         -2022 => (
             ACTION_KEEP,
-            "reduceOnly отклонён (−2022). Повторю без флага.".into(),
+            "reduceOnly отклонён (−2022). Книга уже плоская — не открываю шорт.".into(),
         ),
         -1102 => (
             ACTION_KEEP,
@@ -152,6 +168,12 @@ fn hint_code(text: &str) -> Option<i32> {
 
 fn fallback_policy(text: &str, parsed: Option<(i32, String)>) -> (String, String) {
     let low = text.to_ascii_lowercase();
+    if low.contains("inflates risk") || text.contains("раздувает риск") {
+        return (
+            ACTION_SKIP.into(),
+            "minNotional раздувает риск — символ пропускаю.".into(),
+        );
+    }
     if low.contains("timeout ") || low.contains("timed out") {
         return (ACTION_RETRY.into(), "Сеть: таймаут запроса.".into());
     }
@@ -171,19 +193,21 @@ fn fallback_policy(text: &str, parsed: Option<(i32, String)>) -> (String, String
         );
     }
     if let Some((code, msg)) = parsed {
-        let msg = if msg.len() > 120 {
-            format!("{}…", &msg[..117])
-        } else {
-            msg
-        };
-        return (ACTION_SKIP.into(), format!("Биржа отказала ({code}): {msg}"));
+        return (
+            ACTION_SKIP.into(),
+            format!("Биржа отказала ({code}): {}", clip_chars(&msg, 120)),
+        );
     }
-    let shown = if text.len() > 160 {
-        format!("{}…", &text[..157])
-    } else {
-        text.to_string()
-    };
-    (ACTION_KEEP.into(), shown)
+    (ACTION_KEEP.into(), clip_chars(text, 160))
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let take = max.saturating_sub(1);
+    let cut: String = text.chars().take(take).collect();
+    format!("{cut}…")
 }
 
 pub fn classify(text: &str) -> ClassifiedError {
@@ -211,16 +235,26 @@ pub fn classify(text: &str) -> ClassifiedError {
     }
 }
 
+fn secret_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)\b(signature|api[_-]?key|secret|listenkey)=([^&\s"']+)"#).expect("secret redact regex")
+    })
+}
+
+/// Strip HMAC/query credentials that ureq may put in transport errors.
+pub fn redact_secrets(text: &str) -> String {
+    secret_re().replace_all(text, "$1=***").into_owned()
+}
+
 pub fn describe_exchange_error(text: &str) -> String {
     let info = classify(text);
-    if !info.message.is_empty() {
-        return info.message;
-    }
-    if text.len() > 160 {
-        format!("{}…", &text[..157])
+    let message = if !info.message.is_empty() {
+        info.message
     } else {
-        text.to_string()
-    }
+        clip_chars(text, 160)
+    };
+    redact_secrets(&message)
 }
 
 pub fn is_retry_error(text: Option<&str>) -> bool {

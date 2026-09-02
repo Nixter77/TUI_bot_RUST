@@ -1,7 +1,7 @@
 //! Drive shipped HMAC signing with the official Binance test vector.
 
 use std::collections::BTreeMap;
-use tui_bot::signing::{canonical_query, sign_query, signed_query_string};
+use tui_bot::signing::{canonical_query, form_encode, sign_query, signed_query_string};
 
 #[test]
 fn official_binance_hmac_vector() {
@@ -32,4 +32,10 @@ fn signed_query_appends_signature_without_embedding_secret() {
 #[test]
 fn empty_secret_rejected() {
     assert!(sign_query("", "a=1").is_err());
+}
+
+#[test]
+fn form_encode_percent_encodes_ampersand() {
+    assert_eq!(form_encode("BTCUSDT"), "BTCUSDT");
+    assert_eq!(form_encode("a&b"), "a%26b");
 }

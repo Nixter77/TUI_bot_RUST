@@ -1,4 +1,4 @@
-//! Build a MarketSnapshot. Network stays out of the curses loop.
+//! Build a MarketSnapshot. HTTP stays out of the TUI key poll.
 
 use crate::config::Config;
 use crate::errors::describe_exchange_error;
@@ -6,11 +6,12 @@ use crate::exchange::{
     account_with_position_upnl, load_account, parse_positions, BinanceFutures, ExchangeError, SnapshotClient,
 };
 use crate::models::{
-    last_closed_bar, pick_managed_long, pick_managed_longs, remembered_positions, Account, Bar, EngineState,
-    MarketSnapshot, Position, Side,
+    last_closed_bar, overlay_long_stop, pick_managed_long, pick_managed_longs, remembered_positions, Account,
+    Bar, EngineState, MarketSnapshot, Position, Side,
 };
 use crate::profit::EquityPin;
 use crate::ranking::{iter_liquid_majors, pick_chart_ticker, pick_strategy1_book, rank_most_rising};
+use crate::sessions::unix_now;
 use crate::trend::{CHART_INTERVAL, CHART_LIMIT};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -29,7 +30,32 @@ pub fn make_client(cfg: &Config) -> BinanceFutures {
     BinanceFutures::from_config(cfg)
 }
 
+/// Fill missing SL/TP from the journal so a restarted TUI still knows 1R.
+pub fn merge_overlay_with_journal(mut overlay: Vec<Position>, journal: Vec<Position>) -> Vec<Position> {
+    for j in journal {
+        if j.side != Side::Long || j.qty <= Decimal::ZERO {
+            continue;
+        }
+        if let Some(p) = overlay
+            .iter_mut()
+            .find(|p| p.symbol.eq_ignore_ascii_case(&j.symbol))
+        {
+            p.stop_loss = overlay_long_stop(p.side, p.stop_loss, j.stop_loss);
+            if p.take_profit.is_none() {
+                p.take_profit = j.take_profit;
+            }
+        } else {
+            overlay.push(j);
+        }
+    }
+    overlay
+}
 
+
+
+pub fn apply_tradfi_skip(state: &mut EngineState, extra: &[String]) {
+    merge_skip(state, extra);
+}
 
 fn merge_skip(state: &mut EngineState, extra: &[String]) {
     let mut have: std::collections::HashSet<String> =
@@ -71,6 +97,34 @@ fn held_book<'a>(
     (None, None, state_position.cloned())
 }
 
+/// positionRisk 502 must not look like a flat book — that double-buys the still-open long.
+fn restore_prior_book(
+    prior: Option<&MarketSnapshot>,
+    held_positions: Option<&[Position]>,
+    held_position: Option<Position>,
+    live_book: &mut bool,
+    open_positions: &mut Vec<Position>,
+    position: &mut Option<Position>,
+) {
+    if let Some(held) = held_positions {
+        if open_positions.is_empty() {
+            *open_positions = held.to_vec();
+            *position = held_position;
+        }
+    }
+    let Some(prior) = prior else {
+        return;
+    };
+    if !prior.live_book {
+        return;
+    }
+    *live_book = true;
+    if open_positions.is_empty() {
+        *open_positions = prior.open_positions.clone();
+        *position = prior.position.clone();
+    }
+}
+
 fn closed_klines(
     client: &mut dyn SnapshotClient,
     symbol: &str,
@@ -84,9 +138,11 @@ fn closed_klines(
     Ok(raw)
 }
 
-fn chart_spec(strategy_id: i32) -> (&'static str, usize) {
+fn chart_spec(strategy_id: i32, s4: crate::config::TradeInterval) -> (&'static str, usize) {
     if strategy_id == 3 {
         (CHART_INTERVAL, CHART_LIMIT)
+    } else if strategy_id == 4 {
+        (s4.as_binance(), s4.chart_limit())
     } else {
         ("5m", 121)
     }
@@ -100,22 +156,37 @@ fn collect_s4_history(
     chart_bars: &[Bar],
     remembered: &[Position],
     n: i32,
-) -> (HashMap<String, Bar>, HashMap<String, Vec<Bar>>) {
+    scan_due: bool,
+    interval: crate::config::TradeInterval,
+) -> (
+    HashMap<String, Bar>,
+    HashMap<String, Vec<Bar>>,
+    HashMap<String, Vec<Bar>>,
+) {
     let mut last_bars = HashMap::new();
     let mut universe = HashMap::new();
+    let mut htf_bars = HashMap::new();
     if !chart_symbol.is_empty() && !chart_bars.is_empty() {
         universe.insert(chart_symbol.to_string(), chart_bars.to_vec());
         if let Some(closed) = chart_bars.last() {
             last_bars.insert(chart_symbol.to_string(), closed.clone());
         }
     }
-    let book = crate::continuation::pick_strategy4_book(
-        tickers,
-        (n.max(1) as usize) + 4,
-        &state.skip_symbols,
-        None,
-    );
-    let mut want: Vec<String> = book.into_iter().map(|t| t.symbol).collect();
+    let mut s4 = crate::continuation::ContinuationParams::default().with_interval(interval);
+    s4.max_positions = n.max(1);
+    let mut want: Vec<String> = if scan_due {
+        crate::continuation::pick_strategy4_book(
+            tickers,
+            s4.liquid_n.max(1),
+            &state.skip_symbols,
+            Some(&s4),
+        )
+        .into_iter()
+        .map(|t| t.symbol)
+        .collect()
+    } else {
+        Vec::new()
+    };
     for pos in remembered {
         if pos.qty > Decimal::ZERO
             && !want
@@ -125,11 +196,25 @@ fn collect_s4_history(
             want.push(pos.symbol.clone());
         }
     }
+    let mut htf_want = want.clone();
+    if !chart_symbol.is_empty()
+        && !htf_want
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(chart_symbol))
+    {
+        htf_want.push(chart_symbol.to_string());
+    }
     for symbol in want {
         if universe.contains_key(&symbol) {
             continue;
         }
-        match closed_klines(client, &symbol, "5m", 24) {
+        let limit = if remembered.iter().any(|p| p.symbol.eq_ignore_ascii_case(&symbol)) && !scan_due
+        {
+            6
+        } else {
+            interval.fetch_limit()
+        };
+        match closed_klines(client, &symbol, interval.as_binance(), limit) {
             Ok(extra) if !extra.is_empty() => {
                 if let Some(closed) = extra.last() {
                     last_bars.insert(symbol.clone(), closed.clone());
@@ -140,7 +225,15 @@ fn collect_s4_history(
             Err(_) => {}
         }
     }
-    (last_bars, universe)
+    for symbol in htf_want {
+        match closed_klines(client, &symbol, "4h", 50) {
+            Ok(extra) if !extra.is_empty() => {
+                htf_bars.insert(symbol, extra);
+            }
+            _ => {}
+        }
+    }
+    (last_bars, universe, htf_bars)
 }
 
 fn collect_last_bars(
@@ -158,11 +251,13 @@ fn collect_last_bars(
         }
     }
     if state.strategy_id == 4 {
+        let mut s4 = crate::continuation::ContinuationParams::default();
+        s4.max_positions = n.max(1);
         let book = crate::continuation::pick_strategy4_book(
             tickers,
-            n.max(1) as usize,
+            s4.liquid_n.max(1),
             &state.skip_symbols,
-            None,
+            Some(&s4),
         );
         for ticker in book {
             if out.contains_key(&ticker.symbol) {
@@ -228,6 +323,7 @@ pub fn fetch_snapshot(
     let mut bars: Vec<Bar> = Vec::new();
     let mut last_bars: HashMap<String, Bar> = HashMap::new();
     let mut universe_bars: HashMap<String, Vec<Bar>> = HashMap::new();
+    let mut htf_bars: HashMap<String, Vec<Bar>> = HashMap::new();
     let (held_account, held_positions, held_position) =
         held_book(prior, fallback_account, fallback_positions, state.position.as_ref());
     let mut account = empty_account(Some(Decimal::ZERO));
@@ -242,6 +338,14 @@ pub fn fetch_snapshot(
         Ok(t) => tickers = t,
         Err(exc) => {
             error = Some(describe_exchange_error(&exc.0));
+            if let Some(prior) = prior {
+                tickers = prior.tickers.clone();
+                bars = prior.bars.clone();
+                last_bars = prior.last_bars.clone();
+                universe_bars = prior.universe_bars.clone();
+                htf_bars = prior.htf_bars.clone();
+                chart_symbol = prior.chart_symbol.clone();
+            }
             if let Some(held) = held_account {
                 account = held;
                 account_ok = true;
@@ -262,6 +366,7 @@ pub fn fetch_snapshot(
                 account_fresh,
                 last_bars,
                 universe_bars,
+                htf_bars,
             };
         }
     }
@@ -284,11 +389,14 @@ pub fn fetch_snapshot(
                 .into_iter()
                 .next()
         } else if state.strategy_id == 4 {
+            let mut s4 = crate::continuation::ContinuationParams::default()
+                .with_interval(cfg.s4_interval);
+            s4.max_positions = cfg.s4_max_positions;
             crate::continuation::pick_strategy4_book(
                 &tickers,
-                cfg.max_positions.max(1) as usize,
+                s4.liquid_n.max(1),
                 skip,
-                None,
+                Some(&s4),
             )
             .into_iter()
             .next()
@@ -323,7 +431,11 @@ pub fn fetch_snapshot(
             Ok(raw) => match parse_positions(&raw) {
                 Ok(positions) => {
                     live_book = true;
-                    let managed = pick_managed_longs(&positions, &remembered);
+                    let sl_overlay = merge_overlay_with_journal(
+                        remembered.clone(),
+                        crate::journal::unmatched_open_positions(),
+                    );
+                    let managed = pick_managed_longs(&positions, &sl_overlay);
                     let by_sym: HashMap<&str, &Position> =
                         managed.iter().map(|p| (p.symbol.as_str(), p)).collect();
                     open_positions = positions
@@ -348,25 +460,33 @@ pub fn fetch_snapshot(
                     if error.is_none() {
                         error = Some(describe_exchange_error(&exc.0));
                     }
-                    if let Some(held) = &held_positions {
-                        open_positions = held.clone();
-                        position = held_position.clone();
-                    }
+                    restore_prior_book(
+                        prior,
+                        held_positions.as_deref(),
+                        held_position.clone(),
+                        &mut live_book,
+                        &mut open_positions,
+                        &mut position,
+                    );
                 }
             },
             Err(exc) => {
                 if error.is_none() {
                     error = Some(describe_exchange_error(&exc.0));
                 }
-                if let Some(held) = &held_positions {
-                    open_positions = held.clone();
-                    position = held_position.clone();
-                }
+                restore_prior_book(
+                    prior,
+                    held_positions.as_deref(),
+                    held_position.clone(),
+                    &mut live_book,
+                    &mut open_positions,
+                    &mut position,
+                );
             }
         }
     }
     if !chart_symbol.is_empty() {
-        let (interval, limit) = chart_spec(state.strategy_id);
+        let (interval, limit) = chart_spec(state.strategy_id, cfg.s4_interval);
         match closed_klines(client, &chart_symbol, interval, limit) {
             Ok(b) => bars = b,
             Err(exc) => {
@@ -377,7 +497,7 @@ pub fn fetch_snapshot(
         }
     }
     if matches!(state.strategy_id, 2 | 3) && remembered.is_empty() {
-        let (interval, limit) = chart_spec(state.strategy_id);
+        let (interval, limit) = chart_spec(state.strategy_id, cfg.s4_interval);
         let mut want: Vec<String> = iter_liquid_majors(&tickers, skip)
             .into_iter()
             .map(|t| t.symbol)
@@ -404,17 +524,22 @@ pub fn fetch_snapshot(
         }
     }
     if state.strategy_id == 4 {
-        let (lb, ub) = collect_s4_history(
+        let now = unix_now();
+        let scan_due = state.last_scan_ts <= 0.0 || (now - state.last_scan_ts) >= 60.0;
+        let (lb, ub, htf) = collect_s4_history(
             client,
             state,
             &tickers,
             &chart_symbol,
             &bars,
             &remembered,
-            cfg.max_positions,
+            cfg.s4_max_positions,
+            scan_due,
+            cfg.s4_interval,
         );
         last_bars = lb;
         universe_bars.extend(ub);
+        htf_bars = htf;
     } else {
         last_bars = collect_last_bars(client, state, &tickers, &chart_symbol, &bars, cfg.max_positions);
     }
@@ -433,6 +558,7 @@ pub fn fetch_snapshot(
         account_fresh,
         last_bars,
         universe_bars,
+        htf_bars,
     }
 }
 

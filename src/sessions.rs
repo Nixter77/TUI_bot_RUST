@@ -66,6 +66,13 @@ pub fn format_windows(windows: &[HourWindow]) -> String {
     format!("{} UTC", bits.join(", "))
 }
 
+pub fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 pub fn make_utc_ts(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> f64 {
     Utc.with_ymd_and_hms(year, month, day, hour, min, sec)
         .single()

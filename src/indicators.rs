@@ -32,6 +32,42 @@ pub fn last_ema(values: &[Decimal], period: usize) -> Option<Decimal> {
     ema_series(values, period).last().copied().flatten()
 }
 
+/// Pivot swing lows (`wing` bars on each side). Chronological.
+pub fn swing_lows(bars: &[Bar], wing: usize) -> Vec<(usize, Decimal)> {
+    let wing = wing.max(1);
+    let n = bars.len();
+    let mut out = Vec::new();
+    if n < wing * 2 + 1 {
+        return out;
+    }
+    for i in wing..n - wing {
+        let lo = bars[i].low;
+        if lo <= Decimal::ZERO {
+            continue;
+        }
+        let mut is_low = true;
+        for k in 1..=wing {
+            if bars[i - k].low <= lo || bars[i + k].low <= lo {
+                is_low = false;
+                break;
+            }
+        }
+        if is_low {
+            out.push((i, lo));
+        }
+    }
+    out
+}
+
+/// Last two swing lows (older, newer). None if fewer than two pivots.
+pub fn last_two_swing_lows(bars: &[Bar]) -> Option<(Decimal, Decimal)> {
+    let lows = swing_lows(bars, 1);
+    if lows.len() < 2 {
+        return None;
+    }
+    Some((lows[lows.len() - 2].1, lows[lows.len() - 1].1))
+}
+
 pub fn true_range(bar: &Bar, prev_close: Decimal) -> Decimal {
     let high_low = bar.high - bar.low;
     let high_close = (bar.high - prev_close).abs();

@@ -14,6 +14,8 @@ struct FakeFlat {
     protect_cancels: Vec<String>,
     closes: Vec<(String, String, Decimal)>,
     position_raw: Value,
+    risk_reads: u32,
+    fail_on_read: Option<u32>,
 }
 
 impl FakeFlat {
@@ -23,6 +25,8 @@ impl FakeFlat {
             protect_cancels: Vec::new(),
             closes: Vec::new(),
             position_raw: raw,
+            risk_reads: 0,
+            fail_on_read: None,
         }
     }
 }
@@ -43,6 +47,10 @@ impl FlattenClient for FakeFlat {
         Ok(())
     }
     fn position_risk(&mut self) -> Result<Value, ExchangeError> {
+        self.risk_reads += 1;
+        if self.fail_on_read == Some(self.risk_reads) {
+            return Err(ExchangeError("HTTP 502 /fapi/v2/positionRisk: gateway".into()));
+        }
         Ok(self.position_raw.clone())
     }
 }
@@ -163,6 +171,22 @@ fn flatten_open_book_reports_leftover() {
     assert_eq!(result.closed, vec!["SHORT ETHUSDT"]);
     assert!(result.errors.iter().any(|e| e.contains("BTCUSDT")));
     assert!(result.errors.iter().any(|e| e.contains("ещё открыты")));
+}
+
+#[test]
+fn flatten_open_book_confirm_read_failure_is_error() {
+    let raw = json!([
+        {"symbol": "ETHUSDT", "positionAmt": "-0.071", "entryPrice": "1", "unRealizedProfit": "0"},
+    ]);
+    let mut client = FakeFlat::new(&[], raw);
+    client.fail_on_read = Some(2);
+    let result = flatten_open_book(&mut client);
+    assert_eq!(result.closed, vec!["SHORT ETHUSDT"]);
+    assert!(
+        result.errors.iter().any(|e| e.contains("подтвердить flatten")),
+        "{:?}",
+        result.errors
+    );
 }
 
 #[test]

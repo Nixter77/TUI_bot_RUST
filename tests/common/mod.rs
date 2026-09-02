@@ -162,17 +162,9 @@ pub fn majors() -> Vec<Ticker> {
     ]
 }
 
-/// 5m pullback-then-resume around `mark`. Last bar is the green signal.
-pub fn pullback_5m_at(mark: f64) -> Vec<Bar> {
+fn bars_from_fracs(mark: f64, rows: &[(f64, f64, f64, f64)]) -> Vec<Bar> {
     let t0 = 1_700_000_000_000i64;
     let dt = 300_000i64;
-    let rows = [
-        (0.990, 0.998, 0.988, 0.996),
-        (0.996, 1.002, 0.994, 1.000),
-        (1.000, 1.006, 0.998, 1.004),
-        (1.004, 1.005, 0.995, 0.997),
-        (0.997, 1.010, 0.996, 1.006),
-    ];
     rows.iter()
         .enumerate()
         .map(|(i, (o, h, l, c))| {
@@ -189,8 +181,87 @@ pub fn pullback_5m_at(mark: f64) -> Vec<Bar> {
         .collect()
 }
 
+/// Grind up, two higher swing lows, then a 5m pullback-resume. Last bar is the green signal.
+/// Long enough for EMA20.
+pub fn pullback_5m_at(mark: f64) -> Vec<Bar> {
+    let mut rows: Vec<(f64, f64, f64, f64)> = (0..10)
+        .map(|i| {
+            let o = 0.900 + i as f64 * 0.006;
+            (o, o + 0.008, o - 0.001, o + 0.005)
+        })
+        .collect();
+    rows.extend_from_slice(&[
+        (0.960, 0.962, 0.954, 0.955),
+        (0.955, 0.956, 0.946, 0.948),
+        (0.948, 0.950, 0.938, 0.941),
+        (0.941, 0.952, 0.940, 0.950),
+        (0.950, 0.962, 0.948, 0.960),
+    ]);
+    rows.extend((0..6).map(|i| {
+        let o = 0.960 + i as f64 * 0.006;
+        (o, o + 0.008, o - 0.001, o + 0.005)
+    }));
+    rows.extend_from_slice(&[
+        (0.990, 0.998, 0.988, 0.996),
+        (0.996, 1.002, 0.986, 0.990),
+        (0.990, 0.994, 0.978, 0.982),
+        (0.982, 1.005, 0.980, 0.997),
+        (0.997, 1.010, 0.996, 1.006),
+    ]);
+    bars_from_fracs(mark, &rows)
+}
+
+/// Multi-hour grind down, then a green 5m bounce — must not be bought as continuation.
+pub fn downtrend_then_bounce_5m_at(mark: f64) -> Vec<Bar> {
+    let mut rows: Vec<(f64, f64, f64, f64)> = (0..22)
+        .map(|i| {
+            let o = 1.080 - i as f64 * 0.004;
+            (o, o + 0.003, o - 0.005, o - 0.003)
+        })
+        .collect();
+    rows.push((0.990, 1.010, 0.988, 1.006));
+    bars_from_fracs(mark, &rows)
+}
+
 pub fn pullback_last_at(mark: f64) -> Bar {
     pullback_5m_at(mark).pop().expect("pullback bars")
+}
+
+/// ~25 closed 4h bars drifting up; last close is above EMA20.
+pub fn htf_up_4h_at(mark: f64) -> Vec<Bar> {
+    htf_drift_4h_at(mark, true)
+}
+
+/// ~25 closed 4h bars drifting down; last close is below EMA20.
+pub fn htf_down_4h_at(mark: f64) -> Vec<Bar> {
+    htf_drift_4h_at(mark, false)
+}
+
+fn htf_drift_4h_at(mark: f64, up: bool) -> Vec<Bar> {
+    let t0 = 1_700_000_000_000i64;
+    let dt = 4 * 3_600_000i64;
+    (0..25)
+        .map(|i| {
+            let frac = if up {
+                0.88 + i as f64 * 0.005
+            } else {
+                1.12 - i as f64 * 0.005
+            };
+            let close = mark * frac;
+            let open = if up { close * 0.998 } else { close * 1.002 };
+            let high = close.max(open) * 1.001;
+            let low = close.min(open) * 0.999;
+            let fmt = |x: f64| Decimal::from_str_exact(&format!("{x:.8}")).unwrap();
+            Bar {
+                open_time: t0 + i as i64 * dt,
+                open: fmt(open),
+                high: fmt(high),
+                low: fmt(low),
+                close: fmt(close),
+                volume: d("20"),
+            }
+        })
+        .collect()
 }
 
 pub fn london_ts() -> f64 {

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use tui_bot::config::{load_config, load_dotenv_file, ConfigError, STRATEGY1_POLL_SECONDS, MAINNET_BASE};
+use tui_bot::config::{load_config, load_dotenv_file, ConfigError, TradeInterval, STRATEGY1_POLL_SECONDS, MAINNET_BASE};
 
 #[test]
 fn poll_allowed_values() {
@@ -34,6 +34,35 @@ fn refuses_mainnet_without_override() {
     env.insert("BINANCE_ALLOW_MAINNET".into(), "1".into());
     let cfg = load_config(false, None, Some(&env)).unwrap();
     assert!(cfg.base_url.starts_with(MAINNET_BASE));
+}
+
+#[test]
+fn refuses_non_allowlisted_https_host() {
+    let mut env = HashMap::new();
+    env.insert("BINANCE_FAPI_BASE".into(), "https://evil.example.com".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+}
+
+#[test]
+fn allows_demo_fapi_host() {
+    let mut env = HashMap::new();
+    env.insert(
+        "BINANCE_FAPI_BASE".into(),
+        "https://demo-fapi.binance.com".into(),
+    );
+    let cfg = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(cfg.base_url, "https://demo-fapi.binance.com");
+}
+
+#[test]
+fn credentials_debug_redacts_secret() {
+    let mut env = HashMap::new();
+    env.insert("BINANCE_API_KEY".into(), "A".repeat(32));
+    env.insert("BINANCE_API_SECRET".into(), "super-secret-value-not-logged".into());
+    let cfg = load_config(true, None, Some(&env)).unwrap();
+    let dumped = format!("{:?}", cfg.credentials.as_ref().unwrap());
+    assert!(!dumped.contains("super-secret-value-not-logged"), "{dumped}");
+    assert!(dumped.contains("[redacted]"), "{dumped}");
 }
 
 #[test]
@@ -75,6 +104,7 @@ fn entry_hours_default_and_always_enter() {
     assert!(!cfg.always_enter);
     assert_eq!(cfg.s4_entry_windows, DEFAULT_ENTRY_WINDOWS.to_vec());
     assert!(!cfg.s4_always_enter);
+    assert_eq!(cfg.s4_interval, TradeInterval::Minute5);
 
     let mut env = HashMap::new();
     env.insert("STRATEGY1_ALWAYS_ENTER".into(), "1".into());
@@ -126,8 +156,11 @@ fn leverage_and_notional_options() {
     assert!(unset.leverage.is_none());
     assert!(!unset.notional_from_exchange);
     assert_eq!(unset.max_positions, 1);
+    assert_eq!(unset.s4_max_positions, 5);
     assert_eq!(unset.daily_loss_usdt, Decimal::from(20));
+    assert_eq!(unset.daily_loss_r, Decimal::from(3));
     assert_eq!(unset.order_notional, Decimal::from(20));
+    assert_eq!(unset.risk_pct, Decimal::new(25, 4));
 
     let mut env = HashMap::new();
     env.insert("FUTURES_LEVERAGE".into(), "5".into());
@@ -151,4 +184,88 @@ fn leverage_and_notional_options() {
     env.insert("STRATEGY1_MAX_POSITIONS".into(), "3".into());
     let three = load_config(false, None, Some(&env)).unwrap();
     assert_eq!(three.max_positions, 3);
+    assert_eq!(three.s4_max_positions, 5);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY4_MAX_POSITIONS".into(), "4".into());
+    let s4 = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(s4.s4_max_positions, 4);
+    assert_eq!(s4.max_positions, 1);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY4_MAX_POSITIONS".into(), "0".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
 }
+
+#[test]
+fn risk_pct_from_env_zero_is_off() {
+    use rust_decimal::Decimal;
+
+    let unset = load_config(false, None, Some(&HashMap::new())).unwrap();
+    assert_eq!(unset.risk_pct, Decimal::new(25, 4));
+
+    let mut env = HashMap::new();
+    env.insert("RISK_PCT".into(), "0".into());
+    let off = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(off.risk_pct, Decimal::ZERO);
+
+    let mut env = HashMap::new();
+    env.insert("RISK_PCT".into(), "0.01".into());
+    let custom = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(custom.risk_pct, Decimal::new(1, 2));
+
+    let mut env = HashMap::new();
+    env.insert("RISK_PCT".into(), "-0.1".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+}
+
+#[test]
+fn daily_loss_r_from_env() {
+    use rust_decimal::Decimal;
+
+    let unset = load_config(false, None, Some(&HashMap::new())).unwrap();
+    assert_eq!(unset.daily_loss_r, Decimal::from(3));
+
+    let mut env = HashMap::new();
+    env.insert("DAILY_LOSS_R".into(), "5".into());
+    let custom = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(custom.daily_loss_r, Decimal::from(5));
+
+    let mut env = HashMap::new();
+    env.insert("DAILY_LOSS_R".into(), "0".into());
+    let zero = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(zero.daily_loss_r, Decimal::ZERO);
+
+    let mut env = HashMap::new();
+    env.insert("DAILY_LOSS_R".into(), "-1".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+}
+
+#[test]
+fn strategy4_interval_from_env() {
+    assert_eq!(TradeInterval::parse("5m").unwrap(), TradeInterval::Minute5);
+    assert_eq!(TradeInterval::parse("15м").unwrap(), TradeInterval::Minute15);
+    assert_eq!(TradeInterval::parse("30").unwrap(), TradeInterval::Minute30);
+    assert_eq!(TradeInterval::parse("1h").unwrap(), TradeInterval::Hour1);
+    assert!(TradeInterval::parse("4h").is_err());
+    assert_eq!(TradeInterval::Minute5.min_stop_pct().to_string(), "0.015");
+    assert_eq!(TradeInterval::Minute15.min_stop_pct().to_string(), "0.020");
+    assert_eq!(TradeInterval::Minute15.max_stop_pct().to_string(), "0.050");
+    assert_eq!(TradeInterval::Hour1.min_stop_pct().to_string(), "0.030");
+    assert_eq!(TradeInterval::Minute15.geometry_ru(), "SL 2–5%  TP 2R");
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY4_INTERVAL".into(), "15m".into());
+    let cfg = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(cfg.s4_interval, TradeInterval::Minute15);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY4_INTERVAL".into(), "1ч".into());
+    let hour = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(hour.s4_interval, TradeInterval::Hour1);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY4_INTERVAL".into(), "4h".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+}
+

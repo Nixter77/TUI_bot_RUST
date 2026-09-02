@@ -86,7 +86,7 @@ fn format_packed(rows: &[SimResult]) -> String {
     let mut lines = vec![
         "home-economic backtest (Binance USDT-M public klines)".to_string(),
         "это НЕ TestNet: свечи без ордеров, fee=0.04% taker/side, notional=20 USDT.".into(),
-        "momentum/scalp = 5m; trend = Donchian 20/10; continuation = liquid 5m, sessions ON.".into(),
+        "momentum/scalp = 5m; trend = Donchian 20/10; continuation = STRATEGY4_INTERVAL (5m/15m/30m/1h).".into(),
         String::new(),
         "=== L4 shipped defaults ===".into(),
     ];

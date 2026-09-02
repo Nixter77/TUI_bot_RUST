@@ -4,6 +4,7 @@ use crate::money::{dec, fmt_fixed};
 use rust_decimal::Decimal;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub const DEFAULT_BASELINE_PATH: &str = ".state/starting_equity";
 
@@ -23,6 +24,7 @@ pub fn load_persisted_starting_equity(path: Option<&Path>) -> Option<Decimal> {
     let target = path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BASELINE_PATH));
+    let _io = lock_poison(&EQUITY_IO);
     let text = fs::read_to_string(&target).ok()?;
     let first = text.lines().next()?.trim();
     if first.is_empty() {
@@ -35,15 +37,30 @@ pub fn load_persisted_starting_equity(path: Option<&Path>) -> Option<Decimal> {
     Some(value)
 }
 
+static EQUITY_IO: Mutex<()> = Mutex::new(());
+
+fn lock_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn persist_starting_equity(value: Decimal, path: Option<&Path>) -> PathBuf {
     let target = path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BASELINE_PATH));
+    let _io = lock_poison(&EQUITY_IO);
     if let Some(parent) = target.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let text = format!("{}\n", fmt_fixed(value));
-    let _ = fs::write(&target, text);
+    let tmp = target.with_extension("tmp");
+    if fs::write(&tmp, &text).is_ok() {
+        if fs::rename(&tmp, &target).is_err() {
+            let _ = fs::write(&target, &text);
+            let _ = fs::remove_file(&tmp);
+        }
+    } else {
+        let _ = fs::write(&target, &text);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

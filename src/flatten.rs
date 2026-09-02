@@ -128,8 +128,17 @@ pub fn flatten_open_book(client: &mut dyn FlattenClient) -> FlattenResult {
         return result;
     }
     let still = match client.position_risk() {
-        Ok(raw) => parse_positions(&raw).unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Ok(raw) => match parse_positions(&raw) {
+            Ok(p) => p,
+            Err(exc) => {
+                result.errors.push(format!("не удалось подтвердить flatten: {exc}"));
+                return result;
+            }
+        },
+        Err(exc) => {
+            result.errors.push(format!("не удалось подтвердить flatten: {exc}"));
+            return result;
+        }
     };
     if !still.is_empty() {
         let leftover = still

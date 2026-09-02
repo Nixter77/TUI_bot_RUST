@@ -11,9 +11,11 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum SignError {
     #[error("empty signing secret")]
     EmptySecret,
+    #[error("HMAC key rejected")]
+    InvalidKey,
 }
 
-fn form_encode(s: &str) -> String {
+pub fn form_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
@@ -39,7 +41,7 @@ pub fn sign_query(secret: &str, query_string: &str) -> Result<String, SignError>
     if secret.is_empty() {
         return Err(SignError::EmptySecret);
     }
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key length");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SignError::InvalidKey)?;
     mac.update(query_string.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }

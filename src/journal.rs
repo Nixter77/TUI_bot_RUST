@@ -1,8 +1,10 @@
 //! Append-only trade journal. JSONL under .state/; never raises into the TUI.
 
-use crate::errors::COOLDOWN_SEC;
-use crate::models::EngineState;
-use crate::money::{dec, fmt_fixed};
+use crate::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC};
+use crate::models::{EngineState, Position};
+use crate::money::{dec, fmt_fixed, long_pnl as money_long_pnl, taker_fee as money_taker_fee};
+
+pub use crate::money::{long_pnl, round_trip_taker_pct, taker_fee};
 use crate::sessions::{pause_until_after_loss, HourWindow, DEFAULT_ENTRY_WINDOWS};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -13,13 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const DEFAULT_JOURNAL_PATH: &str = ".state/trades.jsonl";
-pub fn taker_fee() -> Decimal {
-    Decimal::new(4, 4) // 0.0004 Binance USDT-M taker, one side
-}
-
-pub fn round_trip_taker_pct() -> Decimal {
-    taker_fee() + taker_fee()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TradeEvent {
@@ -55,9 +50,8 @@ pub struct TradeEvent {
     pub code: Option<String>,
 }
 
-pub fn long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal, fee_rate: Decimal) -> (Decimal, Decimal) {
-    let fee = (entry + exit_price) * qty * fee_rate;
-    ((exit_price - entry) * qty - fee, fee)
+fn journal_long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal) -> (Decimal, Decimal) {
+    money_long_pnl(entry, exit_price, qty, money_taker_fee())
 }
 
 /// TP fill or price above entry. Equal-to-entry / missing mark = not a win (fail-closed).
@@ -84,18 +78,44 @@ impl TradeJournal {
     }
 
     pub fn append(&self, event: &TradeEvent) {
-        let Ok(json) = serde_json::to_string(event) else {
-            return;
+        let json = match serde_json::to_string(event) {
+            Ok(j) => j,
+            Err(e) => {
+                set_last_error(format!("journal serialize: {e}"));
+                return;
+            }
         };
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
-            let _ = writeln!(f, "{json}");
+        let io_err = {
+            let _io = lock_poison(&JOURNAL_IO);
+            if let Some(parent) = self.path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    Some(format!("journal mkdir: {e}"))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            .or_else(|| {
+                match OpenOptions::new().create(true).append(true).open(&self.path) {
+                    Ok(mut f) => {
+                        let line = format!("{json}\n");
+                        f.write_all(line.as_bytes())
+                            .and_then(|_| f.flush())
+                            .err()
+                            .map(|e| format!("journal write: {e}"))
+                    }
+                    Err(e) => Some(format!("journal open: {e}")),
+                }
+            })
+        };
+        if let Some(e) = io_err {
+            set_last_error(e);
         }
     }
 
     pub fn read_events(&self) -> Vec<TradeEvent> {
+        let _io = lock_poison(&JOURNAL_IO);
         let Ok(text) = fs::read_to_string(&self.path) else {
             return Vec::new();
         };
@@ -122,11 +142,24 @@ pub fn fmt_dec(value: Decimal) -> String {
 }
 
 static ACTIVE: Mutex<Option<PathBuf>> = Mutex::new(None);
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// Serializes in-process journal read/write so JSONL lines cannot tear.
+static JOURNAL_IO: Mutex<()> = Mutex::new(());
+
+fn lock_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub fn set_active(path: Option<PathBuf>) {
-    if let Ok(mut guard) = ACTIVE.lock() {
-        *guard = path;
-    }
+    *lock_poison(&ACTIVE) = path;
+}
+
+fn set_last_error(msg: String) {
+    *lock_poison(&LAST_ERROR) = Some(msg);
+}
+
+pub fn take_last_error() -> Option<String> {
+    lock_poison(&LAST_ERROR).take()
 }
 
 fn iso_now() -> String {
@@ -134,7 +167,7 @@ fn iso_now() -> String {
 }
 
 fn with_active(f: impl FnOnce(&TradeJournal)) {
-    let path = ACTIVE.lock().ok().and_then(|g| g.clone());
+    let path = lock_poison(&ACTIVE).clone();
     if let Some(path) = path {
         f(&TradeJournal::new(Some(&path)));
     }
@@ -150,8 +183,10 @@ impl TradeJournal {
         exit_price: Decimal,
         reason: &str,
         live: bool,
+        stop_loss: Option<Decimal>,
+        take_profit: Option<Decimal>,
     ) {
-        let (pnl, fee) = long_pnl(entry, exit_price, qty, taker_fee());
+        let (pnl, fee) = journal_long_pnl(entry, exit_price, qty);
         self.append(&TradeEvent {
             ts: iso_now(),
             event: "close".into(),
@@ -162,8 +197,38 @@ impl TradeJournal {
             reason: reason.into(),
             pnl: Some(format!("{pnl}")),
             fee: Some(format!("{fee}")),
-            stop_loss: None,
-            take_profit: None,
+            stop_loss: stop_loss.map(|v| format!("{v}")),
+            take_profit: take_profit.map(|v| format!("{v}")),
+            live,
+            leverage: None,
+            notional: None,
+            code: None,
+        });
+    }
+
+    pub fn record_open(
+        &self,
+        strategy_id: i32,
+        symbol: &str,
+        qty: Decimal,
+        price: Decimal,
+        reason: &str,
+        live: bool,
+        stop_loss: Option<Decimal>,
+        take_profit: Option<Decimal>,
+    ) {
+        self.append(&TradeEvent {
+            ts: iso_now(),
+            event: "open".into(),
+            strategy_id,
+            symbol: symbol.into(),
+            qty: format!("{qty}"),
+            price: format!("{price}"),
+            reason: reason.into(),
+            pnl: None,
+            fee: None,
+            stop_loss: stop_loss.map(|v| format!("{v}")),
+            take_profit: take_profit.map(|v| format!("{v}")),
             live,
             leverage: None,
             notional: None,
@@ -203,12 +268,79 @@ pub fn record_close(
     exit_price: Decimal,
     reason: &str,
     live: bool,
+    stop_loss: Option<Decimal>,
+    take_profit: Option<Decimal>,
 ) {
-    with_active(|j| j.record_close(strategy_id, symbol, qty, entry, exit_price, reason, live));
+    with_active(|j| {
+        j.record_close(
+            strategy_id,
+            symbol,
+            qty,
+            entry,
+            exit_price,
+            reason,
+            live,
+            stop_loss,
+            take_profit,
+        )
+    });
+}
+
+pub fn record_open(
+    strategy_id: i32,
+    symbol: &str,
+    qty: Decimal,
+    price: Decimal,
+    reason: &str,
+    live: bool,
+    stop_loss: Option<Decimal>,
+    take_profit: Option<Decimal>,
+) {
+    with_active(|j| {
+        j.record_open(
+            strategy_id,
+            symbol,
+            qty,
+            price,
+            reason,
+            live,
+            stop_loss,
+            take_profit,
+        )
+    });
 }
 
 pub fn record_flatten(strategy_id: i32, closed: &[String], live: bool, reason: &str) {
     with_active(|j| j.record_flatten(strategy_id, closed, live, reason));
+}
+
+pub fn record_amend(
+    strategy_id: i32,
+    symbol: &str,
+    stop_loss: Decimal,
+    take_profit: Option<Decimal>,
+    live: bool,
+    reason: &str,
+) {
+    with_active(|j| {
+        j.append(&TradeEvent {
+            ts: iso_now(),
+            event: "amend".into(),
+            strategy_id,
+            symbol: symbol.into(),
+            qty: String::new(),
+            price: String::new(),
+            reason: reason.into(),
+            pnl: None,
+            fee: None,
+            stop_loss: Some(format!("{stop_loss}")),
+            take_profit: take_profit.map(|v| format!("{v}")),
+            live,
+            leverage: None,
+            notional: None,
+            code: None,
+        })
+    });
 }
 
 /// `SHORT BTCUSDT` / `LONG ETHUSDT` / `SUPERUSDT` → `SUPERUSDT`.
@@ -228,7 +360,24 @@ pub fn event_unix(ts: &str) -> Option<f64> {
         .map(|d| d.timestamp() as f64)
 }
 
-/// After a close/flatten, keep the name off the buy list for `pause_sec`.
+/// Pause for this symbol after a close. Losses sit out 12h so a loser
+/// skips the next UTC session window; wins keep the base pause.
+pub fn symbol_pause_sec(won: bool, pause_sec: f64) -> f64 {
+    if pause_sec <= 0.0 {
+        return 0.0;
+    }
+    if won {
+        pause_sec
+    } else {
+        pause_sec.max(LOSS_SYMBOL_COOLDOWN_SEC)
+    }
+}
+
+pub fn symbol_cooldown_until(now: f64, won: bool, pause_sec: f64) -> f64 {
+    now + symbol_pause_sec(won, pause_sec)
+}
+
+/// After a close/flatten, keep the name off the buy list.
 /// Restarts otherwise re-buy the same SL tape (SUPERUSDT three times in 15m).
 pub fn cooldowns_from_events(events: &[TradeEvent], now: f64, pause_sec: f64) -> HashMap<String, f64> {
     let mut out = HashMap::new();
@@ -242,7 +391,13 @@ pub fn cooldowns_from_events(events: &[TradeEvent], now: f64, pause_sec: f64) ->
         let Some(ts) = event_unix(&ev.ts) else {
             continue;
         };
-        let until = ts + pause_sec;
+        let won = parse_pnl(ev.pnl.as_deref()).is_some_and(|p| p > Decimal::ZERO);
+        let wait = if ev.event == "flatten" {
+            pause_sec
+        } else {
+            symbol_pause_sec(won, pause_sec)
+        };
+        let until = ts + wait;
         if until <= now {
             continue;
         }
@@ -288,6 +443,88 @@ pub fn desk_cooldown_from_events_windows(
     } else {
         0.0
     }
+}
+
+/// Last unmatched `open` per symbol (no later full close/flatten).
+/// A partial `close` (scale-out) keeps the remainder so a restart still
+/// overlays SL/TP onto the live long. Restarts otherwise paint SL=—.
+pub fn unmatched_open_positions_from(events: &[TradeEvent]) -> Vec<Position> {
+    let mut by_sym: HashMap<String, Position> = HashMap::new();
+    for ev in events {
+        let symbol = journal_symbol(&ev.symbol);
+        if symbol.is_empty() {
+            continue;
+        }
+        match ev.event.as_str() {
+            "open" => {
+                let qty = dec(&ev.qty).unwrap_or(Decimal::ZERO);
+                let entry = dec(&ev.price).unwrap_or(Decimal::ZERO);
+                if qty <= Decimal::ZERO || entry <= Decimal::ZERO {
+                    continue;
+                }
+                let sl = ev
+                    .stop_loss
+                    .as_deref()
+                    .and_then(|s| dec(s).ok())
+                    .filter(|v| *v > Decimal::ZERO);
+                let tp = ev
+                    .take_profit
+                    .as_deref()
+                    .and_then(|s| dec(s).ok())
+                    .filter(|v| *v > Decimal::ZERO);
+                let mut pos = Position::long(symbol, qty, entry, sl, tp);
+                pos.opened_bar_time = event_unix(&ev.ts).map(|t| (t * 1000.0) as i64);
+                by_sym.insert(pos.symbol.clone(), pos);
+            }
+            "amend" => {
+                let sl = ev
+                    .stop_loss
+                    .as_deref()
+                    .and_then(|s| dec(s).ok())
+                    .filter(|v| *v > Decimal::ZERO);
+                if let (Some(pos), Some(sl)) = (by_sym.get_mut(&symbol), sl) {
+                    pos.stop_loss = Some(sl);
+                    if let Some(tp) = ev
+                        .take_profit
+                        .as_deref()
+                        .and_then(|s| dec(s).ok())
+                        .filter(|v| *v > Decimal::ZERO)
+                    {
+                        pos.take_profit = Some(tp);
+                    }
+                }
+            }
+            "close" => {
+                // Scale-out records a partial close. Empty/zero/oversize qty is a
+                // full close (legacy lines and flatten-style exits).
+                let close_qty = dec(&ev.qty).unwrap_or(Decimal::ZERO);
+                let keep_partial = by_sym
+                    .get(&symbol)
+                    .is_some_and(|p| close_qty > Decimal::ZERO && close_qty < p.qty);
+                if keep_partial {
+                    if let Some(pos) = by_sym.get_mut(&symbol) {
+                        pos.qty -= close_qty;
+                    }
+                } else {
+                    by_sym.remove(&symbol);
+                }
+            }
+            "flatten" => {
+                by_sym.remove(&symbol);
+            }
+            _ => {}
+        }
+    }
+    by_sym.into_values().collect()
+}
+
+pub fn unmatched_open_positions() -> Vec<Position> {
+    let path = lock_poison(&ACTIVE).clone();
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let events = TradeJournal::new(Some(&path)).read_events();
+    unmatched_open_positions_from(&events)
 }
 
 pub fn seed_cooldowns(state: &mut EngineState, now: f64, pause_sec: f64) {

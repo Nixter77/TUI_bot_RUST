@@ -1,4 +1,4 @@
-//! Buy and sell chimes are distinct; play is silent unless enabled.
+//! Buy, win-close, and loss-close chimes are distinct; play is silent unless enabled.
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -11,7 +11,7 @@ use tui_bot::live::{apply_decision, LiveApplyResult};
 use tui_bot::models::{Decision, EngineState, MarketSnapshot, Position, Ticker};
 use tui_bot::signals::{
     chime_paths, emit_decision, emit_flatten, kind_for_decision, kind_for_flatten, play, set_enabled,
-    set_sink, signals_enabled, write_chime, TradeSignal, BUY_HZ, SELL_HZ,
+    set_sink, signals_enabled, write_chime, TradeSignal, BUY_HZ, SELL_LOSS_HZ, SELL_WIN_HZ,
 };
 
 fn d(s: &str) -> Decimal {
@@ -111,21 +111,30 @@ fn live_buy_only_after_fill() {
     reset();
     let enter = enter();
     assert_eq!(
-        kind_for_decision(&enter, &LiveApplyResult { filled: true, ..Default::default() }, true, false),
+        kind_for_decision(
+            &enter,
+            &LiveApplyResult {
+                filled: true,
+                ..Default::default()
+            },
+            true,
+            false,
+            None
+        ),
         Some(TradeSignal::Buy)
     );
     assert_eq!(
-        kind_for_decision(&enter, &LiveApplyResult::default(), true, false),
+        kind_for_decision(&enter, &LiveApplyResult::default(), true, false, None),
         None
     );
     assert_eq!(
-        kind_for_decision(&enter, &LiveApplyResult::default(), false, false),
+        kind_for_decision(&enter, &LiveApplyResult::default(), false, false, None),
         Some(TradeSignal::Buy)
     );
 }
 
 #[test]
-fn sell_on_exit_and_flatten_not_on_hold() {
+fn exit_take_profit_is_sell_win() {
     let _g = guard();
     reset();
     let exit_d = Decision::ExitPosition {
@@ -133,11 +142,41 @@ fn sell_on_exit_and_flatten_not_on_hold() {
         symbol: "BTCUSDT".into(),
     };
     assert_eq!(
-        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true),
-        Some(TradeSignal::Sell)
+        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true, Some(true)),
+        Some(TradeSignal::SellWin)
     );
     assert_eq!(
-        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, false),
+        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true, None),
+        Some(TradeSignal::SellWin)
+    );
+    let be = Decision::ExitPosition {
+        reason: "безубыток".into(),
+        symbol: "BTCUSDT".into(),
+    };
+    assert_eq!(
+        kind_for_decision(&be, &LiveApplyResult::default(), false, true, None),
+        Some(TradeSignal::SellWin)
+    );
+}
+
+#[test]
+fn exit_stop_is_sell_loss() {
+    let _g = guard();
+    reset();
+    let exit_d = Decision::ExitPosition {
+        reason: "momentum stop loss".into(),
+        symbol: "BTCUSDT".into(),
+    };
+    assert_eq!(
+        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true, Some(false)),
+        Some(TradeSignal::SellLoss)
+    );
+    assert_eq!(
+        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true, None),
+        Some(TradeSignal::SellLoss)
+    );
+    assert_eq!(
+        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, false, Some(false)),
         None
     );
     assert_eq!(
@@ -148,20 +187,13 @@ fn sell_on_exit_and_flatten_not_on_hold() {
                 ..Default::default()
             },
             true,
-            true
+            true,
+            Some(false)
         ),
         None
     );
     assert_eq!(
-        kind_for_flatten(&FlattenResult {
-            closed: vec!["LONG BTCUSDT".into()],
-            errors: vec![],
-        }),
-        Some(TradeSignal::Sell)
-    );
-    assert_eq!(kind_for_flatten(&FlattenResult::default()), None);
-    assert_eq!(
-        kind_for_decision(&Decision::hold("wait"), &LiveApplyResult::default(), false, false),
+        kind_for_decision(&Decision::hold("wait"), &LiveApplyResult::default(), false, false, None),
         None
     );
     assert_eq!(
@@ -173,30 +205,81 @@ fn sell_on_exit_and_flatten_not_on_hold() {
             },
             &LiveApplyResult::default(),
             true,
-            true
+            true,
+            None
         ),
         None
     );
-    assert_ne!(TradeSignal::Buy, TradeSignal::Sell);
-    assert!(BUY_HZ.0 > SELL_HZ.0);
-    assert!(BUY_HZ.1 > BUY_HZ.0);
-    assert!(SELL_HZ.1 < SELL_HZ.0);
+}
+
+#[test]
+fn flatten_unknown_is_sell_loss() {
+    let _g = guard();
+    reset();
+    let closed = FlattenResult {
+        closed: vec!["LONG BTCUSDT".into()],
+        errors: vec![],
+    };
+    assert_eq!(kind_for_flatten(&closed, None), Some(TradeSignal::SellLoss));
+    assert_eq!(kind_for_flatten(&closed, Some(false)), Some(TradeSignal::SellLoss));
+    assert_eq!(kind_for_flatten(&closed, Some(true)), Some(TradeSignal::SellWin));
+    assert_eq!(kind_for_flatten(&FlattenResult::default(), None), None);
 }
 
 #[test]
 fn chimes_are_different_wavs() {
     let _g = guard();
     reset();
+    assert!(BUY_HZ.1 > BUY_HZ.0);
+    assert!(SELL_WIN_HZ.0 < SELL_WIN_HZ.1 && SELL_WIN_HZ.1 < SELL_WIN_HZ.2);
+    assert!(SELL_LOSS_HZ.0 > SELL_LOSS_HZ.1 && SELL_LOSS_HZ.1 > SELL_LOSS_HZ.2);
+    assert!(SELL_WIN_HZ.0 > SELL_LOSS_HZ.0);
+    assert_ne!(TradeSignal::Buy, TradeSignal::SellWin);
+    assert_ne!(TradeSignal::SellWin, TradeSignal::SellLoss);
     let root = tempfile::tempdir().unwrap();
     let buy = write_chime(&root.path().join("buy.wav"), &[BUY_HZ.0, BUY_HZ.1], 22_050).unwrap();
-    let sell = write_chime(&root.path().join("sell.wav"), &[SELL_HZ.0, SELL_HZ.1], 22_050).unwrap();
+    let win = write_chime(
+        &root.path().join("sell_win.wav"),
+        &[SELL_WIN_HZ.0, SELL_WIN_HZ.1, SELL_WIN_HZ.2],
+        22_050,
+    )
+    .unwrap();
+    let loss = write_chime(
+        &root.path().join("sell_loss.wav"),
+        &[SELL_LOSS_HZ.0, SELL_LOSS_HZ.1, SELL_LOSS_HZ.2],
+        22_050,
+    )
+    .unwrap();
     let buy_bytes = std::fs::read(&buy).unwrap();
-    let sell_bytes = std::fs::read(&sell).unwrap();
-    assert_ne!(buy_bytes, sell_bytes);
+    let win_bytes = std::fs::read(&win).unwrap();
+    let loss_bytes = std::fs::read(&loss).unwrap();
+    assert_ne!(buy_bytes, win_bytes);
+    assert_ne!(win_bytes, loss_bytes);
+    assert_ne!(buy_bytes, loss_bytes);
     assert!(buy_bytes.starts_with(b"RIFF"));
+    assert!(win_bytes.starts_with(b"RIFF"));
+    assert!(loss_bytes.starts_with(b"RIFF"));
     assert!(buy_bytes.len() > 200);
-    let (p_buy, p_sell) = chime_paths().unwrap();
-    assert_ne!(std::fs::read(p_buy).unwrap(), std::fs::read(p_sell).unwrap());
+    let (p_buy, p_win, p_loss) = chime_paths().unwrap();
+    let cached_buy = std::fs::read(p_buy).unwrap();
+    let cached_win = std::fs::read(p_win).unwrap();
+    let cached_loss = std::fs::read(p_loss).unwrap();
+    assert_ne!(cached_buy, cached_win);
+    assert_ne!(cached_win, cached_loss);
+    assert_ne!(cached_buy, cached_loss);
+}
+
+#[test]
+fn chime_paths_is_safe_from_two_threads() {
+    let _g = guard();
+    reset();
+    let a = std::thread::spawn(|| chime_paths().unwrap());
+    let b = std::thread::spawn(|| chime_paths().unwrap());
+    let (a_buy, a_win, a_loss) = a.join().unwrap();
+    let (b_buy, b_win, b_loss) = b.join().unwrap();
+    assert_eq!(a_buy, b_buy);
+    assert_eq!(a_win, b_win);
+    assert_eq!(a_loss, b_loss);
 }
 
 #[test]
@@ -211,10 +294,11 @@ fn play_uses_sink_when_enabled_and_is_silent_by_default() {
     assert!(heard.lock().unwrap().is_empty());
     set_enabled(true);
     assert!(play(TradeSignal::Buy, None));
-    assert!(play(TradeSignal::Sell, None));
+    assert!(play(TradeSignal::SellWin, None));
+    assert!(play(TradeSignal::SellLoss, None));
     assert_eq!(
         *heard.lock().unwrap(),
-        vec![TradeSignal::Buy, TradeSignal::Sell]
+        vec![TradeSignal::Buy, TradeSignal::SellWin, TradeSignal::SellLoss]
     );
     reset();
 }
@@ -232,18 +316,35 @@ fn apply_decision_emits_buy_on_fill() {
     apply_decision(&cfg, &mut FakeClient, &mut state, &snap(None), &enter());
     assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Buy]);
     heard.lock().unwrap().clear();
-    let pos = Position::long("BTCUSDT", d("0.01"), d("1000"), Some(d("990")), Some(d("1020")));
+    let mut green = Position::long("BTCUSDT", d("0.01"), d("1000"), Some(d("990")), Some(d("1020")));
+    green.unrealized_pnl = d("5");
     apply_decision(
         &cfg,
         &mut FakeClient,
         &mut state,
-        &snap(Some(pos)),
+        &snap(Some(green)),
         &Decision::ExitPosition {
-            reason: "tp".into(),
+            reason: "momentum take profit".into(),
             symbol: "BTCUSDT".into(),
         },
     );
-    assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Sell]);
+    assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::SellWin]);
+    heard.lock().unwrap().clear();
+    let mut red = Position::long("ETHUSDT", d("0.01"), d("1000"), Some(d("990")), Some(d("1020")));
+    red.unrealized_pnl = d("-4");
+    let mut red_snap = snap(Some(red));
+    red_snap.tickers = vec![Ticker::new("ETHUSDT", d("990"), d("-1"), d("10"))];
+    apply_decision(
+        &cfg,
+        &mut FakeClient,
+        &mut state,
+        &red_snap,
+        &Decision::ExitPosition {
+            reason: "momentum stop loss".into(),
+            symbol: "ETHUSDT".into(),
+        },
+    );
+    assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::SellLoss]);
     reset();
 }
 
@@ -260,12 +361,16 @@ fn emit_helpers_respect_kind() {
         &LiveApplyResult::default(),
         false,
         false,
+        None,
     );
     assert!(heard.lock().unwrap().is_empty());
-    emit_flatten(&FlattenResult {
-        closed: vec!["SHORT ETHUSDT".into()],
-        errors: vec![],
-    });
-    assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Sell]);
+    emit_flatten(
+        &FlattenResult {
+            closed: vec!["SHORT ETHUSDT".into()],
+            errors: vec![],
+        },
+        None,
+    );
+    assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::SellLoss]);
     reset();
 }

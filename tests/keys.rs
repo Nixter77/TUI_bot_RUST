@@ -1,6 +1,7 @@
 //! Flatten arm/confirm and TUI key bindings (no TTY).
 
 use tui_bot::keys::{apply_flatten_key, handle_key, KeyAction};
+use tui_bot::tui::{snapshot_due, snapshot_stale, SNAPSHOT_STALE_SECS};
 
 #[test]
 fn keys_bind_strategy_refresh_quit() {
@@ -28,4 +29,19 @@ fn flatten_is_x_then_x_other_cancels() {
     let (a, c) = apply_flatten_key(true, 'z');
     assert!(!a && !c);
     let _ = (armed3, confirmed3);
+}
+
+#[test]
+fn snapshot_due_is_elapsed_time_not_key_silence() {
+    assert!(!snapshot_due(10.0, 10.0));
+    assert!(!snapshot_due(14.9, 10.0));
+    assert!(snapshot_due(15.0, 10.0));
+    assert!(snapshot_due(20.0, 10.0));
+}
+
+#[test]
+fn snapshot_stale_after_thirty_seconds() {
+    assert!(!snapshot_stale(10.0, 10.0));
+    assert!(!snapshot_stale(10.0 + SNAPSHOT_STALE_SECS - 0.1, 10.0));
+    assert!(snapshot_stale(10.0 + SNAPSHOT_STALE_SECS, 10.0));
 }

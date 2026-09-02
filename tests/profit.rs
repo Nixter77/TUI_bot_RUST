@@ -68,3 +68,26 @@ fn equity_pin_captures_once() {
     assert_eq!(env.capture(Decimal::ONE), Decimal::from(5000));
     assert!(!env.persist);
 }
+
+#[test]
+fn persist_and_load_serialize_on_same_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("starting_equity");
+    let w = path.clone();
+    let r = path.clone();
+    let writer = std::thread::spawn(move || {
+        for i in 0..40 {
+            persist_starting_equity(Decimal::from(1000 + i), Some(&w));
+        }
+    });
+    let reader = std::thread::spawn(move || {
+        for _ in 0..40 {
+            let _ = load_persisted_starting_equity(Some(&r));
+        }
+    });
+    writer.join().unwrap();
+    reader.join().unwrap();
+    let v = load_persisted_starting_equity(Some(&path)).unwrap();
+    assert!(v >= Decimal::from(1000));
+    assert!(v <= Decimal::from(1039));
+}

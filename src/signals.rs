@@ -1,4 +1,4 @@
-//! Distinct buy / sell chimes. Silent unless the TUI enables them.
+//! Distinct buy / win-close / loss-close chimes. Silent unless the TUI enables them.
 
 use crate::flatten::FlattenResult;
 use crate::live::LiveApplyResult;
@@ -6,23 +6,26 @@ use crate::models::Decision;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeSignal {
     Buy,
-    Sell,
+    SellWin,
+    SellLoss,
 }
 
-/// Rising pair (buy) vs falling pair (sell) — must stay audibly different.
+/// Rising pair (buy) vs three rising (win exit) vs three falling (loss exit).
 pub const BUY_HZ: (f64, f64) = (880.0, 1175.0);
-pub const SELL_HZ: (f64, f64) = (523.0, 349.0);
+pub const SELL_WIN_HZ: (f64, f64, f64) = (784.0, 988.0, 1318.5);
+pub const SELL_LOSS_HZ: (f64, f64, f64) = (392.0, 311.1, 246.9);
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static SINK: Mutex<Option<Arc<dyn Fn(TradeSignal) + Send + Sync>>> = Mutex::new(None);
-static WAVS: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
+static WAVS: Mutex<Option<(PathBuf, PathBuf, PathBuf)>> = Mutex::new(None);
+static PLAYER: Mutex<Option<Child>> = Mutex::new(None);
 
 fn lock_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -48,11 +51,41 @@ pub fn signals_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Take-profit / break-even wording — used when the caller did not pass `won`.
+pub fn reason_suggests_win(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    let normalized = lower.replace(['-', '_'], " ");
+    if normalized.contains("take profit")
+        || lower.contains("безубыток")
+        || lower.contains("частичная фиксация")
+    {
+        return true;
+    }
+    normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|tok| tok == "tp")
+}
+
+fn close_kind(won: Option<bool>, reason: &str) -> TradeSignal {
+    match won {
+        Some(true) => TradeSignal::SellWin,
+        Some(false) => TradeSignal::SellLoss,
+        None => {
+            if reason_suggests_win(reason) {
+                TradeSignal::SellWin
+            } else {
+                TradeSignal::SellLoss
+            }
+        }
+    }
+}
+
 pub fn kind_for_decision(
     decision: &Decision,
     result: &LiveApplyResult,
     live: bool,
     has_position: bool,
+    won: Option<bool>,
 ) -> Option<TradeSignal> {
     match decision {
         Decision::Hold { .. } => None,
@@ -65,24 +98,35 @@ pub fn kind_for_decision(
                 None
             }
         }
-        Decision::ExitPosition { .. } => {
+        Decision::ExitPosition { reason, .. } => {
             if result.error.is_some() {
                 None
             } else if live && !has_position {
                 None
             } else {
-                Some(TradeSignal::Sell)
+                Some(close_kind(won, reason))
             }
         }
         Decision::AmendStop { .. } => None,
+        Decision::ReduceLong { reason, .. } => {
+            if result.error.is_some() {
+                None
+            } else if live && !result.filled {
+                None
+            } else {
+                Some(close_kind(won.or(Some(true)), reason))
+            }
+        }
     }
 }
 
-pub fn kind_for_flatten(result: &FlattenResult) -> Option<TradeSignal> {
+pub fn kind_for_flatten(result: &FlattenResult, won: Option<bool>) -> Option<TradeSignal> {
     if result.closed.is_empty() {
         None
+    } else if won == Some(true) {
+        Some(TradeSignal::SellWin)
     } else {
-        Some(TradeSignal::Sell)
+        Some(TradeSignal::SellLoss)
     }
 }
 
@@ -140,18 +184,25 @@ fn write_wav(path: &Path, pcm: &[i16], sample_rate: u32) -> std::io::Result<()> 
     Ok(())
 }
 
-pub fn chime_paths() -> std::io::Result<(PathBuf, PathBuf)> {
-    {
-        let guard = lock_poison(&WAVS);
-        if let Some(pair) = guard.as_ref() {
-            return Ok(pair.clone());
-        }
+pub fn chime_paths() -> std::io::Result<(PathBuf, PathBuf, PathBuf)> {
+    let mut guard = lock_poison(&WAVS);
+    if let Some(triple) = guard.as_ref() {
+        return Ok(triple.clone());
     }
     let root = std::env::temp_dir().join("home-economic-signals");
     let buy = write_chime(&root.join("buy.wav"), &[BUY_HZ.0, BUY_HZ.1], 22_050)?;
-    let sell = write_chime(&root.join("sell.wav"), &[SELL_HZ.0, SELL_HZ.1], 22_050)?;
-    *lock_poison(&WAVS) = Some((buy.clone(), sell.clone()));
-    Ok((buy, sell))
+    let sell_win = write_chime(
+        &root.join("sell_win.wav"),
+        &[SELL_WIN_HZ.0, SELL_WIN_HZ.1, SELL_WIN_HZ.2],
+        22_050,
+    )?;
+    let sell_loss = write_chime(
+        &root.join("sell_loss.wav"),
+        &[SELL_LOSS_HZ.0, SELL_LOSS_HZ.1, SELL_LOSS_HZ.2],
+        22_050,
+    )?;
+    *guard = Some((buy.clone(), sell_win.clone(), sell_loss.clone()));
+    Ok((buy, sell_win, sell_loss))
 }
 
 fn player_cmd(path: &Path) -> Option<Command> {
@@ -195,31 +246,66 @@ pub fn play(kind: TradeSignal, enabled: Option<bool>) -> bool {
         return true;
     }
     let path = match chime_paths() {
-        Ok((buy, sell)) => match kind {
+        Ok((buy, sell_win, sell_loss)) => match kind {
             TradeSignal::Buy => buy,
-            TradeSignal::Sell => sell,
+            TradeSignal::SellWin => sell_win,
+            TradeSignal::SellLoss => sell_loss,
         },
         Err(_) => {
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
             return true;
         }
     };
     match player_cmd(&path) {
         None => {
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
             true
         }
-        Some(mut cmd) => {
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                cmd.process_group(0);
+        Some(mut cmd) => spawn_player(&mut cmd),
+    }
+}
+
+fn spawn_player(cmd: &mut Command) -> bool {
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut slot = lock_poison(&PLAYER);
+    if let Some(child) = slot.as_mut() {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                *slot = None;
             }
-            match cmd.spawn() {
-                Ok(_) => true,
-                Err(_) => false,
+            Ok(None) => {
+                // Previous chime still running — do not stack players or leak zombies.
+                return true;
+            }
+            Err(_) => {
+                *slot = None;
+            }
+        }
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            *slot = Some(child);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reap or stop the player. Call when the TUI exits.
+pub fn shutdown() {
+    let mut slot = lock_poison(&PLAYER);
+    if let Some(mut child) = slot.take() {
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
             }
         }
     }
@@ -230,16 +316,17 @@ pub fn emit_decision(
     result: &LiveApplyResult,
     live: bool,
     has_position: bool,
+    won: Option<bool>,
 ) -> Option<TradeSignal> {
-    let kind = kind_for_decision(decision, result, live, has_position);
+    let kind = kind_for_decision(decision, result, live, has_position, won);
     if let Some(k) = kind {
         play(k, None);
     }
     kind
 }
 
-pub fn emit_flatten(result: &FlattenResult) -> Option<TradeSignal> {
-    let kind = kind_for_flatten(result);
+pub fn emit_flatten(result: &FlattenResult, won: Option<bool>) -> Option<TradeSignal> {
+    let kind = kind_for_flatten(result, won);
     if let Some(k) = kind {
         play(k, None);
     }

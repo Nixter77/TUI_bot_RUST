@@ -1,17 +1,17 @@
 //! Exchange helpers: sizing, protective-order shape, optional HTTP client.
 
 use crate::config::Config;
-use crate::errors::is_retry_error;
+use crate::errors::{is_retry_error, redact_secrets, RETRY_BACKOFF_SEC};
 use crate::models::{bar_from_kline, Account, Bar, Position, Side, Ticker};
 use crate::money::{dec, quantize_to_step};
 use crate::profit::current_equity;
 use crate::ranking::{is_tradable_symbol, parse_tickers};
-use crate::signing::{signed_query_string, SignError};
+use crate::signing::{canonical_query, signed_query_string, SignError};
 use rust_decimal::Decimal;
 use serde_json::Value;
-use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -57,6 +57,58 @@ pub fn size_market_order(notional: Decimal, price: Decimal, filters: &SymbolFilt
         )));
     }
     Ok(qty)
+}
+
+/// Risk-% plan: `notional = (equity * risk_pct) * entry / (entry - stop)`.
+/// Leverage is not in the formula. `risk_pct == 0` is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RiskSizePlan {
+    pub notional: Decimal,
+    pub risk_usdt: Decimal,
+    pub dist: Decimal,
+}
+
+/// Account equity = wallet + uPnL. Returns `None` when risk-% is off or stop is invalid.
+pub fn risk_position_notional(
+    equity: Decimal,
+    risk_pct: Decimal,
+    entry: Decimal,
+    stop_loss: Decimal,
+) -> Option<RiskSizePlan> {
+    if risk_pct <= Decimal::ZERO || equity <= Decimal::ZERO || entry <= Decimal::ZERO {
+        return None;
+    }
+    let dist = entry - stop_loss;
+    if dist <= Decimal::ZERO {
+        return None;
+    }
+    let risk_usdt = equity * risk_pct;
+    if risk_usdt <= Decimal::ZERO {
+        return None;
+    }
+    Some(RiskSizePlan {
+        notional: risk_usdt * entry / dist,
+        risk_usdt,
+        dist,
+    })
+}
+
+/// Size by risk, then refuse if exchange mins would spend more than `risk_usdt` at `dist`.
+pub fn size_risk_market_order(
+    equity: Decimal,
+    risk_pct: Decimal,
+    entry: Decimal,
+    stop_loss: Decimal,
+    filters: &SymbolFilters,
+) -> Result<Option<Decimal>, ExchangeError> {
+    let Some(plan) = risk_position_notional(equity, risk_pct, entry, stop_loss) else {
+        return Ok(None);
+    };
+    let qty = size_market_order(plan.notional, entry, filters)?;
+    if qty * plan.dist > plan.risk_usdt {
+        return Ok(None);
+    }
+    Ok(Some(qty))
 }
 
 /// TestNet `/fapi/v1/algoOrder` requires `algoType=CONDITIONAL` (−1102 otherwise)
@@ -165,6 +217,79 @@ pub fn sell_protectives_are_sized(rows: &[Value]) -> bool {
         }
     }
     true
+}
+
+fn json_decimal(row: &Value, keys: &[&str]) -> Option<Decimal> {
+    for key in keys {
+        let Some(v) = row.get(*key) else {
+            continue;
+        };
+        let raw = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        if let Ok(d) = dec(&raw) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+pub fn protective_trigger_price(row: &Value) -> Option<Decimal> {
+    json_decimal(row, &["triggerPrice", "stopPrice"])
+}
+
+pub fn algo_id_of(row: &Value) -> Option<String> {
+    match row.get("algoId")? {
+        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+pub fn order_id_of(row: &Value) -> Option<i64> {
+    let v = row.get("orderId")?;
+    v.as_i64()
+        .or_else(|| v.as_u64().map(|n| n as i64))
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectiveKind {
+    Stop,
+    TakeProfit,
+}
+
+pub fn sell_protective_kind(row: &Value) -> Option<ProtectiveKind> {
+    let side = row
+        .get("side")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if side != "SELL" {
+        return None;
+    }
+    let otype = row
+        .get("orderType")
+        .or_else(|| row.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    match otype.as_str() {
+        "STOP_MARKET" | "STOP" => Some(ProtectiveKind::Stop),
+        "TAKE_PROFIT_MARKET" | "TAKE_PROFIT" => Some(ProtectiveKind::TakeProfit),
+        _ => None,
+    }
+}
+
+/// True when this open SELL stop/TP is not the live pair (old trail left behind).
+pub fn stale_sell_protective(row: &Value, stop_loss: Decimal, take_profit: Decimal) -> bool {
+    match sell_protective_kind(row) {
+        Some(ProtectiveKind::Stop) => protective_trigger_price(row) != Some(stop_loss),
+        Some(ProtectiveKind::TakeProfit) => protective_trigger_price(row) != Some(take_profit),
+        None => false,
+    }
 }
 
 pub fn parse_positions(raw: &Value) -> Result<Vec<Position>, ExchangeError> {
@@ -361,6 +486,12 @@ pub trait LiveClient: FlattenClient {
         take_profit: Option<Decimal>,
         qty: Option<Decimal>,
     ) -> Result<(), ExchangeError>;
+    fn cancel_algo_order(&mut self, _symbol: &str, _algo_id: &str) -> Result<(), ExchangeError> {
+        Ok(())
+    }
+    fn cancel_plain_order(&mut self, _symbol: &str, _order_id: i64) -> Result<(), ExchangeError> {
+        Ok(())
+    }
     fn set_leverage(&mut self, _symbol: &str, _leverage: i32) -> Result<(), ExchangeError> {
         Ok(())
     }
@@ -375,7 +506,158 @@ pub trait LiveClient: FlattenClient {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Place the new pair first, then drop leftover TP/SL.
+/// Cancel-all-then-place leaves a naked long (VVVUSDT 2026-08-31).
+pub fn replace_stop_place_first(
+    client: &mut dyn LiveClient,
+    symbol: &str,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+    qty: Option<Decimal>,
+) -> Result<(), ExchangeError> {
+    client.place_tp_sl(symbol, take_profit, stop_loss, qty)?;
+    prune_stale_protectives(client, symbol, stop_loss, take_profit);
+    Ok(())
+}
+
+/// Drop leftover TP/SL after the new pair is already on the book.
+/// Never `cancel_protectives` first: that window is a naked long.
+pub fn prune_stale_protectives(
+    client: &mut dyn LiveClient,
+    symbol: &str,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+) {
+    let mut keep_stop = false;
+    let mut keep_tp = false;
+    if let Ok(mut rows) = client.open_algo_orders(Some(symbol)) {
+        rows.sort_by(|a, b| algo_id_of(b).cmp(&algo_id_of(a)));
+        for row in rows {
+            let drop = if stale_sell_protective(&row, stop_loss, take_profit) {
+                true
+            } else {
+                match sell_protective_kind(&row) {
+                    Some(ProtectiveKind::Stop) if keep_stop => true,
+                    Some(ProtectiveKind::TakeProfit) if keep_tp => true,
+                    Some(ProtectiveKind::Stop) => {
+                        keep_stop = true;
+                        false
+                    }
+                    Some(ProtectiveKind::TakeProfit) => {
+                        keep_tp = true;
+                        false
+                    }
+                    None => false,
+                }
+            };
+            if drop {
+                if let Some(id) = algo_id_of(&row) {
+                    let _ = client.cancel_algo_order(symbol, &id);
+                }
+            }
+        }
+    }
+    if let Ok(mut rows) = client.open_orders(Some(symbol)) {
+        rows.sort_by(|a, b| order_id_of(b).cmp(&order_id_of(a)));
+        for row in rows {
+            let drop = if stale_sell_protective(&row, stop_loss, take_profit) {
+                true
+            } else {
+                match sell_protective_kind(&row) {
+                    Some(ProtectiveKind::Stop) if keep_stop => true,
+                    Some(ProtectiveKind::TakeProfit) if keep_tp => true,
+                    Some(ProtectiveKind::Stop) => {
+                        keep_stop = true;
+                        false
+                    }
+                    Some(ProtectiveKind::TakeProfit) => {
+                        keep_tp = true;
+                        false
+                    }
+                    None => false,
+                }
+            };
+            if drop {
+                if let Some(id) = order_id_of(&row) {
+                    let _ = client.cancel_plain_order(symbol, id);
+                }
+            }
+        }
+    }
+}
+
+const FILTER_TTL: Duration = Duration::from_secs(60);
+
+const KLINE_INTERVALS: &[&str] = &[
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
+];
+
+pub fn is_kline_interval(interval: &str) -> bool {
+    KLINE_INTERVALS.contains(&interval)
+}
+
+/// Idempotent BUY id. Binance `newClientOrderId` is 1–36 of `[.A-Za-z0-9_:-]`.
+/// Bucketed to `RETRY_BACKOFF_SEC` so a timed-out POST and the next enter
+/// reuse the same id (duplicate rejected) instead of double-filling.
+pub fn buy_client_order_id(symbol: &str, now_ms: i64) -> String {
+    let base: String = symbol
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
+        .collect();
+    let bucket_ms = (RETRY_BACKOFF_SEC * 1000.0) as i64;
+    let bucket_ms = bucket_ms.max(1);
+    let bucket = now_ms.div_euclid(bucket_ms).max(0);
+    format!("tui{base}{bucket}").chars().take(36).collect()
+}
+
+pub fn parse_symbol_filters(raw: &Value, symbol: &str) -> Result<SymbolFilters, ExchangeError> {
+    let want = symbol.to_ascii_uppercase();
+    let symbols = raw
+        .get("symbols")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ExchangeError("exchangeInfo missing symbols".into()))?;
+    let row = symbols
+        .iter()
+        .find(|s| {
+            s.get("symbol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .eq_ignore_ascii_case(&want)
+        })
+        .ok_or_else(|| ExchangeError(format!("symbol {want} not listed")))?;
+    let filters = row
+        .get("filters")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ExchangeError("incomplete filters".into()))?;
+    let mut tick = None;
+    let mut step = None;
+    let mut min_qty = None;
+    let mut min_notional = None;
+    for flt in filters {
+        let ftype = flt.get("filterType").and_then(|v| v.as_str()).unwrap_or("");
+        if ftype == "PRICE_FILTER" {
+            tick = flt.get("tickSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
+        } else if ftype == "LOT_SIZE" {
+            step = flt.get("stepSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
+            min_qty = flt.get("minQty").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
+        } else if ftype == "MIN_NOTIONAL" || ftype == "NOTIONAL" {
+            min_notional = flt
+                .get("notional")
+                .or_else(|| flt.get("minNotional"))
+                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+                .and_then(|s| dec(&s).ok());
+        }
+    }
+    Ok(SymbolFilters {
+        tick_size: tick.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
+        step_size: step.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
+        min_qty: min_qty.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
+        min_notional: min_notional.unwrap_or(Decimal::from(5)),
+    })
+}
+
+#[derive(Clone)]
 pub struct BinanceFutures {
     pub base_url: String,
     pub api_key: Option<String>,
@@ -384,6 +666,21 @@ pub struct BinanceFutures {
     pub timeout: f64,
     time_offset_ms: Cell<i64>,
     time_synced: Cell<bool>,
+    info_cache: RefCell<Option<(Instant, Value)>>,
+    filter_cache: RefCell<HashMap<String, (Instant, SymbolFilters)>>,
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for BinanceFutures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BinanceFutures")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|k| format!("{}…", k.chars().take(4).collect::<String>())))
+            .field("api_secret", &self.api_secret.as_ref().map(|_| "[redacted]"))
+            .field("recv_window", &self.recv_window)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl BinanceFutures {
@@ -396,6 +693,11 @@ impl BinanceFutures {
             timeout: cfg.http_timeout,
             time_offset_ms: Cell::new(0),
             time_synced: Cell::new(false),
+            info_cache: RefCell::new(None),
+            filter_cache: RefCell::new(HashMap::new()),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs_f64(cfg.http_timeout.max(0.1)))
+                .build(),
         }
     }
 
@@ -407,13 +709,14 @@ impl BinanceFutures {
     }
 
     fn map_ureq(err: ureq::Error, path: &str) -> ExchangeError {
-        match err {
+        let raw = match err {
             ureq::Error::Status(code, resp) => {
                 let body = resp.into_string().unwrap_or_default();
-                ExchangeError(format!("HTTP {code} {path}: {body}"))
+                format!("HTTP {code} {path}: {body}")
             }
-            other => ExchangeError(format!("HTTP {path}: {other}")),
-        }
+            other => format!("HTTP {path}: {other}"),
+        };
+        ExchangeError(redact_secrets(&raw))
     }
 
     pub fn sync_time(&self) -> Result<(), ExchangeError> {
@@ -427,20 +730,22 @@ impl BinanceFutures {
         Ok(())
     }
 
-    fn agent(&self) -> ureq::Agent {
-        ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs_f64(self.timeout.max(0.1)))
-            .build()
+    fn public_get(&self, path: &str, query: &str) -> Result<Value, ExchangeError> {
+        match self.public_get_once(path, query) {
+            Ok(v) => Ok(v),
+            Err(exc) if is_retry_error(Some(&exc.0)) => self.public_get_once(path, query),
+            Err(exc) => Err(exc),
+        }
     }
 
-    fn public_get(&self, path: &str, query: &str) -> Result<Value, ExchangeError> {
+    fn public_get_once(&self, path: &str, query: &str) -> Result<Value, ExchangeError> {
         let url = if query.is_empty() {
             format!("{}{path}", self.base_url)
         } else {
             format!("{}{path}?{query}", self.base_url)
         };
         let resp = self
-            .agent()
+            .agent
             .get(&url)
             .set("User-Agent", "tui-bot-rust")
             .call()
@@ -474,8 +779,14 @@ impl BinanceFutures {
     }
 
     pub fn klines(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<crate::models::Bar>, ExchangeError> {
-        let q = format!("symbol={symbol}&interval={interval}&limit={limit}");
-        let raw = self.public_get("/fapi/v1/klines", &q)?;
+        if !is_kline_interval(interval) {
+            return Err(ExchangeError(format!("bad kline interval {interval}")));
+        }
+        let mut q = BTreeMap::new();
+        q.insert("symbol".into(), symbol.to_string());
+        q.insert("interval".into(), interval.to_string());
+        q.insert("limit".into(), limit.to_string());
+        let raw = self.public_get("/fapi/v1/klines", &canonical_query(&q))?;
         let Some(arr) = raw.as_array() else {
             return Ok(Vec::new());
         };
@@ -514,9 +825,9 @@ impl BinanceFutures {
             .as_deref()
             .ok_or_else(|| ExchangeError("no api key".into()))?;
         let req = match method {
-            "GET" => self.agent().get(&url),
-            "POST" => self.agent().post(&url),
-            "DELETE" => self.agent().request("DELETE", &url),
+            "GET" => self.agent.get(&url),
+            "POST" => self.agent.post(&url),
+            "DELETE" => self.agent.request("DELETE", &url),
             other => return Err(ExchangeError(format!("bad method {other}"))),
         };
         let result = req
@@ -526,12 +837,27 @@ impl BinanceFutures {
             .map_err(|e| Self::map_ureq(e, path))
             .and_then(|resp| resp.into_json().map_err(|e| ExchangeError(e.to_string())));
         match result {
-            Err(exc) if retries < 1 && exc.0.contains("-1021") => {
-                let _ = self.sync_time();
+            // −1021 is rejected before matching. Retry after clock sync.
+            // Timeouts after a POST fill are NOT retried; enter_live re-reads positionRisk.
+            Err(exc) if retries < 1 && Self::should_retry_signed(method, &exc) => {
+                if exc.0.contains("-1021") {
+                    let _ = self.sync_time();
+                }
                 self.signed_request_retry(method, path, params, retries + 1)
             }
             other => other,
         }
+    }
+
+    fn should_retry_signed(method: &str, exc: &ExchangeError) -> bool {
+        if exc.0.contains("-1021") {
+            return true;
+        }
+        if !is_retry_error(Some(&exc.0)) {
+            return false;
+        }
+        let m = method.to_ascii_uppercase();
+        m == "GET" || m == "DELETE"
     }
 }
 
@@ -561,9 +887,8 @@ impl FlattenClient for BinanceFutures {
             Ok(_) => Ok(()),
             Err(exc) => {
                 let t = exc.0.to_ascii_lowercase();
+                // Already flat: success. Never retry as a naked order (opens a leftover short).
                 if t.contains("-2022") || t.contains("reduceonly") {
-                    p.remove("reduceOnly");
-                    self.signed_request("POST", "/fapi/v1/order", &p)?;
                     Ok(())
                 } else {
                     Err(exc)
@@ -579,50 +904,36 @@ impl FlattenClient for BinanceFutures {
 
 impl LiveClient for BinanceFutures {
     fn filters_for(&mut self, symbol: &str) -> Result<SymbolFilters, ExchangeError> {
-        let raw = self.public_get("/fapi/v1/exchangeInfo", "")?;
         let want = symbol.to_ascii_uppercase();
-        let symbols = raw
-            .get("symbols")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| ExchangeError("exchangeInfo missing symbols".into()))?;
-        let row = symbols
-            .iter()
-            .find(|s| {
-                s.get("symbol")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case(&want)
-            })
-            .ok_or_else(|| ExchangeError(format!("symbol {want} not listed")))?;
-        let filters = row
-            .get("filters")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| ExchangeError("incomplete filters".into()))?;
-        let mut tick = None;
-        let mut step = None;
-        let mut min_qty = None;
-        let mut min_notional = None;
-        for flt in filters {
-            let ftype = flt.get("filterType").and_then(|v| v.as_str()).unwrap_or("");
-            if ftype == "PRICE_FILTER" {
-                tick = flt.get("tickSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
-            } else if ftype == "LOT_SIZE" {
-                step = flt.get("stepSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
-                min_qty = flt.get("minQty").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
-            } else if ftype == "MIN_NOTIONAL" || ftype == "NOTIONAL" {
-                min_notional = flt
-                    .get("notional")
-                    .or_else(|| flt.get("minNotional"))
-                    .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
-                    .and_then(|s| dec(&s).ok());
+        if let Some((at, cached)) = self.filter_cache.borrow().get(&want) {
+            if at.elapsed() < FILTER_TTL {
+                return Ok(cached.clone());
             }
         }
-        Ok(SymbolFilters {
-            tick_size: tick.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
-            step_size: step.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
-            min_qty: min_qty.ok_or_else(|| ExchangeError("incomplete filters".into()))?,
-            min_notional: min_notional.unwrap_or(Decimal::from(5)),
-        })
+        let raw = {
+            if let Some((at, cached)) = self.info_cache.borrow().as_ref() {
+                if at.elapsed() < FILTER_TTL {
+                    Some(cached.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let raw = match raw {
+            Some(v) => v,
+            None => {
+                let fetched = self.public_get("/fapi/v1/exchangeInfo", "")?;
+                *self.info_cache.borrow_mut() = Some((Instant::now(), fetched.clone()));
+                fetched
+            }
+        };
+        let parsed = parse_symbol_filters(&raw, &want)?;
+        self.filter_cache
+            .borrow_mut()
+            .insert(want, (Instant::now(), parsed.clone()));
+        Ok(parsed)
     }
 
     fn market_buy(&mut self, symbol: &str, qty: Decimal) -> Result<(), ExchangeError> {
@@ -632,6 +943,10 @@ impl LiveClient for BinanceFutures {
         p.insert("type".into(), "MARKET".into());
         p.insert("quantity".into(), qty.normalize().to_string());
         p.insert("newOrderRespType".into(), "RESULT".into());
+        p.insert(
+            "newClientOrderId".into(),
+            buy_client_order_id(symbol, Self::local_ms()),
+        );
         self.signed_request("POST", "/fapi/v1/order", &p)?;
         Ok(())
     }
@@ -719,8 +1034,23 @@ impl LiveClient for BinanceFutures {
         let tp = take_profit.ok_or_else(|| {
             ExchangeError("refuse replace_stop without take_profit (would drop TP)".into())
         })?;
-        self.cancel_protectives(symbol)?;
-        self.place_tp_sl(symbol, tp, stop_loss, qty)
+        replace_stop_place_first(self, symbol, stop_loss, tp, qty)
+    }
+
+    fn cancel_algo_order(&mut self, symbol: &str, algo_id: &str) -> Result<(), ExchangeError> {
+        let mut p = BTreeMap::new();
+        p.insert("symbol".into(), symbol.into());
+        p.insert("algoId".into(), algo_id.into());
+        self.signed_request("DELETE", "/fapi/v1/algoOrder", &p)?;
+        Ok(())
+    }
+
+    fn cancel_plain_order(&mut self, symbol: &str, order_id: i64) -> Result<(), ExchangeError> {
+        let mut p = BTreeMap::new();
+        p.insert("symbol".into(), symbol.into());
+        p.insert("orderId".into(), order_id.to_string());
+        self.signed_request("DELETE", "/fapi/v1/order", &p)?;
+        Ok(())
     }
 
     fn set_leverage(&mut self, symbol: &str, leverage: i32) -> Result<(), ExchangeError> {

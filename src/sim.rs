@@ -227,6 +227,7 @@ pub fn simulate_bars(
                 if dd > result.max_drawdown {
                     result.max_drawdown = dd;
                 }
+                state.scaled_one_r.remove(&p.symbol.to_ascii_uppercase());
                 pos = None;
                 state.position = None;
                 continue;
@@ -286,12 +287,64 @@ pub fn simulate_bars(
                     bars_held: 0,
                 });
                 equity += pnl;
+                state.scaled_one_r.remove(&p.symbol.to_ascii_uppercase());
                 state.position = None;
             }
             Decision::AmendStop { stop_loss, .. } if pos.is_some() => {
                 if let Some(p) = pos.as_mut() {
                     p.stop_loss = Some(stop_loss);
                     state.position = Some(p.clone());
+                }
+            }
+            Decision::ReduceLong {
+                qty,
+                stop_loss,
+                reason,
+                ..
+            } if pos.is_some() => {
+                let mut p = pos.take().unwrap();
+                let close_qty = qty.min(p.qty);
+                if close_qty > Decimal::ZERO && close_qty < p.qty {
+                    let exit_px = apply_slip(bar.close, false, slip);
+                    let (pnl, fee) = long_pnl(p.entry_price, exit_px, close_qty, fee_rate);
+                    result.trades.push(ClosedTrade {
+                        symbol: p.symbol.clone(),
+                        strategy_id,
+                        entry: p.entry_price,
+                        exit: exit_px,
+                        qty: close_qty,
+                        pnl,
+                        fee,
+                        reason,
+                        bars_held: 0,
+                    });
+                    equity += pnl;
+                    p.qty -= close_qty;
+                    p.stop_loss = Some(stop_loss);
+                    state.scaled_one_r.insert(p.symbol.to_ascii_uppercase());
+                    state.sized_stops.insert(p.symbol.to_ascii_uppercase());
+                    state.position = Some(p.clone());
+                    pos = Some(p);
+                } else if close_qty >= p.qty && p.qty > Decimal::ZERO {
+                    let exit_px = apply_slip(bar.close, false, slip);
+                    let (pnl, fee) = long_pnl(p.entry_price, exit_px, p.qty, fee_rate);
+                    result.trades.push(ClosedTrade {
+                        symbol: p.symbol.clone(),
+                        strategy_id,
+                        entry: p.entry_price,
+                        exit: exit_px,
+                        qty: p.qty,
+                        pnl,
+                        fee,
+                        reason,
+                        bars_held: 0,
+                    });
+                    equity += pnl;
+                    state.scaled_one_r.remove(&p.symbol.to_ascii_uppercase());
+                    state.position = None;
+                } else {
+                    pos = Some(p);
+                    result.holds += 1;
                 }
             }
             _ => result.holds += 1,

@@ -1,13 +1,13 @@
 //! Text frame for the TUI (also the --dump-frame / no-TTY path).
 
+use crate::config::TradeInterval;
 use crate::engine::strategy_title;
 use crate::errorlog::format_ui_error;
-use crate::models::{Position, Side, Ticker};
+use crate::models::{Position, RecentAction, Side, Ticker};
 use crate::profit::{account_profit as calc_account_profit, current_equity};
-use crate::sessions::{session_status, HourWindow, SessionStatus, DEFAULT_ENTRY_WINDOWS};
+use crate::sessions::{session_status, unix_now, HourWindow, SessionStatus, DEFAULT_ENTRY_WINDOWS};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const SPARK_BLOCKS: &str = "▁▂▃▄▅▆▇█";
 
@@ -19,7 +19,7 @@ pub struct ViewModel {
     pub starting_equity: Decimal,
     pub available_balance: Decimal,
     pub positions: Vec<Position>,
-    pub recent_actions: Vec<String>,
+    pub recent_actions: Vec<RecentAction>,
     pub tickers: Vec<Ticker>,
     pub chart_symbol: String,
     pub chart_closes: Vec<Decimal>,
@@ -39,6 +39,8 @@ pub struct ViewModel {
     pub journal_lines: Vec<String>,
     pub leverage: Option<i32>,
     pub order_notional: Decimal,
+    /// S4 risk fraction of equity. `0` = off (ORDER_NOTIONAL fallback).
+    pub risk_pct: Decimal,
     pub notional_from_exchange: bool,
     pub max_positions: i32,
     pub basket_symbols: Vec<String>,
@@ -49,7 +51,9 @@ pub struct ViewModel {
     pub flatten_leftovers: bool,
     pub daily_halt: bool,
     pub daily_loss_usdt: Decimal,
+    pub daily_loss_r: Decimal,
     pub day_pnl: Option<Decimal>,
+    pub s4_interval: TradeInterval,
 }
 
 impl Default for ViewModel {
@@ -81,6 +85,7 @@ impl Default for ViewModel {
             journal_lines: Vec::new(),
             leverage: None,
             order_notional: Decimal::from(20),
+            risk_pct: crate::config::default_risk_pct(),
             notional_from_exchange: false,
             max_positions: 1,
             basket_symbols: Vec::new(),
@@ -91,7 +96,9 @@ impl Default for ViewModel {
             flatten_leftovers: false,
             daily_halt: false,
             daily_loss_usdt: Decimal::from(20),
+            daily_loss_r: Decimal::from(3),
             day_pnl: None,
+            s4_interval: TradeInterval::Minute5,
         }
     }
 }
@@ -116,10 +123,30 @@ impl ViewModel {
 }
 
 fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    unix_now()
+}
+
+fn pct_label(frac: Decimal) -> String {
+    (frac * Decimal::from(100)).normalize().to_string()
+}
+
+/// S4 book size: risk-% of equity / stop. Stop is per-setup, not in the snapshot.
+fn s4_risk_size(view: &ViewModel) -> String {
+    let pct = pct_label(view.risk_pct);
+    let equity = current_equity(view.wallet_balance, view.unrealized_pnl);
+    let min_stop = view.s4_interval.min_stop_pct();
+    // Same helper as live: notional = (equity * risk_pct) * entry / (entry - sl).
+    // Illustrate with the TF SL floor; any entry yields the same ratio.
+    let entry = Decimal::from(100);
+    let sl = entry * (Decimal::ONE - min_stop);
+    match crate::exchange::risk_position_notional(equity, view.risk_pct, entry, sl) {
+        Some(plan) => format!(
+            "риск {pct}% счета / стоп (до {} USDT при SL {}%)",
+            plan.notional.round_dp(1).normalize(),
+            pct_label(min_stop)
+        ),
+        None => format!("риск {pct}% счета / стоп"),
+    }
 }
 
 fn book_line(view: &ViewModel) -> String {
@@ -128,7 +155,9 @@ fn book_line(view: &ViewModel) -> String {
     } else {
         "плечо как на Binance".into()
     };
-    let size = if view.notional_from_exchange {
+    let size = if view.strategy_id == 4 && view.risk_pct > Decimal::ZERO {
+        s4_risk_size(view)
+    } else if view.notional_from_exchange {
         "сумма = minNotional биржи".into()
     } else {
         format!("сумма {} USDT", view.order_notional)
@@ -163,34 +192,40 @@ fn fmt_utc_clock(ts: f64) -> String {
     crate::sessions::utc_datetime(ts).format("%H:%M").to_string()
 }
 
-pub fn cooldown_line(now: f64, cooldown_until: f64, cooldowns: &HashMap<String, f64>) -> Option<String> {
+fn fmt_utc_hms(ts: f64) -> String {
+    crate::sessions::utc_datetime(ts).format("%H:%M:%S").to_string()
+}
+
+/// One heading plus a row per cooling symbol. Empty when nothing is paused.
+pub fn cooldown_lines(now: f64, cooldown_until: f64, cooldowns: &HashMap<String, f64>) -> Vec<String> {
     let mut active: Vec<(String, f64)> = cooldowns
         .iter()
         .filter(|(_, until)| **until > now)
         .map(|(s, u)| (s.clone(), *u))
         .collect();
     active.sort_by(|a, b| a.0.cmp(&b.0));
-    if !active.is_empty() {
-        let bits: Vec<String> = active
-            .iter()
-            .map(|(symbol, until)| {
+    if active.is_empty() {
+        if cooldown_until > now {
+            return vec![
+                "Пауза после сделки:".into(),
                 format!(
-                    "{symbol} ещё {}, проснётся {} UTC",
-                    fmt_remain(until - now),
-                    fmt_utc_clock(*until)
-                )
-            })
-            .collect();
-        return Some(format!("Пауза после сделки: {}", bits.join("; ")));
+                    "  • стол  ещё {}  → {} UTC",
+                    fmt_remain(cooldown_until - now),
+                    fmt_utc_clock(cooldown_until)
+                ),
+            ];
+        }
+        return Vec::new();
     }
-    if cooldown_until > now {
-        return Some(format!(
-            "Пауза после сделки: ещё {}, проснётся {} UTC",
-            fmt_remain(cooldown_until - now),
-            fmt_utc_clock(cooldown_until)
+    let mut out = vec!["Пауза после сделки:".into()];
+    for (symbol, until) in active {
+        out.push(format!(
+            "  • {symbol}  ещё {}  → {} UTC",
+            fmt_remain(until - now),
+            fmt_utc_clock(until)
         ));
     }
-    None
+    out
 }
 
 fn session_line(view: &ViewModel) -> Option<String> {
@@ -203,9 +238,18 @@ fn session_line(view: &ViewModel) -> Option<String> {
     } else {
         "Momentum"
     };
+    let tf = if view.strategy_id == 4 {
+        format!(
+            "  |  свечи {}  |  {}",
+            view.s4_interval.as_ru(),
+            view.s4_interval.geometry_ru()
+        )
+    } else {
+        String::new()
+    };
     if sess.open {
         Some(format!(
-            "{tag}: {}  |  сейчас {} UTC  |  входы {}",
+            "{tag}: {}  |  сейчас {} UTC  |  входы {}{tf}",
             sess.label, sess.utc_clock, sess.windows_text
         ))
     } else {
@@ -215,7 +259,7 @@ fn session_line(view: &ViewModel) -> Option<String> {
             .map(|c| format!("  |  следующий старт {c} UTC"))
             .unwrap_or_default();
         Some(format!(
-            "{tag}: {}  |  сейчас {} UTC  |  входы {}{nxt}",
+            "{tag}: {}  |  сейчас {} UTC  |  входы {}{tf}{nxt}",
             sess.label, sess.utc_clock, sess.windows_text
         ))
     }
@@ -225,11 +269,108 @@ pub fn account_profit_figure(view: &ViewModel) -> Decimal {
     calc_account_profit(view.wallet_balance, view.unrealized_pnl, view.starting_equity)
 }
 
-/// Green/red for profit vs loss. Zero counts as profit (same as the Python TUI).
+/// Green/red for profit vs loss. Yellow = 1R still approaching.
+/// Zero profit counts as profit (same as the Python TUI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineTone {
     Profit,
     Loss,
+    Warn,
+}
+
+/// How far a long is from locking +1R as money and as percent of 1R.
+/// 1R USDT = qty × (entry − SL); remaining % is leftover / 1R, not leftover to the stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneRStatus {
+    NoStop,
+    Reached,
+    Remaining { usdt: Decimal, pct: Decimal },
+}
+
+pub fn one_r_status(pos: &Position, mark: Decimal) -> OneRStatus {
+    if pos.side != Side::Long {
+        return OneRStatus::NoStop;
+    }
+    let Some(sl) = pos.stop_loss else {
+        return OneRStatus::NoStop;
+    };
+    if pos.entry_price <= Decimal::ZERO || mark <= Decimal::ZERO {
+        return OneRStatus::NoStop;
+    }
+    if sl >= pos.entry_price {
+        return OneRStatus::Reached;
+    }
+    let risk = pos.entry_price - sl;
+    if risk <= Decimal::ZERO {
+        return OneRStatus::Reached;
+    }
+    let remain_price = pos.entry_price + risk - mark;
+    if remain_price <= Decimal::ZERO {
+        return OneRStatus::Reached;
+    }
+    let one_r_usdt = pos.qty.max(Decimal::ZERO) * risk;
+    let usdt = pos.qty.max(Decimal::ZERO) * remain_price;
+    let pct = if one_r_usdt > Decimal::ZERO {
+        usdt / one_r_usdt * Decimal::from(100)
+    } else {
+        remain_price / risk * Decimal::from(100)
+    };
+    OneRStatus::Remaining { usdt, pct }
+}
+
+fn position_mark(pos: &Position, tickers: &[Ticker]) -> Decimal {
+    if let Some(t) = tickers
+        .iter()
+        .find(|t| t.symbol.eq_ignore_ascii_case(&pos.symbol))
+    {
+        if t.last_price > Decimal::ZERO {
+            return t.last_price;
+        }
+    }
+    if pos.qty > Decimal::ZERO && pos.entry_price > Decimal::ZERO {
+        let delta = pos.unrealized_pnl / pos.qty;
+        return match pos.side {
+            Side::Long => pos.entry_price + delta,
+            Side::Short => pos.entry_price - delta,
+        };
+    }
+    pos.entry_price
+}
+
+fn one_r_line(pos: &Position, mark: Decimal) -> Option<String> {
+    if pos.side != Side::Long {
+        return None;
+    }
+    let text = match one_r_status(pos, mark) {
+        OneRStatus::NoStop => "до 1R: нет стопа".to_string(),
+        OneRStatus::Reached => "до 1R: пройден".to_string(),
+        OneRStatus::Remaining { usdt, pct } => format!(
+            "до 1R: ещё {} USDT (осталось {}%)",
+            fmt_money(usdt),
+            pct.round_dp(1).normalize()
+        ),
+    };
+    Some(format!("  {text}"))
+}
+
+fn one_r_tone(line: &str) -> Option<LineTone> {
+    if !line.contains("до 1R:") {
+        return None;
+    }
+    if line.contains("пройден") {
+        return Some(LineTone::Profit);
+    }
+    if line.contains("нет стопа") {
+        return Some(LineTone::Warn);
+    }
+    let left = number_after(line, "осталось ")?;
+    if left <= Decimal::ZERO {
+        Some(LineTone::Profit)
+    } else if left < Decimal::from(50) {
+        Some(LineTone::Warn)
+    } else {
+        Some(LineTone::Loss)
+    }
 }
 
 fn parse_leading_decimal(raw: &str) -> Option<Decimal> {
@@ -277,6 +418,9 @@ pub fn line_tone(line: &str, account_profit: Decimal) -> Option<LineTone> {
     }
     if let Some(v) = number_after(line, "uPnL=") {
         return Some(tone_of(v));
+    }
+    if let Some(tone) = one_r_tone(line) {
+        return Some(tone);
     }
     if line.contains("last=") && line.contains('%') {
         if let Some(v) = number_after(line, " ").or_else(|| {
@@ -354,14 +498,36 @@ fn ru_positions(n: usize) -> String {
     }
 }
 
-fn top_movers(tickers: &[Ticker], n: usize) -> (Vec<Ticker>, Vec<Ticker>) {
+/// Rows shown in «Топ роста» / «Топ падения». The rest of the 24h tape stays off-screen.
+pub const TOP_MOVERS_N: usize = 5;
+
+/// Re-sort the full 24h tape each frame. Names rotate as percents change.
+pub fn top_movers(tickers: &[Ticker], n: usize) -> (Vec<Ticker>, Vec<Ticker>) {
     let mut rising = tickers.to_vec();
-    rising.sort_by(|a, b| b.price_change_percent.cmp(&a.price_change_percent));
+    rising.sort_by(|a, b| {
+        b.price_change_percent
+            .cmp(&a.price_change_percent)
+            .then(b.quote_volume.cmp(&a.quote_volume))
+            .then(a.symbol.cmp(&b.symbol))
+    });
     rising.truncate(n);
     let mut falling = tickers.to_vec();
-    falling.sort_by(|a, b| a.price_change_percent.cmp(&b.price_change_percent));
+    falling.sort_by(|a, b| {
+        a.price_change_percent
+            .cmp(&b.price_change_percent)
+            .then(b.quote_volume.cmp(&a.quote_volume))
+            .then(a.symbol.cmp(&b.symbol))
+    });
     falling.truncate(n);
     (rising, falling)
+}
+
+fn top_heading(label: &str, shown: usize, total: usize) -> String {
+    if total == 0 {
+        format!("{label}:")
+    } else {
+        format!("{label} ({shown} из {total}):")
+    }
 }
 
 pub fn render_frame(view: &ViewModel) -> String {
@@ -417,13 +583,16 @@ pub fn render_frame(view: &ViewModel) -> String {
                 fmt_price(pos.entry_price),
                 fmt_money(pos.unrealized_pnl)
             ));
+            if let Some(line) = one_r_line(pos, position_mark(pos, &view.tickers)) {
+                pos_lines.push(line);
+            }
         }
     }
     if !view.recent_actions.is_empty() {
         pos_lines.push("Последние решения:".into());
         let start = view.recent_actions.len().saturating_sub(5);
         for act in &view.recent_actions[start..] {
-            pos_lines.push(format!("  • {act}"));
+            pos_lines.push(format!("  • {} UTC  {}", fmt_utc_hms(act.at), act.text));
         }
     } else {
         pos_lines.push(format!("Последнее решение: {}", view.last_decision));
@@ -435,9 +604,7 @@ pub fn render_frame(view: &ViewModel) -> String {
         }
     }
     let now = view.now_ts.unwrap_or_else(now_secs);
-    if let Some(pause) = cooldown_line(now, view.cooldown_until, &view.cooldowns) {
-        pos_lines.push(pause);
-    }
+    pos_lines.extend(cooldown_lines(now, view.cooldown_until, &view.cooldowns));
     if !view.unmanaged_symbols.is_empty() && view.banner() != "confirm" {
         pos_lines.push(format!(
             "На бирже есть то, чем стратегия не управляет: {}. x x закроет только этот хвост.",
@@ -445,7 +612,8 @@ pub fn render_frame(view: &ViewModel) -> String {
         ));
     }
 
-    let (rising, falling) = top_movers(&view.tickers, 5);
+    let tape_n = view.tickers.len();
+    let (rising, falling) = top_movers(&view.tickers, TOP_MOVERS_N);
     let chart_sym = if view.chart_symbol.is_empty() {
         rising
             .first()
@@ -458,7 +626,7 @@ pub fn render_frame(view: &ViewModel) -> String {
         "=== Аналитика / график ===".to_string(),
         format!("Символ графика: {chart_sym}"),
         sparkline(&view.chart_closes, 48),
-        "Топ роста:".into(),
+        top_heading("Топ роста", rising.len(), tape_n),
     ];
     if rising.is_empty() {
         analytics.push("  (нет тикеров)".into());
@@ -472,7 +640,7 @@ pub fn render_frame(view: &ViewModel) -> String {
             ));
         }
     }
-    analytics.push("Топ падения:".into());
+    analytics.push(top_heading("Топ падения", falling.len(), tape_n));
     if falling.is_empty() {
         analytics.push("  (нет тикеров)".into());
     } else {
@@ -514,14 +682,15 @@ pub fn render_frame(view: &ViewModel) -> String {
         (
             "Клавиши: 1/2/3/4 выбор стратегии  |  x закрыть все (дважды)  |  q выход".into(),
             Some(format!(
-                "Стоп дня: прибыль дня {lost} USDT ≤ −{} USDT. Новых входов нет до 00:00 UTC. r это не снимает.",
-                view.daily_loss_usdt
+                "Стоп дня: прибыль дня {lost} USDT (лимиты −{} USDT / −{}R). Новых входов нет до 00:00 UTC. r это не снимает.",
+                view.daily_loss_usdt,
+                view.daily_loss_r
             )),
         )
     } else {
         let keys = "Клавиши: 1/2/3/4 выбор стратегии  |  x закрыть все (дважды)  |  q выход  |  r обновить".into();
         let status = if view.signals_on {
-            Some("Звуки: покупка — два высоких, продажа — два низких.".into())
+            Some("Звуки: покупка — два высоких; плюс — три вверх; минус — три вниз.".into())
         } else {
             None
         };
@@ -541,9 +710,6 @@ pub fn render_frame(view: &ViewModel) -> String {
         footer.push(session);
     }
     footer.push(keys);
-    if let Some(pause) = cooldown_line(now, view.cooldown_until, &view.cooldowns) {
-        footer.push(pause);
-    }
     if let Some(status) = status {
         footer.push(status);
     }

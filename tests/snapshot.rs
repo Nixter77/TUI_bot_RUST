@@ -7,7 +7,7 @@ use tui_bot::config::load_config;
 use tui_bot::exchange::{ExchangeError, SnapshotClient};
 use tui_bot::models::{Bar, EngineState, Position, Side, Ticker};
 use tui_bot::profit::{account_profit, current_equity, EquityPin};
-use tui_bot::snapshot::{fetch_snapshot, pull_snapshot};
+use tui_bot::snapshot::{fetch_snapshot, merge_overlay_with_journal, pull_snapshot};
 
 fn d(s: &str) -> Decimal {
     s.parse().unwrap()
@@ -47,6 +47,8 @@ struct FakeSnap {
     positions: Value,
     tickers: Vec<Ticker>,
     klines: HashMap<String, Vec<Bar>>,
+    ticker_err: Option<String>,
+    risk_err: Option<String>,
 }
 
 impl FakeSnap {
@@ -68,12 +70,17 @@ impl FakeSnap {
             ]
             .into_iter()
             .collect(),
+            ticker_err: None,
+            risk_err: None,
         }
     }
 }
 
 impl SnapshotClient for FakeSnap {
     fn ticker_24h(&mut self) -> Result<Vec<Ticker>, ExchangeError> {
+        if let Some(msg) = &self.ticker_err {
+            return Err(ExchangeError(msg.clone()));
+        }
         Ok(self.tickers.clone())
     }
     fn klines(&mut self, symbol: &str, _interval: &str, _limit: usize) -> Result<Vec<Bar>, ExchangeError> {
@@ -91,6 +98,9 @@ impl SnapshotClient for FakeSnap {
         }))
     }
     fn position_risk(&mut self) -> Result<Value, ExchangeError> {
+        if let Some(msg) = &self.risk_err {
+            return Err(ExchangeError(msg.clone()));
+        }
         Ok(self.positions.clone())
     }
 }
@@ -197,6 +207,49 @@ fn fetch_snapshot_overlays_remembered_tp_sl() {
 }
 
 #[test]
+fn journal_protectives_fill_naked_live_long() {
+    let live = Position::long("VVVUSDT", d("22.6"), d("17.055"), None, None);
+    let journal = vec![Position::long(
+        "VVVUSDT",
+        d("22.6"),
+        d("17.055"),
+        Some(d("16.7139")),
+        Some(d("17.7514")),
+    )];
+    let merged = merge_overlay_with_journal(vec![live.clone()], journal);
+    assert_eq!(merged[0].stop_loss, Some(d("16.7139")));
+    assert_eq!(merged[0].take_profit, Some(d("17.7514")));
+    assert_eq!(merged[0].qty, d("22.6"));
+
+    let cfg = cfg_with_keys();
+    let mut client = FakeSnap::book(
+        "3100",
+        "-1.2",
+        json!([long_row("VVVUSDT", "22.6", "17.055", "-1.2")]),
+    );
+    let saved = Position::long(
+        "VVVUSDT",
+        d("22.6"),
+        d("17.055"),
+        Some(d("16.7139")),
+        Some(d("17.7514")),
+    );
+    let snap = fetch_snapshot(
+        &cfg,
+        Some(&mut client),
+        &EngineState::new(4),
+        false,
+        None,
+        None,
+        None,
+        &[],
+        &[saved.clone()],
+    );
+    assert_eq!(snap.open_positions[0].stop_loss, saved.stop_loss);
+    assert_eq!(snap.open_positions[0].take_profit, saved.take_profit);
+}
+
+#[test]
 fn pull_snapshot_offline_skips_client() {
     let cfg = load_config(false, None, Some(&HashMap::new())).unwrap();
     let mut state = EngineState::new(1);
@@ -209,4 +262,94 @@ fn pull_snapshot_offline_skips_client() {
     assert!(!snap.account_ok);
     assert_eq!(snap.account.wallet_balance, Decimal::ZERO);
     assert!(pin.value.is_none());
+}
+
+#[test]
+fn ticker_fetch_error_keeps_prior_tape() {
+    let cfg = cfg_with_keys();
+    let mut client = FakeSnap::book("3000", "0", json!([]));
+    client.tickers = vec![
+        Ticker::new("SKRUSDT", d("0.02"), d("82"), d("1")),
+        Ticker::new("BTCUSDT", d("50000"), d("2"), d("8000")),
+    ];
+    let mut state = EngineState::new(4);
+    let mut pin = EquityPin {
+        value: None,
+        persist: false,
+    };
+    let first = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, None);
+    assert_eq!(first.tickers.len(), 2);
+    assert_eq!(first.tickers[0].symbol, "SKRUSDT");
+
+    client.ticker_err = Some("timeout".into());
+    client.tickers = vec![Ticker::new("ETHUSDT", d("3000"), d("9"), d("4000"))];
+    let second = pull_snapshot(
+        &cfg,
+        Some(&mut client),
+        &mut state,
+        &mut pin,
+        false,
+        Some(&first),
+    );
+    assert!(second.last_error.is_some());
+    assert!(!second.fetched);
+    assert_eq!(second.tickers.len(), 2, "stale tape must remain until the next good 24h fetch");
+    assert_eq!(second.tickers[0].symbol, "SKRUSDT");
+}
+
+#[test]
+fn position_risk_error_keeps_prior_live_book() {
+    let cfg = cfg_with_keys();
+    let mut client = FakeSnap::book(
+        "3100",
+        "1",
+        json!([long_row("ETHUSDT", "0.01", "3000", "1")]),
+    );
+    let mut state = EngineState::new(4);
+    let saved = Position::long("ETHUSDT", d("0.01"), d("3000"), Some(d("2940")), Some(d("3120")));
+    state.positions = vec![saved.clone()];
+    let mut pin = EquityPin {
+        value: None,
+        persist: false,
+    };
+    let first = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, None);
+    assert!(first.live_book);
+    assert_eq!(first.open_positions.len(), 1);
+
+    client.risk_err = Some("HTTP 502 /fapi/v2/positionRisk: gateway".into());
+    let second = pull_snapshot(
+        &cfg,
+        Some(&mut client),
+        &mut state,
+        &mut pin,
+        false,
+        Some(&first),
+    );
+    assert!(
+        second.live_book,
+        "stale live_book=false looks flat and double-buys"
+    );
+    assert_eq!(second.open_positions.len(), 1);
+    assert_eq!(second.open_positions[0].symbol, "ETHUSDT");
+    assert!(second.last_error.is_some());
+}
+
+#[test]
+fn journal_overlay_does_not_lower_live_stop() {
+    let live = Position::long(
+        "VVVUSDT",
+        d("22.6"),
+        d("17.055"),
+        Some(d("17.068")),
+        Some(d("17.7514")),
+    );
+    let journal = vec![Position::long(
+        "VVVUSDT",
+        d("22.6"),
+        d("17.055"),
+        Some(d("16.7139")),
+        Some(d("17.7514")),
+    )];
+    let merged = merge_overlay_with_journal(vec![live.clone()], journal);
+    assert_eq!(merged[0].stop_loss, Some(d("17.068")));
 }

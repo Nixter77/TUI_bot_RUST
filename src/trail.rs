@@ -1,7 +1,6 @@
 //! Take-profit attach and upward-only stop-loss trail (longs: SL only выше).
 
-use crate::journal::round_trip_taker_pct;
-use crate::money::require_positive;
+use crate::money::{require_positive, round_trip_taker_pct};
 use rust_decimal::Decimal;
 
 pub fn take_profit_price(entry: Decimal, side: &str, tp_pct: Decimal) -> Result<Decimal, String> {

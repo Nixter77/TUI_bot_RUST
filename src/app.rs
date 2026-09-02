@@ -124,13 +124,15 @@ pub fn run(
     }
 
     let mut state = EngineState::new(strategy);
-    match crate::tui::curses_loop(&cfg, &mut state, args.offline) {
+    match crate::tui::run_tui(&cfg, &mut state, args.offline) {
         Ok(()) => 0,
-        Err(_) => {
-            if let Ok(frame) = render_startup_frame(Some(&cfg), None, strategy, args.live, args.offline, environ) {
-                let _ = write!(stdout, "{frame}");
-            }
-            0
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = writeln!(stderr, "{e}");
+            2
+        }
+        Err(e) => {
+            let _ = writeln!(stderr, "tui error: {e}");
+            1
         }
     }
 }

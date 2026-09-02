@@ -154,6 +154,13 @@ pub enum Decision {
         reason: String,
         symbol: String,
     },
+    /// Close ~half the long and move the remainder stop to BE (`stop_loss`).
+    ReduceLong {
+        symbol: String,
+        reason: String,
+        qty: Decimal,
+        stop_loss: Decimal,
+    },
 }
 
 impl Decision {
@@ -168,7 +175,8 @@ impl Decision {
             Decision::Hold { reason }
             | Decision::EnterLong { reason, .. }
             | Decision::ExitPosition { reason, .. }
-            | Decision::AmendStop { reason, .. } => reason,
+            | Decision::AmendStop { reason, .. }
+            | Decision::ReduceLong { reason, .. } => reason,
         }
     }
 
@@ -177,7 +185,8 @@ impl Decision {
             Decision::Hold { .. } => "",
             Decision::EnterLong { symbol, .. }
             | Decision::ExitPosition { symbol, .. }
-            | Decision::AmendStop { symbol, .. } => symbol,
+            | Decision::AmendStop { symbol, .. }
+            | Decision::ReduceLong { symbol, .. } => symbol,
         }
     }
 
@@ -187,6 +196,44 @@ impl Decision {
 
     pub fn is_enter_long(&self) -> bool {
         matches!(self, Decision::EnterLong { .. })
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Decision::EnterLong {
+                symbol,
+                reason,
+                take_profit,
+                stop_loss,
+            } => format!("BUY {symbol} TP={take_profit} SL={stop_loss} ({reason})"),
+            Decision::AmendStop {
+                stop_loss,
+                reason,
+                symbol,
+            } => {
+                let tag = if symbol.is_empty() {
+                    String::new()
+                } else {
+                    format!("{symbol} ")
+                };
+                format!("SL {tag}-> {stop_loss} ({reason})")
+            }
+            Decision::ExitPosition { reason, symbol } => {
+                let tag = if symbol.is_empty() {
+                    String::new()
+                } else {
+                    format!("{symbol} ")
+                };
+                format!("EXIT {tag}({reason})")
+            }
+            Decision::ReduceLong {
+                symbol,
+                reason,
+                qty,
+                stop_loss,
+            } => format!("REDUCE {symbol} qty={qty} SL={stop_loss} ({reason})"),
+            Decision::Hold { reason } => reason.clone(),
+        }
     }
 }
 
@@ -205,9 +252,32 @@ pub struct MarketSnapshot {
     pub account_fresh: bool,
     pub last_bars: HashMap<String, Bar>,
     pub universe_bars: HashMap<String, Vec<Bar>>,
+    /// Closed 4h bars for strategy-4 HTF bias. Never a chart fallback.
+    pub htf_bars: HashMap<String, Vec<Bar>>,
 }
 
 impl MarketSnapshot {
+    /// Klines for `symbol`: universe overlay, else the chart series.
+    pub fn bars_for(&self, symbol: &str) -> &[Bar] {
+        if let Some(extra) = self.universe_bars.get(symbol) {
+            if !extra.is_empty() {
+                return extra;
+            }
+        }
+        if symbol == self.chart_symbol || self.chart_symbol.is_empty() {
+            return &self.bars;
+        }
+        &[]
+    }
+
+    /// Closed 4h series only. Empty if missing — do not fall back to the signal chart.
+    pub fn htf_bars_for(&self, symbol: &str) -> &[Bar] {
+        match self.htf_bars.get(symbol) {
+            Some(extra) if !extra.is_empty() => extra,
+            _ => &[],
+        }
+    }
+
     pub fn empty(starting: Decimal) -> Self {
         Self {
             tickers: Vec::new(),
@@ -228,7 +298,34 @@ impl MarketSnapshot {
             account_fresh: false,
             last_bars: HashMap::new(),
             universe_bars: HashMap::new(),
+            htf_bars: HashMap::new(),
         }
+    }
+}
+
+/// One TUI «Последние решения» row. `at` is Unix seconds (UTC) when the desk acted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentAction {
+    pub at: f64,
+    pub text: String,
+}
+
+impl RecentAction {
+    pub fn new(at: f64, text: impl Into<String>) -> Self {
+        Self {
+            at,
+            text: text.into(),
+        }
+    }
+}
+
+const RECENT_ACTIONS_KEEP: usize = 8;
+
+pub fn push_recent(actions: &mut Vec<RecentAction>, at: f64, text: impl Into<String>) {
+    actions.push(RecentAction::new(at, text));
+    if actions.len() > RECENT_ACTIONS_KEEP {
+        let drop_n = actions.len() - RECENT_ACTIONS_KEEP;
+        actions.drain(0..drop_n);
     }
 }
 
@@ -238,7 +335,7 @@ pub struct EngineState {
     pub last_scan_ts: f64,
     pub position: Option<Position>,
     pub last_error: Option<String>,
-    pub recent_actions: Vec<String>,
+    pub recent_actions: Vec<RecentAction>,
     pub entry_inflight: bool,
     pub entries_paused: bool,
     pub cooldown_until: f64,
@@ -252,6 +349,16 @@ pub struct EngineState {
     pub daily_halt: bool,
     pub sized_stops: HashSet<String>,
     pub recent_leaders: Vec<String>,
+    /// Unix seconds. While `now < retry_until`, skip new entries (429 / 5xx / timeout).
+    pub retry_until: f64,
+    /// Consecutive ACTION_RETRY faults; sizes exponential backoff.
+    pub retry_strikes: u8,
+    /// First time protectives were observed missing for a live long (rearm fail-closed).
+    pub rearm_miss_since: HashMap<String, f64>,
+    /// Consecutive failed rearm attempts per symbol.
+    pub rearm_fail_count: HashMap<String, u8>,
+    /// Symbols that already scaled out ~50% at +1R (S4).
+    pub scaled_one_r: HashSet<String>,
 }
 
 impl EngineState {
@@ -275,7 +382,30 @@ impl EngineState {
             daily_halt: false,
             sized_stops: HashSet::new(),
             recent_leaders: Vec::new(),
+            retry_until: 0.0,
+            retry_strikes: 0,
+            rearm_miss_since: HashMap::new(),
+            rearm_fail_count: HashMap::new(),
+            scaled_one_r: HashSet::new(),
         }
+    }
+
+    pub fn push_action(&mut self, at: f64, text: impl Into<String>) {
+        push_recent(&mut self.recent_actions, at, text);
+    }
+}
+
+
+/// Fill a missing long SL; if both exist keep the higher (never lower the stop).
+pub fn overlay_long_stop(side: Side, live: Option<Decimal>, other: Option<Decimal>) -> Option<Decimal> {
+    if side != Side::Long {
+        return live.or(other);
+    }
+    match (live, other) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -300,7 +430,8 @@ pub fn coalesce_position(live: Option<&Position>, remembered: Option<&Position>)
         } else {
             remembered.entry_price
         },
-        stop_loss: live.stop_loss.or(remembered.stop_loss),
+        // Longs: never pull a raised protective back to a journal/original SL.
+        stop_loss: overlay_long_stop(live.side, live.stop_loss, remembered.stop_loss),
         take_profit: live.take_profit.or(remembered.take_profit),
         unrealized_pnl: live.unrealized_pnl,
         opened_bar_time: live.opened_bar_time.or(remembered.opened_bar_time),

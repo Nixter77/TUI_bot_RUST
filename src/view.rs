@@ -1,24 +1,46 @@
 //! Assemble the TUI ViewModel from config + engine + snapshot.
 
 use crate::config::Config;
+use crate::continuation::ContinuationParams;
 use crate::errorlog::guess_source;
 use crate::errors::is_retry_error;
-use crate::models::{unmanaged_positions, EngineState, MarketSnapshot, Position};
+use crate::models::{coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side};
 use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
 use crate::render::ViewModel;
 use crate::signals::signals_enabled;
 use rust_decimal::Decimal;
 
 pub fn view_positions(snapshot: &MarketSnapshot) -> Vec<Position> {
-    if !snapshot.open_positions.is_empty() {
-        return snapshot.open_positions.clone();
-    }
-    if let Some(pos) = &snapshot.position {
+    view_positions_with(snapshot, &[])
+}
+
+pub fn view_positions_with(snapshot: &MarketSnapshot, remembered: &[Position]) -> Vec<Position> {
+    let live = if !snapshot.open_positions.is_empty() {
+        snapshot.open_positions.clone()
+    } else if let Some(pos) = &snapshot.position {
         if pos.qty > Decimal::ZERO {
-            return vec![pos.clone()];
+            vec![pos.clone()]
+        } else {
+            Vec::new()
         }
-    }
-    Vec::new()
+    } else {
+        Vec::new()
+    };
+    overlay_view_protectives(live, remembered)
+}
+
+fn overlay_view_protectives(live: Vec<Position>, remembered: &[Position]) -> Vec<Position> {
+    live.into_iter()
+        .map(|p| {
+            if p.side != Side::Long {
+                return p;
+            }
+            let rem = remembered
+                .iter()
+                .find(|r| r.symbol.eq_ignore_ascii_case(&p.symbol));
+            coalesce_position(Some(&p), rem).unwrap_or(p)
+        })
+        .collect()
 }
 
 pub fn basket_symbols(cfg: &Config, state: &EngineState, snapshot: &MarketSnapshot) -> Vec<String> {
@@ -32,11 +54,13 @@ pub fn basket_symbols(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsh
         .map(|t| t.symbol)
         .collect()
     } else if state.strategy_id == 4 {
+        let mut params = ContinuationParams::default().with_interval(cfg.s4_interval);
+        params.max_positions = cfg.s4_max_positions;
         crate::continuation::pick_strategy4_book(
             &snapshot.tickers,
-            cfg.max_positions.max(1) as usize,
+            params.liquid_n.max(1),
             &state.skip_symbols,
-            None,
+            Some(&params),
         )
         .into_iter()
         .map(|t| t.symbol)
@@ -92,7 +116,7 @@ pub fn build_view(
         note.push_str(" BINANCE_API_KEY/SECRET не заданы.");
     }
     let (ui_error, logged_error, error_source) = footer_errors(snapshot, state);
-    let shown = view_positions(snapshot);
+    let shown = view_positions_with(snapshot, &state.positions);
     let tail = unmanaged_positions(&shown, &state.positions);
     let day_pnl = state.day_start_equity.map(|start| acc.wallet_balance + acc.unrealized_pnl - start);
     ViewModel {
@@ -135,8 +159,13 @@ pub fn build_view(
         journal_lines: Vec::new(),
         leverage: cfg.leverage,
         order_notional: cfg.order_notional,
+        risk_pct: cfg.risk_pct,
         notional_from_exchange: cfg.notional_from_exchange,
-        max_positions: cfg.max_positions,
+        max_positions: if state.strategy_id == 4 {
+            cfg.s4_max_positions
+        } else {
+            cfg.max_positions
+        },
         basket_symbols: basket_symbols(cfg, state, snapshot),
         cooldown_until: state.cooldown_until,
         cooldowns: state.cooldowns.clone(),
@@ -145,6 +174,8 @@ pub fn build_view(
         flatten_leftovers: !tail.is_empty(),
         daily_halt: state.daily_halt,
         daily_loss_usdt: cfg.daily_loss_usdt,
+        daily_loss_r: cfg.daily_loss_r,
         day_pnl,
+        s4_interval: cfg.s4_interval,
     }
 }

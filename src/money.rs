@@ -49,3 +49,17 @@ pub fn fmt_fixed(value: Decimal) -> String {
         s
     }
 }
+
+/// Binance USDT-M taker, one side. Domain policy — not journal I/O.
+pub fn taker_fee() -> Decimal {
+    Decimal::new(4, 4) // 0.0004
+}
+
+pub fn round_trip_taker_pct() -> Decimal {
+    taker_fee() + taker_fee()
+}
+
+pub fn long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal, fee_rate: Decimal) -> (Decimal, Decimal) {
+    let fee = (entry + exit_price) * qty * fee_rate;
+    ((exit_price - entry) * qty - fee, fee)
+}

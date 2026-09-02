@@ -7,6 +7,13 @@ use std::sync::OnceLock;
 
 pub const LIQUID_MAJORS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 
+/// Majors Strategy 4 never enters (alts-only book).
+pub fn is_major_symbol(symbol: &str) -> bool {
+    let s = symbol.trim().to_ascii_uppercase();
+    let base = s.strip_suffix("USDT").unwrap_or(&s);
+    matches!(base, "BTC" | "ETH" | "BNB" | "XRP" | "SOL" | "BCH")
+}
+
 /// Strategy 1 buys names with at least this 24h % (same ranking as «Топ роста»).
 pub fn momentum_min_change_percent() -> Decimal {
     Decimal::new(4, 1) // +0.4%
@@ -40,6 +47,7 @@ pub fn is_junk_symbol(symbol: &str) -> bool {
             | "MEME"
             | "PENGU"
             | "ZORA"
+            | "MBOX"
     )
 }
 
