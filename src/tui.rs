@@ -6,6 +6,7 @@
 use crate::config::Config;
 use crate::dayrisk::apply_day_risk;
 use crate::engine::{tick_decisions, MomentumParams};
+use crate::scalp::ScalpParams;
 use crate::errorlog::{note_frame as note_error_frame, set_active as set_error_log, ErrorLog};
 use crate::errors::COOLDOWN_SEC;
 use crate::exchange::{BinanceFutures, LiveClient, SnapshotClient};
@@ -110,6 +111,7 @@ fn scan_once(
     snapshot: &MarketSnapshot,
     last_text: &mut String,
     momentum: &MomentumParams,
+    scalp: &ScalpParams,
 ) {
     if cfg.live {
         if let Some(rec) = with_live(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
@@ -125,7 +127,7 @@ fn scan_once(
         }
     }
     let (new_state, decisions) =
-        tick_decisions(state, snapshot, now(), Some(momentum), None, None);
+        tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None);
     *state = new_state;
     *last_text = decisions
         .first()
@@ -327,6 +329,7 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
         risk_pct: cfg.risk_pct,
         ..MomentumParams::default()
     };
+    let scalp = ScalpParams::from_config(cfg);
     // First REST happens before raw mode so Ctrl+C is still SIGINT.
     let mut snapshot = pull_locked(cfg, &client, state, &mut pin, offline, None);
     if cfg.live {
@@ -355,7 +358,7 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     if let Some(p) = poller.as_ref() {
         p.bump();
     }
-    scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+    scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
     publish_poll(&poll_in, state, &snapshot, &pin);
     let mut last_snap_at = now();
 
@@ -370,13 +373,13 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
                 if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
                     state.last_error = None;
                 }
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
                 publish_poll(&poll_in, state, &snapshot, &pin);
                 last_snap_at = now();
             } else if poller.is_none() && snapshot_due(now(), last_snap_at) {
                 last_snap_at = now();
                 snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
                 publish_poll(&poll_in, state, &snapshot, &pin);
             } else if poller.is_some() && snapshot_stale(now(), last_snap_at) && state.last_error.is_none() {
                 state.last_error = Some(SNAPSHOT_STALE_MSG.into());

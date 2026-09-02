@@ -31,6 +31,7 @@ pub fn account() -> Account {
 pub fn scalp_loose() -> ScalpParams {
     ScalpParams {
         entry_windows: Vec::new(),
+        always_enter: true,
         rsi_min: Decimal::ZERO,
         rsi_max: Decimal::from(100),
         min_atr_pct: Decimal::ZERO,

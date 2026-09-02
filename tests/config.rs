@@ -269,3 +269,41 @@ fn strategy4_interval_from_env() {
     assert!(load_config(false, None, Some(&env)).is_err());
 }
 
+
+#[test]
+fn strategy2_entry_hours_and_max_hold_from_env() {
+    use tui_bot::sessions::DEFAULT_ENTRY_WINDOWS;
+    use tui_bot::config::DEFAULT_S2_MAX_HOLD_BARS;
+
+    let cfg = load_config(false, None, Some(&HashMap::new())).unwrap();
+    assert_eq!(cfg.s2_entry_windows, DEFAULT_ENTRY_WINDOWS.to_vec());
+    assert!(!cfg.s2_always_enter);
+    assert_eq!(cfg.s2_max_hold_bars, DEFAULT_S2_MAX_HOLD_BARS);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_ENTRY_HOURS".into(), "7-10".into());
+    let custom = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(custom.s2_entry_windows, vec![(7, 10)]);
+    assert_eq!(custom.entry_windows, DEFAULT_ENTRY_WINDOWS.to_vec());
+    assert_eq!(custom.s4_entry_windows, DEFAULT_ENTRY_WINDOWS.to_vec());
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_ALWAYS_ENTER".into(), "1".into());
+    let always = load_config(false, None, Some(&env)).unwrap();
+    assert!(always.s2_always_enter);
+    assert!(always.s2_entry_windows.is_empty());
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_MAX_HOLD_BARS".into(), "12".into());
+    let hold = load_config(false, None, Some(&env)).unwrap();
+    assert_eq!(hold.s2_max_hold_bars, 12);
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_MAX_HOLD_BARS".into(), "0".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_ENTRY_HOURS".into(), "nope".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+}
+

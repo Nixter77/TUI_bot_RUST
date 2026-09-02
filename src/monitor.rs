@@ -11,7 +11,7 @@ use crate::momentum::{s1_setup_skip, MomentumParams};
 use crate::profit::{account_profit, current_equity};
 use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
 use crate::render::{cooldown_lines, one_r_status, top_movers, OneRStatus};
-use crate::scalp::scalp_decision;
+use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::{
     format_windows, in_entry_window, next_window_start, outside_entry_reason, session_status,
     utc_datetime, HourWindow,
@@ -174,6 +174,8 @@ fn session_knobs(cfg: &Config, strategy_id: i32) -> (Vec<HourWindow>, bool) {
         (cfg.s4_entry_windows.clone(), cfg.s4_always_enter)
     } else if strategy_id == 1 {
         (cfg.entry_windows.clone(), cfg.always_enter)
+    } else if strategy_id == 2 {
+        (cfg.s2_entry_windows.clone(), cfg.s2_always_enter)
     } else {
         (Vec::new(), true)
     }
@@ -305,17 +307,20 @@ fn setup_skip(
                 .any(|t| t.symbol.eq_ignore_ascii_case(&ticker.symbol));
             s1_setup_skip(ticker, &snapshot.last_bars, in_book)
         }
-        2 => match scalp_decision(
-            snapshot.bars_for(&ticker.symbol),
-            None,
-            &ticker.symbol,
-            None,
-            Some(now),
-        ) {
-            crate::models::Decision::Hold { reason } => Some(reason),
-            crate::models::Decision::EnterLong { .. } => None,
-            _ => None,
-        },
+        2 => {
+            let p = ScalpParams::from_config(cfg);
+            match scalp_decision(
+                snapshot.bars_for(&ticker.symbol),
+                None,
+                &ticker.symbol,
+                Some(&p),
+                Some(now),
+            ) {
+                crate::models::Decision::Hold { reason } => Some(reason),
+                crate::models::Decision::EnterLong { .. } => None,
+                _ => None,
+            }
+        }
         3 => match trend_decision(
             snapshot.bars_for(&ticker.symbol),
             None,
