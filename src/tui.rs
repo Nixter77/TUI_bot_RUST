@@ -4,21 +4,24 @@
 //! apply stay on this thread and serialize on the same client mutex as the pull.
 
 use crate::config::Config;
+use crate::dayrisk::apply_day_risk;
 use crate::engine::{tick_decisions, MomentumParams};
 use crate::errorlog::{note_frame as note_error_frame, set_active as set_error_log, ErrorLog};
 use crate::errors::COOLDOWN_SEC;
 use crate::exchange::{BinanceFutures, LiveClient, SnapshotClient};
-use crate::journal::{seed_cooldowns, set_active as set_journal, DEFAULT_JOURNAL_PATH};
+use crate::journal::{seed_cooldowns, set_active as set_journal, TradeJournal, DEFAULT_JOURNAL_PATH};
 use crate::keys::{handle_key, KeyAction};
 use crate::live::{apply_decision, apply_flatten, apply_paper_decision, reconcile_live, LiveApplyResult};
 use crate::models::{unmanaged_positions, Decision, EngineState, MarketSnapshot};
+use crate::monitor::{build_monitor, render_monitor};
 use crate::pidlock::acquire_live_lock;
 use crate::poll::{Pulled, SnapshotPoller};
-use crate::profit::EquityPin;
+use crate::profit::{current_equity, EquityPin};
 use crate::render::{account_profit_figure, fit_lines, line_tone, render_frame, LineTone, ViewModel};
 use crate::signals::{emit_decision, reason_suggests_win, set_enabled, shutdown as shutdown_signals};
 use crate::snapshot::{apply_tradfi_skip, fetch_snapshot, make_client, pull_snapshot};
 use crate::view::{build_view, view_positions};
+use rust_decimal::Decimal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
@@ -216,11 +219,10 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn paint(stdout: &mut impl Write, view: &ViewModel, frame: &str) -> io::Result<()> {
+fn paint_frame(stdout: &mut impl Write, frame: &str, profit: Decimal) -> io::Result<()> {
     let (cols, rows) = crossterm::terminal::size()?;
     let width = (cols.saturating_sub(1) as usize).max(1);
     let lines = fit_lines(frame, width, rows as usize);
-    let profit = account_profit_figure(view);
     execute!(stdout, Clear(ClearType::All))?;
     for (i, line) in lines.iter().enumerate() {
         queue!(stdout, cursor::MoveTo(0, i as u16))?;
@@ -244,6 +246,52 @@ fn paint(stdout: &mut impl Write, view: &ViewModel, frame: &str) -> io::Result<(
         }
     }
     stdout.flush()
+}
+
+fn paint(stdout: &mut impl Write, view: &ViewModel, frame: &str) -> io::Result<()> {
+    paint_frame(stdout, frame, account_profit_figure(view))
+}
+
+fn spawn_poller(
+    cfg: &Config,
+    client: Arc<Mutex<Option<BinanceFutures>>>,
+    poll_in: Arc<Mutex<PollInput>>,
+    offline: bool,
+) -> Option<SnapshotPoller<MarketSnapshot>> {
+    let cfg_p = cfg.clone();
+    SnapshotPoller::start(
+        Duration::from_secs_f64(SNAPSHOT_INTERVAL_SECS),
+        move || {
+            let input = lock_poison(&poll_in).clone();
+            let mut st = input.state;
+            let mut g = lock_poison(&client);
+            let tradfi = if offline {
+                Vec::new()
+            } else {
+                g.as_mut()
+                    .and_then(|c| c.tradfi_symbols().ok())
+                    .unwrap_or_default()
+            };
+            apply_tradfi_skip(&mut st, &tradfi);
+            let overlay = st.positions.clone();
+            let snap = fetch_snapshot(
+                &cfg_p,
+                g.as_mut().map(|c| c as &mut dyn SnapshotClient),
+                &st,
+                offline,
+                input.pin_value,
+                Some(&input.prior),
+                None,
+                &[],
+                &overlay,
+            );
+            Pulled {
+                snapshot: snap,
+                tradfi,
+            }
+        },
+    )
+    .ok()
 }
 
 pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Result<()> {
@@ -303,42 +351,7 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
         prior: snapshot.clone(),
         pin_value: pin.value,
     }));
-    let cfg_p = cfg.clone();
-    let client_p = client.clone();
-    let poll_in_p = poll_in.clone();
-    let poller = SnapshotPoller::start(
-        Duration::from_secs_f64(SNAPSHOT_INTERVAL_SECS),
-        move || {
-            let input = lock_poison(&poll_in_p).clone();
-            let mut st = input.state;
-            let mut g = lock_poison(&client_p);
-            let tradfi = if offline {
-                Vec::new()
-            } else {
-                g.as_mut()
-                    .and_then(|c| c.tradfi_symbols().ok())
-                    .unwrap_or_default()
-            };
-            apply_tradfi_skip(&mut st, &tradfi);
-            let overlay = st.positions.clone();
-            let snap = fetch_snapshot(
-                &cfg_p,
-                g.as_mut().map(|c| c as &mut dyn SnapshotClient),
-                &st,
-                offline,
-                input.pin_value,
-                Some(&input.prior),
-                None,
-                &[],
-                &overlay,
-            );
-            Pulled {
-                snapshot: snap,
-                tradfi,
-            }
-        },
-    )
-    .ok();
+    let poller = spawn_poller(cfg, client.clone(), poll_in.clone(), offline);
     if let Some(p) = poller.as_ref() {
         p.bump();
     }
@@ -453,5 +466,134 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     shutdown_signals();
     set_journal(None);
     set_error_log(None);
+    result
+}
+
+fn refresh_day_risk(cfg: &Config, state: &mut EngineState, snapshot: &MarketSnapshot, now_ts: f64) {
+    let equity = current_equity(
+        snapshot.account.wallet_balance,
+        snapshot.account.unrealized_pnl,
+    );
+    apply_day_risk(
+        state,
+        now_ts,
+        equity,
+        cfg.daily_loss_usdt,
+        cfg.daily_loss_r,
+        cfg.risk_pct,
+    );
+}
+
+/// Watch-only radar. No live.lock, no orders, no flatten.
+pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Result<()> {
+    set_journal(Some(std::path::PathBuf::from(DEFAULT_JOURNAL_PATH)));
+    seed_cooldowns(state, now(), COOLDOWN_SEC);
+    let mut pin = EquityPin::from_config(cfg.starting_equity);
+    let client = Arc::new(Mutex::new(if offline {
+        None
+    } else {
+        Some(make_client(cfg))
+    }));
+    let mut snapshot = pull_locked(cfg, &client, state, &mut pin, offline, None);
+    refresh_day_risk(cfg, state, &snapshot, now());
+    let mut term = TerminalGuard::enter()?;
+    let mut stdout = io::stdout();
+
+    let poll_in = Arc::new(Mutex::new(PollInput {
+        state: state.clone(),
+        prior: snapshot.clone(),
+        pin_value: pin.value,
+    }));
+    let poller = spawn_poller(cfg, client.clone(), poll_in.clone(), offline);
+    if let Some(p) = poller.as_ref() {
+        p.bump();
+    }
+    publish_poll(&poll_in, state, &snapshot, &pin);
+    let mut last_snap_at = now();
+
+    let result = (|| -> io::Result<()> {
+        loop {
+            if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
+                apply_tradfi_skip(state, &pulled.tradfi);
+                snapshot = pulled.snapshot;
+                if snapshot.live_book && snapshot.account_fresh {
+                    pin.capture(snapshot.account.starting_equity);
+                }
+                if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
+                    state.last_error = None;
+                }
+                refresh_day_risk(cfg, state, &snapshot, now());
+                publish_poll(&poll_in, state, &snapshot, &pin);
+                last_snap_at = now();
+            } else if poller.is_none() && snapshot_due(now(), last_snap_at) {
+                last_snap_at = now();
+                snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
+                refresh_day_risk(cfg, state, &snapshot, now());
+                publish_poll(&poll_in, state, &snapshot, &pin);
+            } else if poller.is_some()
+                && snapshot_stale(now(), last_snap_at)
+                && state.last_error.is_none()
+            {
+                state.last_error = Some(SNAPSHOT_STALE_MSG.into());
+            }
+
+            let events = TradeJournal::new(Some(std::path::Path::new(DEFAULT_JOURNAL_PATH))).read_events();
+            let view = build_monitor(cfg, state, &snapshot, &events, now());
+            let frame = render_monitor(&view);
+            paint_frame(&mut stdout, &frame, view.account_profit)?;
+
+            if !event::poll(Duration::from_millis(200))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+            {
+                break;
+            }
+            let ch = match key.code {
+                KeyCode::Char(c) => c,
+                KeyCode::Esc => 'q',
+                _ => '\0',
+            };
+            match handle_key(ch, false) {
+                KeyAction::Quit => break,
+                KeyAction::Strategy(id) => {
+                    state.strategy_id = id;
+                    publish_poll(&poll_in, state, &snapshot, &pin);
+                    if let Some(p) = poller.as_ref() {
+                        p.bump();
+                    } else {
+                        last_snap_at = 0.0;
+                    }
+                }
+                KeyAction::Refresh => {
+                    state.last_error = None;
+                    publish_poll(&poll_in, state, &snapshot, &pin);
+                    if let Some(p) = poller.as_ref() {
+                        p.bump();
+                    } else {
+                        last_snap_at = 0.0;
+                    }
+                }
+                KeyAction::FlattenArm
+                | KeyAction::FlattenConfirm
+                | KeyAction::FlattenCancel
+                | KeyAction::Ignore => {}
+            }
+        }
+        Ok(())
+    })();
+
+    term.restore();
+    if let Some(mut p) = poller {
+        p.stop();
+    }
+    set_journal(None);
     result
 }

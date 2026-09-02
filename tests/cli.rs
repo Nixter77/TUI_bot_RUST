@@ -56,7 +56,16 @@ fn dump_frame_strategy_4_shows_title() {
 #[test]
 fn help_lists_flags() {
     let h = help_text();
-    for flag in ["--dump-frame", "--offline", "--strategy", "--live", "--backtest", "--report"] {
+    for flag in [
+        "--dump-frame",
+        "--offline",
+        "--strategy",
+        "--live",
+        "--backtest",
+        "--report",
+        "--monitor",
+    ] {
         assert!(h.contains(flag), "help missing {flag}:\n{h}");
     }
+    assert!(parse_args(["--monitor"]).unwrap().monitor);
 }

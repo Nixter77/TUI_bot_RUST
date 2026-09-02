@@ -772,6 +772,23 @@ fn skip_24h_tape(ticker: &Ticker, p: &ContinuationParams) -> Option<String> {
     None
 }
 
+/// Per-ticker S4 setup skip (no hours / halt / cooldown gates). `None` = ready.
+pub fn s4_setup_skip(
+    snapshot: &MarketSnapshot,
+    ticker: &Ticker,
+    p: &ContinuationParams,
+    exclude: &[String],
+) -> Option<String> {
+    let liquid = liquid_keys(&snapshot.tickers, exclude, p);
+    let leaders = pick_recent_leaders(
+        &snapshot.tickers,
+        p.max_positions.max(5) as usize,
+        exclude,
+        p,
+    );
+    skip_new_long(snapshot, ticker, p, &leaders, &liquid)
+}
+
 pub fn pick_strategy4_book(
     tickers: &[Ticker],
     n: usize,

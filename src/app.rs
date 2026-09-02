@@ -1,10 +1,13 @@
 //! CLI / TUI entry point. No TTY → print first frame and exit 0.
 
 use crate::config::{load_config, Config, ConfigError};
+use crate::dayrisk::apply_day_risk;
 use crate::engine::select_strategy;
+use crate::journal::{TradeJournal, DEFAULT_JOURNAL_PATH};
 use crate::models::EngineState;
 use crate::models::MarketSnapshot;
-use crate::profit::EquityPin;
+use crate::monitor::{build_monitor, render_monitor};
+use crate::profit::{current_equity, EquityPin};
 use crate::render::render_frame;
 use crate::snapshot::{pull_snapshot, make_client};
 use crate::view::build_view;
@@ -34,6 +37,9 @@ pub struct CliArgs {
     /// print a summary of .state/trades.jsonl and .state/errors.jsonl
     #[arg(long)]
     pub report: bool,
+    /// watch-only radar: waiting names, 24h tape, open/closed P&L (never sends orders)
+    #[arg(long)]
+    pub monitor: bool,
 }
 
 pub fn parse_args<I, S>(argv: I) -> Result<CliArgs, clap::Error>
@@ -79,6 +85,45 @@ pub fn render_startup_frame(
     Ok(render_frame(&build_view(cfg, &state, snap, "—", false)))
 }
 
+pub fn render_monitor_startup(
+    cfg: Option<&Config>,
+    strategy_id: i32,
+    offline: bool,
+    environ: Option<&HashMap<String, String>>,
+) -> Result<String, ConfigError> {
+    let owned = if cfg.is_none() {
+        Some(load_config(false, None, environ)?)
+    } else {
+        None
+    };
+    let cfg = cfg.unwrap_or_else(|| owned.as_ref().unwrap());
+    let sid = select_strategy(strategy_id).map_err(ConfigError)?;
+    let mut state = EngineState::new(sid);
+    crate::journal::seed_cooldowns(&mut state, crate::sessions::unix_now(), crate::errors::COOLDOWN_SEC);
+    let mut client = if offline { None } else { Some(make_client(cfg)) };
+    let mut pin = EquityPin::from_config(cfg.starting_equity);
+    let snapshot = pull_snapshot(
+        cfg,
+        client.as_mut().map(|c| c as &mut dyn crate::exchange::SnapshotClient),
+        &mut state,
+        &mut pin,
+        offline,
+        None,
+    );
+    let now = crate::sessions::unix_now();
+    let equity = current_equity(snapshot.account.wallet_balance, snapshot.account.unrealized_pnl);
+    apply_day_risk(
+        &mut state,
+        now,
+        equity,
+        cfg.daily_loss_usdt,
+        cfg.daily_loss_r,
+        cfg.risk_pct,
+    );
+    let events = TradeJournal::new(Some(Path::new(DEFAULT_JOURNAL_PATH))).read_events();
+    Ok(render_monitor(&build_monitor(cfg, &state, &snapshot, &events, now)))
+}
+
 pub fn run(
     args: &CliArgs,
     environ: Option<&HashMap<String, String>>,
@@ -92,7 +137,9 @@ pub fn run(
             return 2;
         }
     };
-    let cfg = match load_config(args.live, None, environ) {
+    // `--monitor` never sends orders and does not require live keys.
+    let want_live = args.live && !args.monitor;
+    let cfg = match load_config(want_live, None, environ) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(stderr, "config error: {e}");
@@ -108,6 +155,31 @@ pub fn run(
     }
 
     let dump = args.dump_frame || !io::stdout().is_terminal();
+    if args.monitor {
+        if dump {
+            match render_monitor_startup(Some(&cfg), strategy, args.offline, environ) {
+                Ok(frame) => {
+                    let _ = write!(stdout, "{frame}");
+                }
+                Err(e) => {
+                    if let Ok(frame) = render_monitor_startup(Some(&cfg), strategy, true, environ) {
+                        let _ = write!(stdout, "{frame}");
+                    }
+                    let _ = writeln!(stderr, "(render fallback after {e})");
+                }
+            }
+            return 0;
+        }
+        let mut state = EngineState::new(strategy);
+        return match crate::tui::run_monitor(&cfg, &mut state, args.offline) {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = writeln!(stderr, "tui error: {e}");
+                1
+            }
+        };
+    }
+
     if dump {
         match render_startup_frame(Some(&cfg), None, strategy, args.live, args.offline, environ) {
             Ok(frame) => {
@@ -172,6 +244,28 @@ pub fn dump_frame_offline_strategy(strategy: &str) -> (i32, String, String) {
         offline: true,
         backtest: false,
         report: false,
+        monitor: false,
+    };
+    let env = HashMap::new();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run(&args, Some(&env), &mut out, &mut err);
+    (
+        code,
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
+    )
+}
+
+pub fn dump_monitor_offline_strategy(strategy: &str) -> (i32, String, String) {
+    let args = CliArgs {
+        dump_frame: true,
+        live: false,
+        strategy: strategy.into(),
+        offline: true,
+        backtest: false,
+        report: false,
+        monitor: true,
     };
     let env = HashMap::new();
     let mut out = Vec::new();
@@ -192,6 +286,7 @@ pub fn live_without_keys_isolated() -> (i32, String) {
         offline: true,
         backtest: false,
         report: false,
+        monitor: false,
     };
     let env = HashMap::new();
     let mut out = Vec::new();

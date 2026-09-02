@@ -27,6 +27,7 @@ pub mod live;
 pub mod models;
 pub mod money;
 pub mod momentum;
+pub mod monitor;
 pub mod pidlock;
 pub mod poll;
 pub mod profit;

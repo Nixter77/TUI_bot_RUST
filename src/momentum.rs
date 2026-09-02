@@ -2,7 +2,7 @@
 
 use crate::config::{default_risk_pct, TradeInterval, STRATEGY1_POLL_SECONDS};
 use crate::dayrisk::{default_daily_loss_r, default_daily_loss_usdt};
-use crate::models::{bar_is_red, Bar, Decision, Position, Side, Ticker};
+use crate::models::{bar_is_red, near_24h_high, Bar, Decision, Position, Side, Ticker};
 use crate::ranking::{momentum_min_change_percent, pick_momentum_book};
 use crate::sessions::{in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS};
 use crate::trail::{candidate_stop, long_stop_is_valid, take_profit_price_net, trail_stop_upward};
@@ -164,6 +164,28 @@ fn enter_from_ticker(ticker: &Ticker, p: &MomentumParams) -> Decision {
         take_profit: tp,
         stop_loss: sl,
     }
+}
+
+/// Per-ticker S1 setup skip (no hours / halt / cooldown gates). `None` = ready.
+pub fn s1_setup_skip(
+    ticker: &Ticker,
+    last_bars: &HashMap<String, Bar>,
+    in_book: bool,
+) -> Option<String> {
+    if !in_book {
+        return Some("не в топе роста".into());
+    }
+    if near_24h_high(ticker, Decimal::new(2, 2)) {
+        return Some("у 24h high — не догоняю".into());
+    }
+    if !last_bars.is_empty() {
+        match last_bars.get(&ticker.symbol) {
+            None => return Some("нет 5м бара — не вхожу".into()),
+            Some(bar) if bar_is_red(Some(bar)) => return Some("5м красная — не вхожу".into()),
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 pub fn momentum_decisions(

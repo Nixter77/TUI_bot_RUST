@@ -419,6 +419,14 @@ pub fn line_tone(line: &str, account_profit: Decimal) -> Option<LineTone> {
     if let Some(v) = number_after(line, "uPnL=") {
         return Some(tone_of(v));
     }
+    if let Some(v) = number_after(line, "нетто=") {
+        return Some(tone_of(v));
+    }
+    if line.contains("день:") {
+        if let Some(v) = number_after(line, "день:") {
+            return Some(tone_of(v));
+        }
+    }
     if let Some(tone) = one_r_tone(line) {
         return Some(tone);
     }
