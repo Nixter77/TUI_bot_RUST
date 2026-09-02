@@ -5,6 +5,7 @@
 - В журнале есть только S4 и S1. Живой PnL/WR по скальпу пока нет — опираемся на код + офлайн-бэктест.
 
 ## Офлайн-бэктест
+- **Offline −EV** на публичных klines (ожидание отрицательное; не edge до live closes).
 - `src/backtest.rs`: scalp на 5m-классе, `ScalpParams::default()` (окна пустые = круглосуточно в CLI).
 - После смены `max_hold_bars` default **8** мёртвые холды режутся раньше, чем legacy 24.
 - Live/TUI: `ScalpParams::from_config` подхватывает `STRATEGY2_ENTRY_HOURS` / `STRATEGY2_MAX_HOLD_BARS`.
