@@ -24,6 +24,7 @@ fn tape() -> Vec<Ticker> {
     vec![
         Ticker::new("BTCUSDT", d("50000"), d("1.0"), d("10000000")),
         Ticker::new("LINKUSDT", d("15"), d("3.2"), d("5000000")),
+        Ticker::new("AAVEUSDT", d("200"), d("1.2"), d("4000000")),
         Ticker::new("APTUSDT", d("8"), d("20.0"), d("3000000")),
         Ticker::new("SKRUSDT", d("0.02"), d("82.1"), d("200000")),
         Ticker::new("DOGEUSDT", d("0.12"), d("-4.5"), d("800000")),
@@ -107,19 +108,25 @@ fn waiting_and_growth_and_pnl() {
         waiting.iter().all(|w| w.symbol != "LINKUSDT"),
         "held name leaked into wait: {waiting:?}"
     );
+    assert!(
+        waiting.iter().all(|w| w.symbol != "SKRUSDT"),
+        "24h leader must stay on tape, not in S4 book: {waiting:?}"
+    );
     let apt = waiting.iter().find(|w| w.symbol == "APTUSDT").expect("APT in wait");
     assert_eq!(apt.kind, WaitKind::Setup, "{apt:?}");
     assert!(apt.reason.contains("улетело") || apt.reason.contains("не догоняю"), "{}", apt.reason);
-    let skr = waiting.iter().find(|w| w.symbol == "SKRUSDT").expect("SKR in wait");
     assert!(
-        skr.reason.contains("мелочь") || skr.reason.contains("тонкий") || skr.reason.contains("не"),
-        "{}",
-        skr.reason
+        waiting.iter().any(|w| w.symbol == "AAVEUSDT"),
+        "liquid mild-gain belongs in the book: {waiting:?}"
     );
 
     let view = build_monitor(&cfg, &state, &snap, &events, now);
+    let wait_syms: Vec<_> = view.waiting.iter().map(|w| w.symbol.as_str()).collect();
+    let rise_syms: Vec<_> = view.rising.iter().map(|t| t.symbol.as_str()).collect();
+    assert_ne!(wait_syms, rise_syms, "wait book must not clone the 24h tape");
     let frame = render_monitor(&view);
     assert!(frame.contains("Топ роста"), "{frame}");
+    assert!(frame.contains("не список покупок") || frame.contains("не топ 24h"), "{frame}");
     assert!(frame.contains("SKRUSDT"), "{frame}");
     assert!(frame.contains("+82.1%"), "{frame}");
     assert!(frame.contains("LINKUSDT"), "{frame}");
@@ -140,7 +147,11 @@ fn s1_wait_lists_book_not_held() {
     let now = make_utc_ts(2026, 9, 2, 10, 0, 0);
     let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
     assert!(
-        waiting.iter().any(|w| w.symbol == "SKRUSDT" || w.symbol == "APTUSDT"),
-        "{waiting:?}"
+        waiting.iter().any(|w| w.symbol == "LINKUSDT" || w.symbol == "AAVEUSDT" || w.symbol == "BTCUSDT"),
+        "S1 book is eligible rising names, not the 24h blow-off: {waiting:?}"
+    );
+    assert!(
+        waiting.iter().all(|w| w.symbol != "SKRUSDT"),
+        "S1 max-change filter must drop SKR from the wait book: {waiting:?}"
     );
 }

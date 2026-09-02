@@ -8,7 +8,7 @@ use crate::journal::{event_unix, parse_pnl, TradeEvent};
 use crate::models::{EngineState, MarketSnapshot, Position, Side, Ticker};
 use crate::momentum::{s1_setup_skip, MomentumParams};
 use crate::profit::{account_profit, current_equity};
-use crate::ranking::{is_junk_symbol, iter_liquid_majors, pick_strategy1_book};
+use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
 use crate::render::{cooldown_lines, one_r_status, top_movers, OneRStatus};
 use crate::scalp::scalp_decision;
 use crate::sessions::{
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 pub const MONITOR_RISING_N: usize = 12;
 pub const MONITOR_FALLING_N: usize = 5;
-pub const MONITOR_WAIT_N: usize = 15;
+pub const MONITOR_WAIT_N: usize = 20;
 pub const MONITOR_CLOSED_N: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +257,7 @@ fn candidate_tickers(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsho
     let mut seen: HashSet<String> = HashSet::new();
     match state.strategy_id {
         4 => {
+            // S4 desk = liquid volume book. Not the 24h % tape (that is «Топ роста»).
             let p = s4_params(cfg);
             for t in liquid_universe(&snapshot.tickers, skip, &p) {
                 push_unique(&mut out, &mut seen, t.clone());
@@ -272,14 +273,6 @@ fn candidate_tickers(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsho
                 push_unique(&mut out, &mut seen, t);
             }
         }
-    }
-    // Growth-list names that did not make the book still belong on the radar.
-    let (rising, _) = top_movers(&snapshot.tickers, MONITOR_RISING_N);
-    for t in rising {
-        if is_junk_symbol(&t.symbol) {
-            continue;
-        }
-        push_unique(&mut out, &mut seen, t);
     }
     out
 }
@@ -381,10 +374,15 @@ pub fn classify_waiting(
         });
     }
     rows.sort_by(|a, b| {
+        let by_book = if state.strategy_id == 4 {
+            b.volume.cmp(&a.volume)
+        } else {
+            b.change_pct.cmp(&a.change_pct)
+        };
         a.kind
             .rank()
             .cmp(&b.kind.rank())
-            .then(b.change_pct.cmp(&a.change_pct))
+            .then(by_book)
             .then(a.symbol.cmp(&b.symbol))
     });
     rows.truncate(MONITOR_WAIT_N);
@@ -561,6 +559,24 @@ fn top_heading(label: &str, shown: usize, total: usize) -> String {
     }
 }
 
+fn wait_heading(view: &MonitorView) -> String {
+    match view.strategy_id {
+        4 => "=== В ожидании входа (книга ликвид, не топ 24h) ===".into(),
+        1 => "=== В ожидании входа (книга momentum) ===".into(),
+        _ => "=== В ожидании входа ===".into(),
+    }
+}
+
+fn wait_hint(view: &MonitorView) -> &'static str {
+    match view.strategy_id {
+        4 => "  кого стратегия 4 реально берёт: ликвидный откат, не догон 24h %",
+        1 => "  кого momentum берёт из растущих (не вся лента)",
+        2 => "  BTC/ETH/SOL — скальп VWAP/EMA9",
+        3 => "  BTC/ETH/SOL — тренд Donchian",
+        _ => "  кандидаты текущей стратегии",
+    }
+}
+
 pub fn render_monitor(view: &MonitorView) -> String {
     let cred = if view.has_credentials {
         "keys=env"
@@ -675,7 +691,8 @@ pub fn render_monitor(view: &MonitorView) -> String {
         }
     }
 
-    let mut wait_lines = vec!["=== В ожидании входа ===".to_string()];
+    let mut wait_lines = vec![wait_heading(view)];
+    wait_lines.push(wait_hint(view).into());
     if view.waiting.is_empty() {
         wait_lines.push("(нет кандидатов на вход)".into());
     } else {
@@ -692,7 +709,8 @@ pub fn render_monitor(view: &MonitorView) -> String {
         }
     }
 
-    let mut tape = vec![top_heading("Топ роста", view.rising.len(), view.tape_n)];
+    let mut tape = vec![top_heading("Топ роста 24h", view.rising.len(), view.tape_n)];
+    tape.push("  лента рынка — не список покупок".into());
     if view.rising.is_empty() {
         tape.push("  (нет тикеров)".into());
     } else {
