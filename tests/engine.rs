@@ -2185,6 +2185,40 @@ fn retry_until_blocks_new_enter() {
     );
 }
 
+#[test]
+fn retry_timeout_stays_in_footer_during_backoff() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = tickers();
+    snap.account = account();
+    let now = london_ts();
+    let mut state = EngineState::new(1);
+    state.last_error = Some("HTTP 408 /order: timed out".into());
+    state.retry_until = now + 20.0;
+    let (next, _) = tick_decisions(&state, &snap, now, None, None, None);
+    assert!(
+        next.last_error.as_deref().is_some_and(|e| e.contains("408") || e.contains("timeout") || e.contains("timed")),
+        "retry error must remain visible during backoff: {:?}",
+        next.last_error
+    );
+}
+
+#[test]
+fn retry_timeout_clears_from_footer_after_backoff() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = tickers();
+    snap.account = account();
+    let now = london_ts();
+    let mut state = EngineState::new(1);
+    state.last_error = Some("HTTP 408 /order: timed out".into());
+    state.retry_until = now - 1.0;
+    let (next, _) = tick_decisions(&state, &snap, now, None, None, None);
+    assert!(
+        next.last_error.is_none(),
+        "stale retry noise must drop after backoff: {:?}",
+        next.last_error
+    );
+}
+
 fn vvv_s4_pos() -> Position {
     Position::long(
         "VVVUSDT",

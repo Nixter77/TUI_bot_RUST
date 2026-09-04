@@ -85,7 +85,8 @@ pub fn utc_datetime(ts: f64) -> DateTime<Utc> {
     let nsecs = ((ts.fract().abs()) * 1_000_000_000.0) as u32;
     Utc.timestamp_opt(secs, nsecs)
         .single()
-        .unwrap_or_else(|| Utc.timestamp_opt(secs, 0).unwrap())
+        .or_else(|| Utc.timestamp_opt(secs, 0).single())
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
 pub fn hour_in_windows(hour: u32, windows: &[HourWindow]) -> bool {

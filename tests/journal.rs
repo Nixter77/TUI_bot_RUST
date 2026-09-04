@@ -1,6 +1,7 @@
 //! Round-trip taker fee is deducted from PnL; TP is placed net of both sides.
 
 use rust_decimal::Decimal;
+use std::fs;
 use std::thread;
 use tui_bot::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC};
 use tui_bot::journal::{
@@ -334,4 +335,20 @@ fn unmatched_reads_active_path_not_default() {
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].symbol, "VVVUSDT");
     assert_eq!(open[0].stop_loss, Some(d("16.7139")));
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trades.jsonl");
+    let j = TradeJournal::new(Some(&path));
+    j.append(&TradeEvent {
+        event: "open".into(),
+        symbol: "BTCUSDT".into(),
+        ..TradeEvent::default()
+    });
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "journal mode {mode:#o}");
 }

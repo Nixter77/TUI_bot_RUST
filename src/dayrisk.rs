@@ -64,15 +64,14 @@ pub fn evaluate(
     risk_pct: Decimal,
 ) -> DayRisk {
     let today = utc_day_key(now);
-    if day_utc.is_empty() || day_utc != today || start_equity.is_none() {
+    let Some(start) = start_equity.filter(|_| !day_utc.is_empty() && day_utc == today) else {
         return DayRisk {
             day_utc: today,
             start_equity: equity,
             halt: false,
             pnl: Decimal::ZERO,
         };
-    }
-    let start = start_equity.unwrap();
+    };
     let pnl = equity - start;
     let usdt_trip = usdt_limit > Decimal::ZERO && pnl <= -usdt_limit;
     let r_budget = r_budget_usdt(start, risk_pct, loss_r);

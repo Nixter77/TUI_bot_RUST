@@ -71,11 +71,10 @@ fn combine_holds(rows: &[(String, String)]) -> String {
     for (symbol, reason) in rows {
         if !by_reason.contains_key(reason) {
             order.push(reason.clone());
-            by_reason.insert(reason.clone(), Vec::new());
         }
         by_reason
-            .get_mut(reason)
-            .unwrap()
+            .entry(reason.clone())
+            .or_default()
             .push(short_usdt(symbol));
     }
     if order.len() == 1 {
@@ -223,11 +222,16 @@ pub fn decide(
     Ok((Decision::hold(combine_holds(&holds)), last_scan_ts))
 }
 
-fn persist_last_error(held: Option<&str>) -> Option<String> {
-    if is_retry_error(held) {
+fn persist_last_error(held: Option<&str>, retry_until: f64, now: f64) -> Option<String> {
+    let Some(s) = held else {
+        return None;
+    };
+    // Drop stale retry noise only after backoff; during backoff the footer
+    // must still show why entries are blocked (3AM timeout / 5xx).
+    if is_retry_error(Some(s)) && now >= retry_until {
         None
     } else {
-        held.map(|s| s.to_string())
+        Some(s.to_string())
     }
 }
 
@@ -271,7 +275,12 @@ fn drop_stale_inflight(
     snapshot: &MarketSnapshot,
     last_scan_ts: f64,
     now: f64,
+    retry_until: f64,
 ) -> Vec<String> {
+    // Buy timed out and positionRisk 502: keep the slot so we do not double-buy.
+    if now < retry_until {
+        return pending;
+    }
     if snapshot.live_book
         && snapshot.account_fresh
         && last_scan_ts > 0.0
@@ -362,6 +371,7 @@ pub fn tick_decisions(
             snapshot,
             state.last_scan_ts,
             now,
+            state.retry_until,
         );
         (merged, pending)
     } else {
@@ -571,7 +581,7 @@ pub fn tick_decisions(
         }
     }
     let book: Vec<Position> = merged_list.into_iter().filter(|p| p.qty > Decimal::ZERO).collect();
-    let mut last_error = persist_last_error(state.last_error.as_deref());
+    let mut last_error = persist_last_error(state.last_error.as_deref(), state.retry_until, now);
     if last_error.is_none() {
         last_error = crate::journal::take_last_error();
     }

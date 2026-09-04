@@ -39,6 +39,7 @@ const SNAPSHOT_INTERVAL_SECS: f64 = 5.0;
 /// No successful pull for this long → footer warning (poller hung / panicking).
 pub const SNAPSHOT_STALE_SECS: f64 = 30.0;
 const SNAPSHOT_STALE_MSG: &str = "сеть: снимок рынка завис";
+const SNAPSHOT_PANIC_MSG: &str = "сеть: поток снимка упал, жду следующий pull";
 
 fn now() -> f64 {
     crate::sessions::unix_now()
@@ -215,8 +216,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+fn note_poller_panic<T>(poller: Option<&SnapshotPoller<T>>, state: &mut EngineState) {
+    if poller.is_some_and(|p| p.take_panics() > 0) {
+        state.last_error = Some(SNAPSHOT_PANIC_MSG.into());
+    }
+}
+
 fn paint_frame(stdout: &mut impl Write, frame: &str, profit: Decimal) -> io::Result<()> {
-    let (cols, rows) = crossterm::terminal::size()?;
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let width = (cols.saturating_sub(1) as usize).max(1);
     let lines = fit_lines(frame, width, rows as usize);
     execute!(stdout, Clear(ClearType::All))?;
@@ -359,13 +366,17 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
 
     let result = (|| -> io::Result<()> {
         loop {
+            note_poller_panic(poller.as_ref(), state);
             if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
                 apply_tradfi_skip(state, &pulled.tradfi);
                 snapshot = pulled.snapshot;
                 if snapshot.live_book && snapshot.account_fresh {
                     pin.capture(snapshot.account.starting_equity);
                 }
-                if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
+                if matches!(
+                    state.last_error.as_deref(),
+                    Some(SNAPSHOT_STALE_MSG) | Some(SNAPSHOT_PANIC_MSG)
+                ) {
                     state.last_error = None;
                 }
                 scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
@@ -511,13 +522,17 @@ pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::
 
     let result = (|| -> io::Result<()> {
         loop {
+            note_poller_panic(poller.as_ref(), state);
             if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
                 apply_tradfi_skip(state, &pulled.tradfi);
                 snapshot = pulled.snapshot;
                 if snapshot.live_book && snapshot.account_fresh {
                     pin.capture(snapshot.account.starting_equity);
                 }
-                if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
+                if matches!(
+                    state.last_error.as_deref(),
+                    Some(SNAPSHOT_STALE_MSG) | Some(SNAPSHOT_PANIC_MSG)
+                ) {
                     state.last_error = None;
                 }
                 refresh_day_risk(cfg, state, &snapshot, now());

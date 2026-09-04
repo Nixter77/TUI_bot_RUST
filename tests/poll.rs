@@ -90,3 +90,22 @@ fn panicking_pull_does_not_kill_poller() {
     }
     assert_eq!(got.expect("recovered").tradfi, vec!["ok".to_string()]);
 }
+
+#[test]
+fn panicking_pull_is_counted_for_the_tui() {
+    let poller: SnapshotPoller<MarketSnapshot> = SnapshotPoller::start(Duration::from_secs(30), || -> Pulled<MarketSnapshot> {
+        panic!("boom");
+    })
+    .unwrap();
+    poller.bump();
+    let mut n = 0;
+    for _ in 0..50 {
+        n = poller.take_panics();
+        if n > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(n >= 1, "TUI must see the panic, got {n}");
+    assert_eq!(poller.take_panics(), 0, "count is consumed");
+}

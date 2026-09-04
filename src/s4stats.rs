@@ -19,9 +19,11 @@ pub fn flush_s4_skip_stats() {
     let body = serde_json::Value::Object(map);
     let path = PathBuf::from(S4_SKIP_STATS_PATH);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        crate::errors::ensure_private_dir(parent);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&body) {
-        let _ = fs::write(&path, bytes);
+        if fs::write(&path, bytes).is_ok() {
+            crate::errors::restrict_private_file(&path);
+        }
     }
 }

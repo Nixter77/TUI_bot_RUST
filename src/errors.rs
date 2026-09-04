@@ -2,6 +2,7 @@
 
 use regex::Regex;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::OnceLock;
 
 pub const ACTION_RETRY: &str = "retry";
@@ -238,13 +239,52 @@ pub fn classify(text: &str) -> ClassifiedError {
 fn secret_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?i)\b(signature|api[_-]?key|secret|listenkey)=([^&\s"']+)"#).expect("secret redact regex")
+        Regex::new(
+            r#"(?i)(?:\b(signature|api[_-]?key|secret|listenkey)=([^&\s"']+)|(x-mbx-apikey)[:\s]+(\S+))"#,
+        )
+        .expect("secret redact regex")
     })
 }
 
 /// Strip HMAC/query credentials that ureq may put in transport errors.
 pub fn redact_secrets(text: &str) -> String {
-    secret_re().replace_all(text, "$1=***").into_owned()
+    secret_re()
+        .replace_all(text, |caps: &regex::Captures| {
+            if caps.get(1).is_some() {
+                format!("{}=***", &caps[1])
+            } else {
+                format!("{}: ***", &caps[3])
+            }
+        })
+        .into_owned()
+}
+
+/// `.state/` and similar dirs: owner-only (0700). Best-effort on Unix.
+pub fn ensure_private_dir(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Journal / equity / error logs: owner-only (0600). Best-effort on Unix.
+pub fn restrict_private_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    let _ = path;
+}
+
+/// Signed REST `symbol=` must be compact ASCII (no query injection / log spray).
+pub fn is_safe_order_symbol(symbol: &str) -> bool {
+    let s = symbol.trim();
+    (4..=32).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 pub fn describe_exchange_error(text: &str) -> String {

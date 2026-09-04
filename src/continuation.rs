@@ -297,10 +297,9 @@ pub fn manage_continuation_long(
             };
         }
     }
-    if pos.stop_loss.is_none() {
+    let Some(sl) = pos.stop_loss else {
         return attach_stop_from_entry(pos, mark, p);
-    }
-    let sl = pos.stop_loss.unwrap();
+    };
     if mark <= sl {
         return Decision::ExitPosition {
             reason: "continuation stop loss".into(),

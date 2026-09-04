@@ -2,6 +2,7 @@
 
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -20,6 +21,7 @@ pub struct Pulled<T> {
 pub struct SnapshotPoller<T> {
     wake_tx: Option<Sender<()>>,
     latest: Arc<Mutex<Option<Pulled<T>>>>,
+    panics: Arc<AtomicU64>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -27,7 +29,9 @@ impl<T: Send + 'static> SnapshotPoller<T> {
     pub fn start(interval: Duration, mut pull: impl FnMut() -> Pulled<T> + Send + 'static) -> io::Result<Self> {
         let (wake_tx, wake_rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
+        let panics = Arc::new(AtomicU64::new(0));
         let slot = latest.clone();
+        let panic_slot = panics.clone();
         let join = thread::Builder::new()
             .name("snapshot-poll".into())
             .spawn(move || loop {
@@ -36,13 +40,17 @@ impl<T: Send + 'static> SnapshotPoller<T> {
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
                 // One panicking pull must not kill the thread until morning.
-                if let Ok(pulled) = catch_unwind(AssertUnwindSafe(|| pull())) {
-                    *lock_poison(&slot) = Some(pulled);
+                match catch_unwind(AssertUnwindSafe(|| pull())) {
+                    Ok(pulled) => *lock_poison(&slot) = Some(pulled),
+                    Err(_) => {
+                        panic_slot.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             })?;
         Ok(Self {
             wake_tx: Some(wake_tx),
             latest,
+            panics,
             join: Some(join),
         })
     }
@@ -64,6 +72,13 @@ impl<T: Send + 'static> SnapshotPoller<T> {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+impl<T> SnapshotPoller<T> {
+    /// Panics since last call (catch_unwind). TUI surfaces this immediately.
+    pub fn take_panics(&self) -> u64 {
+        self.panics.swap(0, Ordering::SeqCst)
     }
 }
 

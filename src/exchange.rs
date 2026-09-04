@@ -1,7 +1,7 @@
 //! Exchange helpers: sizing, protective-order shape, optional HTTP client.
 
 use crate::config::Config;
-use crate::errors::{is_retry_error, redact_secrets, RETRY_BACKOFF_SEC};
+use crate::errors::{is_retry_error, is_safe_order_symbol, redact_secrets, RETRY_BACKOFF_SEC};
 use crate::models::{bar_from_kline, Account, Bar, Position, Side, Ticker};
 use crate::money::{dec, quantize_to_step};
 use crate::profit::current_equity;
@@ -696,7 +696,7 @@ impl BinanceFutures {
             info_cache: RefCell::new(None),
             filter_cache: RefCell::new(HashMap::new()),
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs_f64(cfg.http_timeout.max(0.1)))
+                .timeout(Duration::from_secs_f64(cfg.http_timeout.max(1.0)))
                 .build(),
         }
     }
@@ -754,6 +754,12 @@ impl BinanceFutures {
     }
 
     fn signed(&self, params: &BTreeMap<String, String>) -> Result<String, ExchangeError> {
+        if let Some(symbol) = params.get("symbol") {
+            let upper = symbol.trim().to_ascii_uppercase();
+            if !is_safe_order_symbol(&upper) {
+                return Err(ExchangeError("refusing malformed symbol".into()));
+            }
+        }
         let secret = self
             .api_secret
             .as_deref()
@@ -835,7 +841,10 @@ impl BinanceFutures {
             .set("User-Agent", "tui-bot-rust")
             .call()
             .map_err(|e| Self::map_ureq(e, path))
-            .and_then(|resp| resp.into_json().map_err(|e| ExchangeError(e.to_string())));
+            .and_then(|resp| {
+                resp.into_json()
+                    .map_err(|e| ExchangeError(redact_secrets(&e.to_string())))
+            });
         match result {
             // −1021 is rejected before matching. Retry after clock sync.
             // Timeouts after a POST fill are NOT retried; enter_live re-reads positionRisk.
@@ -871,6 +880,9 @@ impl FlattenClient for BinanceFutures {
     }
 
     fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal) -> Result<(), ExchangeError> {
+        if qty <= Decimal::ZERO {
+            return Err(ExchangeError("refusing non-positive close qty".into()));
+        }
         let close_side = if side.eq_ignore_ascii_case("LONG") {
             "SELL"
         } else {

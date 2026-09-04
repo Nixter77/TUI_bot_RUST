@@ -88,26 +88,19 @@ impl TradeJournal {
         let io_err = {
             let _io = lock_poison(&JOURNAL_IO);
             if let Some(parent) = self.path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    Some(format!("journal mkdir: {e}"))
-                } else {
-                    None
-                }
-            } else {
-                None
+                crate::errors::ensure_private_dir(parent);
             }
-            .or_else(|| {
-                match OpenOptions::new().create(true).append(true).open(&self.path) {
-                    Ok(mut f) => {
-                        let line = format!("{json}\n");
-                        f.write_all(line.as_bytes())
-                            .and_then(|_| f.flush())
-                            .err()
-                            .map(|e| format!("journal write: {e}"))
-                    }
-                    Err(e) => Some(format!("journal open: {e}")),
+            match OpenOptions::new().create(true).append(true).open(&self.path) {
+                Ok(mut f) => {
+                    crate::errors::restrict_private_file(&self.path);
+                    let line = format!("{json}\n");
+                    f.write_all(line.as_bytes())
+                        .and_then(|_| f.flush())
+                        .err()
+                        .map(|e| format!("journal write: {e}"))
                 }
-            })
+                Err(e) => Some(format!("journal open: {e}")),
+            }
         };
         if let Some(e) = io_err {
             set_last_error(e);

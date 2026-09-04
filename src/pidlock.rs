@@ -30,13 +30,14 @@ pub fn acquire_live_lock(path: Option<&Path>) -> io::Result<LiveLock> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LIVE_LOCK));
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::errors::ensure_private_dir(parent);
     }
     for _ in 0..3 {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
                 writeln!(f, "{}", std::process::id())?;
                 let _ = f.sync_all();
+                crate::errors::restrict_private_file(&path);
                 return Ok(LiveLock { path });
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {

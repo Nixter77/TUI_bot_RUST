@@ -102,7 +102,7 @@ fn manage_momentum_long(
             symbol: position.symbol.clone(),
         };
     }
-    if position.stop_loss.is_none() {
+    let Some(sl) = position.stop_loss else {
         let cand = match candidate_stop(mark, "LONG", p.trail_pct) {
             Ok(c) => c,
             Err(_) => return Decision::hold("cannot attach stop"),
@@ -115,8 +115,7 @@ fn manage_momentum_long(
             reason: "attach stop".into(),
             symbol: position.symbol.clone(),
         };
-    }
-    let sl = position.stop_loss.unwrap();
+    };
     if mark <= sl {
         return Decision::ExitPosition {
             reason: "momentum stop loss".into(),

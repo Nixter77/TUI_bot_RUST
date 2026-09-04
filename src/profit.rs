@@ -49,7 +49,7 @@ pub fn persist_starting_equity(value: Decimal, path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_BASELINE_PATH));
     let _io = lock_poison(&EQUITY_IO);
     if let Some(parent) = target.parent() {
-        let _ = fs::create_dir_all(parent);
+        crate::errors::ensure_private_dir(parent);
     }
     let text = format!("{}\n", fmt_fixed(value));
     let tmp = target.with_extension("tmp");
@@ -61,11 +61,7 @@ pub fn persist_starting_equity(value: Decimal, path: Option<&Path>) -> PathBuf {
     } else {
         let _ = fs::write(&target, &text);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
-    }
+    crate::errors::restrict_private_file(&target);
     target
 }
 

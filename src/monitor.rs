@@ -355,12 +355,10 @@ fn until_clock(until: f64, now: f64) -> String {
 
 fn next_utc_midnight(now: f64) -> f64 {
     let t = utc_datetime(now);
-    let tomorrow = t.date_naive() + chrono::Duration::days(1);
-    tomorrow
+    (t.date_naive() + chrono::Duration::days(1))
         .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp() as f64
+        .map(|n| n.and_utc().timestamp() as f64)
+        .unwrap_or(now + 86_400.0)
 }
 
 fn next_bar_until(snapshot: &MarketSnapshot, symbol: &str, interval: TradeInterval, now: f64) -> String {
