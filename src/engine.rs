@@ -1,7 +1,7 @@
 //! Strategy orchestration over market snapshots. Pure: returns decisions only.
 
 use crate::config::default_risk_pct;
-use crate::continuation::{continuation_decisions, ContinuationParams};
+use crate::continuation::{continuation_decisions, ContinuationParams, SCAN_SEC};
 use crate::dayrisk::{apply_day_risk, default_daily_loss_r, default_daily_loss_usdt};
 use crate::errors::is_retry_error;
 use crate::models::{
@@ -266,6 +266,31 @@ fn set_cooldown(map: &mut HashMap<String, f64>, symbol: &str, until: f64) {
     map.insert(key, cur.max(until));
 }
 
+fn drop_stale_inflight(
+    pending: Vec<String>,
+    snapshot: &MarketSnapshot,
+    last_scan_ts: f64,
+    now: f64,
+) -> Vec<String> {
+    if snapshot.live_book
+        && snapshot.account_fresh
+        && last_scan_ts > 0.0
+        && now - last_scan_ts >= SCAN_SEC
+    {
+        Vec::new()
+    } else {
+        pending
+    }
+}
+
+fn expire_entries_paused(paused: bool, cooldown_until: f64, now: f64) -> bool {
+    if paused && cooldown_until > 0.0 && now >= cooldown_until {
+        false
+    } else {
+        paused
+    }
+}
+
 fn continuation_params(momentum: Option<&MomentumParams>) -> ContinuationParams {
     let interval = momentum.map(|m| m.s4_interval).unwrap_or_default();
     let mut p = ContinuationParams::default().with_interval(interval);
@@ -327,20 +352,17 @@ pub fn tick_decisions(
             })
             .collect();
         let live_keys: HashSet<String> = merged.iter().map(|p| p.symbol.to_ascii_uppercase()).collect();
-        let mut pending: Vec<String> = state
-            .inflight_symbols
-            .iter()
-            .filter(|s| !live_keys.contains(&s.to_ascii_uppercase()))
-            .cloned()
-            .collect();
-        // Stale inflight after a timeout/no-fill used to occupy slots forever.
-        if snapshot.live_book
-            && snapshot.account_fresh
-            && state.last_scan_ts > 0.0
-            && now - state.last_scan_ts >= 60.0
-        {
-            pending.clear();
-        }
+        let pending = drop_stale_inflight(
+            state
+                .inflight_symbols
+                .iter()
+                .filter(|s| !live_keys.contains(&s.to_ascii_uppercase()))
+                .cloned()
+                .collect(),
+            snapshot,
+            state.last_scan_ts,
+            now,
+        );
         (merged, pending)
     } else {
         let mut merged_list = remembered.clone();
@@ -429,10 +451,7 @@ pub fn tick_decisions(
     }
 
     let mut next_leaders = state.recent_leaders.clone();
-    let mut entries_paused = state.entries_paused;
-    if entries_paused && state.cooldown_until > 0.0 && now >= state.cooldown_until {
-        entries_paused = false;
-    }
+    let entries_paused = expire_entries_paused(state.entries_paused, state.cooldown_until, now);
     let (mut decisions, scan_ts) = if entries_paused {
         (
             vec![Decision::hold("вход на паузе после закрытия всех")],

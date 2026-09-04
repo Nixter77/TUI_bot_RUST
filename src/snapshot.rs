@@ -158,6 +158,7 @@ fn collect_s4_history(
     n: i32,
     scan_due: bool,
     interval: crate::config::TradeInterval,
+    prior: Option<&MarketSnapshot>,
 ) -> (
     HashMap<String, Bar>,
     HashMap<String, Vec<Bar>>,
@@ -166,6 +167,13 @@ fn collect_s4_history(
     let mut last_bars = HashMap::new();
     let mut universe = HashMap::new();
     let mut htf_bars = HashMap::new();
+    if !scan_due {
+        if let Some(prev) = prior {
+            last_bars = prev.last_bars.clone();
+            universe = prev.universe_bars.clone();
+            htf_bars = prev.htf_bars.clone();
+        }
+    }
     if !chart_symbol.is_empty() && !chart_bars.is_empty() {
         universe.insert(chart_symbol.to_string(), chart_bars.to_vec());
         if let Some(closed) = chart_bars.last() {
@@ -524,8 +532,7 @@ pub fn fetch_snapshot(
         }
     }
     if state.strategy_id == 4 {
-        let now = unix_now();
-        let scan_due = state.last_scan_ts <= 0.0 || (now - state.last_scan_ts) >= 60.0;
+        let scan_due = crate::continuation::scan_due(state.last_scan_ts, unix_now());
         let (lb, ub, htf) = collect_s4_history(
             client,
             state,
@@ -536,25 +543,11 @@ pub fn fetch_snapshot(
             cfg.s4_max_positions,
             scan_due,
             cfg.s4_interval,
+            prior,
         );
-        if scan_due {
-            last_bars = lb;
-            universe_bars.extend(ub);
-            htf_bars = htf;
-        } else {
-            // Between scans keep the last book klines. Replacing with the
-            // chart-only stub made the next due scan see "нет 4ч истории".
-            if let Some(prev) = prior {
-                last_bars = prev.last_bars.clone();
-                universe_bars.extend(prev.universe_bars.clone());
-                htf_bars = prev.htf_bars.clone();
-            }
-            last_bars.extend(lb);
-            universe_bars.extend(ub);
-            for (sym, rows) in htf {
-                htf_bars.insert(sym, rows);
-            }
-        }
+        last_bars = lb;
+        universe_bars.extend(ub);
+        htf_bars = htf;
     } else {
         last_bars = collect_last_bars(client, state, &tickers, &chart_symbol, &bars, cfg.max_positions);
     }

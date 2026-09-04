@@ -115,12 +115,6 @@ fn scan_once(
 ) {
     if cfg.live {
         if let Some(rec) = with_live(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
-            if rec.skip_tick {
-                if !rec.last_text.is_empty() {
-                    *last_text = rec.last_text;
-                }
-                return;
-            }
             if !rec.last_text.is_empty() {
                 *last_text = rec.last_text;
             }
@@ -333,15 +327,16 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     // First REST happens before raw mode so Ctrl+C is still SIGINT.
     let mut snapshot = pull_locked(cfg, &client, state, &mut pin, offline, None);
     if cfg.live {
-        let skip = with_live(&client, |c| {
+        let cleaned = with_live(&client, |c| {
             let rec = reconcile_live(cfg, c, state, &snapshot, Some(now()));
-            if rec.skip_tick || !rec.last_text.is_empty() {
+            let dirty = !rec.last_text.is_empty();
+            if dirty {
                 last_text = rec.last_text.clone();
             }
-            rec.skip_tick
+            dirty
         })
         .unwrap_or(false);
-        if skip {
+        if cleaned {
             snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
         }
     }

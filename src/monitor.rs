@@ -561,7 +561,7 @@ fn until_entry(
         }
         WaitKind::Ready => {
             let poll = if state.strategy_id == 4 {
-                60.0
+                crate::continuation::SCAN_SEC
             } else {
                 cfg.poll_seconds.max(1) as f64
             };

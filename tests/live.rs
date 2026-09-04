@@ -747,7 +747,6 @@ fn reconcile_does_not_freeze_desk_after_short_sweep() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(2);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(!rec.skip_tick, "cleanup must not freeze entries: {rec:?}");
     assert!(rec.last_text.contains("чужой шорт"));
 
     let live = Position::long("ETHUSDT", d("0.015"), d("2552.32"), Some(d("2477")), Some(d("2616")));
@@ -758,7 +757,6 @@ fn reconcile_does_not_freeze_desk_after_short_sweep() {
     let mut long_snap = live_book(Some(live.clone()), vec![live]);
     long_snap.tickers = vec![Ticker::new("ETHUSDT", d("2527"), d("1"), d("10"))];
     let rec2 = reconcile_live(&cfg, &mut client, &mut EngineState::new(1), &long_snap, None);
-    assert!(!rec2.skip_tick);
     assert!(rec2.last_text.contains("ETHUSDT"));
 }
 
@@ -858,7 +856,6 @@ fn reconcile_cleans_orphan_stop_without_freezing_entries() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(1);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(!rec.skip_tick, "orphan cancel must not freeze entries: {rec:?}");
     assert!(rec.last_text.contains("сиротский стоп"));
     assert!(rec.last_text.contains("BTCUSDT"));
     assert_eq!(client.protect_cancels, vec!["BTCUSDT"]);

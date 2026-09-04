@@ -974,6 +974,7 @@ fn manage_open_book(
 fn maybe_enter(
     snapshot: &MarketSnapshot,
     positions: &[Position],
+    now: f64,
     inflight: &[String],
     cooldowns: &HashMap<String, f64>,
     p: &ContinuationParams,
@@ -1116,6 +1117,7 @@ pub fn continuation_decisions(
     let out = maybe_enter(
         snapshot,
         positions,
+        now,
         inflight,
         cooldowns,
         p,
