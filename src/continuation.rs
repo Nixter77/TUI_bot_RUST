@@ -19,6 +19,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
+/// Book kline fetch and new-entry scan share this cadence.
+pub const SCAN_SEC: f64 = 60.0;
+
+pub fn scan_due(last_scan_ts: f64, now: f64) -> bool {
+    last_scan_ts <= 0.0 || (now - last_scan_ts) >= SCAN_SEC
+}
 
 fn s4_skip_tally() -> &'static Mutex<HashMap<String, u64>> {
     static TALLY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
@@ -91,7 +97,7 @@ impl Default for ContinuationParams {
             min_change_percent: Decimal::new(5, 1),
             min_quote_volume: Decimal::from(50_000),
             min_price: Decimal::new(5, 1),
-            max_change_percent: Some(Decimal::from(12)),
+            max_change_percent: Some(Decimal::from(20)),
             liquid_frac: Decimal::new(2, 2),
             liquid_n: 20,
             week_leader_pct: Decimal::from(4),
@@ -758,7 +764,9 @@ fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &Continuatio
 
 fn skip_24h_tape(ticker: &Ticker, p: &ContinuationParams) -> Option<String> {
     let c = ticker.price_change_percent;
-    if c >= p.stretch_pct || c <= -p.stretch_pct {
+    // Dumps and dead tape stay out. A green day above `stretch_pct` is a
+    // pullback candidate — chase is `near_24h_high`, not "anyone +4%".
+    if c <= -p.stretch_pct {
         return Some("улетело за день — не догоняю".into());
     }
     if c < Decimal::ZERO || c < p.min_change_percent {
@@ -966,15 +974,13 @@ fn manage_open_book(
 fn maybe_enter(
     snapshot: &MarketSnapshot,
     positions: &[Position],
-    now: f64,
-    last_scan_ts: f64,
     inflight: &[String],
     cooldowns: &HashMap<String, f64>,
     p: &ContinuationParams,
     exclude: &[String],
     recent_leaders: &[String],
     mut out: Vec<Decision>,
-) -> (Vec<Decision>, f64) {
+) -> Vec<Decision> {
     let held: HashSet<String> = positions
         .iter()
         .filter(|pos| pos.qty > Decimal::ZERO)
@@ -1030,26 +1036,16 @@ fn maybe_enter(
         }
     }
     if !out.is_empty() {
-        return (out, now);
-    }
-    if !not_green.is_empty() {
-        return (
-            vec![Decision::hold("слот не в плюсе — новый не открываю")],
-            last_scan_ts,
-        );
-    }
-    if held.len() as i32 >= p.max_positions {
-        return (
-            vec![Decision::hold("continuation book full")],
-            last_scan_ts,
-        );
-    }
-    (
+        out
+    } else if !not_green.is_empty() {
+        vec![Decision::hold("слот не в плюсе — новый не открываю")]
+    } else if held.len() as i32 >= p.max_positions {
+        vec![Decision::hold("continuation book full")]
+    } else {
         vec![Decision::hold(
             last_skip.unwrap_or_else(|| "нет входа в топ роста".into()),
-        )],
-        last_scan_ts,
-    )
+        )]
+    }
 }
 
 /// Manage open longs, then at most one new enter per 60s scan.
@@ -1107,8 +1103,7 @@ pub fn continuation_decisions(
         }
         return (out, last_scan_ts, leaders);
     }
-    let due = last_scan_ts <= 0.0 || (now - last_scan_ts) >= 60.0;
-    if !due {
+    if !scan_due(last_scan_ts, now) {
         if out.is_empty() {
             return (
                 vec![Decision::hold("waiting for next scan")],
@@ -1118,11 +1113,9 @@ pub fn continuation_decisions(
         }
         return (out, last_scan_ts, leaders);
     }
-    let (out, scan_ts) = maybe_enter(
+    let out = maybe_enter(
         snapshot,
         positions,
-        now,
-        last_scan_ts,
         inflight,
         cooldowns,
         p,
@@ -1130,5 +1123,5 @@ pub fn continuation_decisions(
         recent_leaders,
         out,
     );
-    (out, scan_ts, leaders)
+    (out, now, leaders)
 }

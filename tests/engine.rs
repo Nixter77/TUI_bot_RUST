@@ -1178,8 +1178,32 @@ fn strategy4_does_not_chase_24h_stretch() {
         "{decisions:?}"
     );
     assert!(
-        decisions.iter().any(|d| d.reason().contains("улетело") || is_enter(d)),
-        "{decisions:?}"
+        decisions.iter().any(is_enter),
+        "liquid mid-tape pullback should still enter: {decisions:?}"
+    );
+}
+
+#[test]
+fn strategy4_enters_green_day_off_the_24h_high() {
+    let mut avax = Ticker::new("AVAXUSDT", d("100"), d("8.0"), d("50000000"));
+    avax.high_price = d("110");
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![avax];
+    snap.account = account();
+    snap.chart_symbol = "AVAXUSDT".into();
+    snap.account_ok = true;
+    attach_pullback(&mut snap, &[("AVAXUSDT", 100.0)]);
+    let mom = MomentumParams {
+        s4_always_enter: true,
+        s4_entry_windows: Vec::new(),
+        max_positions: 1,
+        s4_max_positions: 1,
+        ..MomentumParams::default()
+    };
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    assert!(
+        decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
+        "pullback of a +8% liquid name off the high must enter: {decisions:?}"
     );
 }
 
@@ -2296,9 +2320,14 @@ fn strategy4_book_uses_liquid_n_not_max_plus_four() {
         // Mild positive 24h — inside dump/stretch gates.
         tickers.push(Ticker::new(&sym, d("10"), d("1.2"), vol));
     }
-    // A dump and a stretch must stay filtered out of the entry book.
+    // A dump stays out. A green +8% off the high is a pullback candidate (not a chase).
     tickers.push(Ticker::new("DUMPUSDT", d("10"), d("-3.0"), d("60000000")));
-    tickers.push(Ticker::new("PUMPUSDT", d("10"), d("8.0"), d("60000000")));
+    let mut pump = Ticker::new("PUMPUSDT", d("10"), d("8.0"), d("60000000"));
+    pump.high_price = d("10.01");
+    tickers.push(pump);
+    let mut pulled = Ticker::new("PULLUSDT", d("9.5"), d("8.0"), d("60000000"));
+    pulled.high_price = d("10.5");
+    tickers.push(pulled);
     let p = ContinuationParams {
         max_positions: 3,
         liquid_n: 20,
@@ -2310,7 +2339,14 @@ fn strategy4_book_uses_liquid_n_not_max_plus_four() {
     assert!(book.len() > 7, "entry book should exceed old max_positions+4; got {}", book.len());
     assert!(book.len() <= 20);
     assert!(!book.iter().any(|t| t.symbol == "DUMPUSDT"));
-    assert!(!book.iter().any(|t| t.symbol == "PUMPUSDT" || t.price_change_percent >= d("4")));
+    assert!(
+        !book.iter().any(|t| t.symbol == "PUMPUSDT"),
+        "name sitting on 24h high is a chase: {book:?}"
+    );
+    assert!(
+        book.iter().any(|t| t.symbol == "PULLUSDT"),
+        "green +8% off the high belongs in the book: {book:?}"
+    );
 }
 
 #[test]

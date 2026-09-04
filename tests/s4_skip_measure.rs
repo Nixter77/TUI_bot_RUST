@@ -68,8 +68,7 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
     // Mirror pick_strategy4_book filter (measurement only; thresholds untouched).
     for t in &uni {
         let c = t.price_change_percent;
-        let tape = c >= p.stretch_pct
-            || c <= -p.stretch_pct
+        let tape = c <= -p.stretch_pct
             || c < Decimal::ZERO
             || c < p.min_change_percent
             || p.max_change_percent.map(|m| c > m).unwrap_or(false);
@@ -148,7 +147,7 @@ fn measure_near_high_skip_rate_from_public_tape_if_reachable() {
     let mut reasons: HashMap<&'static str, u64> = HashMap::new();
     for t in &uni {
         let c = t.price_change_percent;
-        if c >= p.stretch_pct || c <= -p.stretch_pct {
+        if c <= -p.stretch_pct {
             tape_skip += 1;
             *reasons.entry("stretch").or_default() += 1;
             continue;

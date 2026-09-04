@@ -327,12 +327,20 @@ pub fn tick_decisions(
             })
             .collect();
         let live_keys: HashSet<String> = merged.iter().map(|p| p.symbol.to_ascii_uppercase()).collect();
-        let pending = state
+        let mut pending: Vec<String> = state
             .inflight_symbols
             .iter()
             .filter(|s| !live_keys.contains(&s.to_ascii_uppercase()))
             .cloned()
             .collect();
+        // Stale inflight after a timeout/no-fill used to occupy slots forever.
+        if snapshot.live_book
+            && snapshot.account_fresh
+            && state.last_scan_ts > 0.0
+            && now - state.last_scan_ts >= 60.0
+        {
+            pending.clear();
+        }
         (merged, pending)
     } else {
         let mut merged_list = remembered.clone();
@@ -421,7 +429,11 @@ pub fn tick_decisions(
     }
 
     let mut next_leaders = state.recent_leaders.clone();
-    let (mut decisions, scan_ts) = if state.entries_paused {
+    let mut entries_paused = state.entries_paused;
+    if entries_paused && state.cooldown_until > 0.0 && now >= state.cooldown_until {
+        entries_paused = false;
+    }
+    let (mut decisions, scan_ts) = if entries_paused {
         (
             vec![Decision::hold("вход на паузе после закрытия всех")],
             state.last_scan_ts,
@@ -555,7 +567,7 @@ pub fn tick_decisions(
         inflight_symbols: inflight.into_iter().filter(|s| s != "*").collect(),
         cooldowns,
         strategy_id: state.strategy_id,
-        entries_paused: state.entries_paused,
+        entries_paused,
         skip_symbols: state.skip_symbols,
         skip_reasons: state.skip_reasons,
         day_utc: state.day_utc,

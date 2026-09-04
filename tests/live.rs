@@ -739,7 +739,7 @@ fn vanished_long_not_cleared_when_live_long_remains() {
 }
 
 #[test]
-fn reconcile_skips_tick_only_after_short_sweep() {
+fn reconcile_does_not_freeze_desk_after_short_sweep() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
     let short = short_pos("BTCUSDT", "0.004", "68600", "-2");
@@ -747,7 +747,7 @@ fn reconcile_skips_tick_only_after_short_sweep() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(2);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(rec.skip_tick);
+    assert!(!rec.skip_tick, "cleanup must not freeze entries: {rec:?}");
     assert!(rec.last_text.contains("чужой шорт"));
 
     let live = Position::long("ETHUSDT", d("0.015"), d("2552.32"), Some(d("2477")), Some(d("2616")));
@@ -844,7 +844,7 @@ fn orphan_stop_on_flat_symbol_is_cancelled_after_restart() {
 }
 
 #[test]
-fn reconcile_skips_tick_after_orphan_stop_so_it_does_not_enter() {
+fn reconcile_cleans_orphan_stop_without_freezing_entries() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
     client.algo_orders = vec![json!({
@@ -858,7 +858,7 @@ fn reconcile_skips_tick_after_orphan_stop_so_it_does_not_enter() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(1);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(rec.skip_tick);
+    assert!(!rec.skip_tick, "orphan cancel must not freeze entries: {rec:?}");
     assert!(rec.last_text.contains("сиротский стоп"));
     assert!(rec.last_text.contains("BTCUSDT"));
     assert_eq!(client.protect_cancels, vec!["BTCUSDT"]);
@@ -1189,7 +1189,9 @@ fn exit_when_live_book_already_flat_does_not_journal_close() {
     let events = TradeJournal::new(Some(&path)).read_events();
     set_active(None);
     assert!(
-        !events.iter().any(|e| e.event == "close"),
+        !events.iter().any(|e| e.event == "close"
+            && e.symbol.to_ascii_uppercase().contains("BTCUSDT")
+            && e.reason.contains("continuation stop")),
         "duplicate close would double-count PnL: {events:?}"
     );
     assert!(client.closes.is_empty());

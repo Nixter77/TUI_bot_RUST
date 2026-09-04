@@ -975,6 +975,10 @@ pub fn record_flatten(state: &mut EngineState, result: FlattenResult, pause_entr
             state.entry_inflight = false;
             state.inflight_symbols.clear();
             state.entries_paused = true;
+            let until = unix_now() + COOLDOWN_SEC;
+            if until > state.cooldown_until {
+                state.cooldown_until = until;
+            }
         } else {
             state.positions.retain(|p| !closed_syms.contains(&p.symbol));
             state.position = state.positions.first().cloned();
@@ -1140,6 +1144,10 @@ pub fn apply_decision(
             }
             if info.action == ACTION_OPERATOR {
                 state.entries_paused = true;
+                let until = unix_now() + COOLDOWN_SEC;
+                if until > state.cooldown_until {
+                    state.cooldown_until = until;
+                }
             } else if let Decision::EnterLong { symbol, .. } = decision {
                 if info.action == ACTION_SKIP || info.action == ACTION_COOLDOWN {
                     let up = symbol.to_ascii_uppercase();
@@ -1662,15 +1670,17 @@ pub fn reconcile_live(
     clear_vanished_longs(cfg, client, state, snapshot, now_ts);
     let orphans = clear_orphan_protectives(cfg, client, state, snapshot);
     let swept = sweep_rogue_shorts(cfg, client, state, snapshot, now);
+    // Cleanup must not skip the strategy tick. A leftover algo that fails
+    // to cancel used to set skip_tick every poll and freeze entries for hours.
     if !swept.closed.is_empty() {
         return ReconcileResult {
-            skip_tick: true,
+            skip_tick: false,
             last_text: format!("закрыл чужой шорт: {}", swept.closed.join(", ")),
         };
     }
     if !orphans.is_empty() {
         return ReconcileResult {
-            skip_tick: true,
+            skip_tick: false,
             last_text: format!("снял сиротский стоп: {}", orphans.join(", ")),
         };
     }

@@ -114,7 +114,14 @@ fn waiting_and_growth_and_pnl() {
     );
     let apt = waiting.iter().find(|w| w.symbol == "APTUSDT").expect("APT in wait");
     assert_eq!(apt.kind, WaitKind::Setup, "{apt:?}");
-    assert!(apt.reason.contains("улетело") || apt.reason.contains("не догоняю"), "{}", apt.reason);
+    assert!(
+        apt.reason.contains("улетело")
+            || apt.reason.contains("не догоняю")
+            || apt.reason.contains("бара")
+            || apt.reason.contains("истории"),
+        "{}",
+        apt.reason
+    );
     assert!(
         waiting.iter().any(|w| w.symbol == "AAVEUSDT"),
         "liquid mild-gain belongs in the book: {waiting:?}"

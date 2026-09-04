@@ -537,9 +537,24 @@ pub fn fetch_snapshot(
             scan_due,
             cfg.s4_interval,
         );
-        last_bars = lb;
-        universe_bars.extend(ub);
-        htf_bars = htf;
+        if scan_due {
+            last_bars = lb;
+            universe_bars.extend(ub);
+            htf_bars = htf;
+        } else {
+            // Between scans keep the last book klines. Replacing with the
+            // chart-only stub made the next due scan see "нет 4ч истории".
+            if let Some(prev) = prior {
+                last_bars = prev.last_bars.clone();
+                universe_bars.extend(prev.universe_bars.clone());
+                htf_bars = prev.htf_bars.clone();
+            }
+            last_bars.extend(lb);
+            universe_bars.extend(ub);
+            for (sym, rows) in htf {
+                htf_bars.insert(sym, rows);
+            }
+        }
     } else {
         last_bars = collect_last_bars(client, state, &tickers, &chart_symbol, &bars, cfg.max_positions);
     }
