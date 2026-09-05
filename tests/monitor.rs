@@ -114,11 +114,13 @@ fn waiting_and_growth_and_pnl() {
     );
     let apt = waiting.iter().find(|w| w.symbol == "APTUSDT").expect("APT in wait");
     assert_eq!(apt.kind, WaitKind::Setup, "{apt:?}");
+    // +20% is inside max_change 35% — stretch_pct only dumps; wait is bars/HTF, not «улетело».
     assert!(
-        apt.reason.contains("улетело")
-            || apt.reason.contains("не догоняю")
-            || apt.reason.contains("бара")
-            || apt.reason.contains("истории"),
+        apt.reason.contains("бара")
+            || apt.reason.contains("истории")
+            || apt.reason.contains("EMA")
+            || apt.reason.contains("откат")
+            || apt.reason.contains("объём"),
         "{}",
         apt.reason
     );
@@ -142,11 +144,16 @@ fn waiting_and_growth_and_pnl() {
     assert!(frame.contains("VVVUSDT"), "{frame}");
     assert!(frame.contains("нетто=-8.0500") || frame.contains("нетто=-8.05"), "{frame}");
     assert!(frame.contains("APTUSDT"), "{frame}");
-    assert!(frame.contains("[сетап]") || frame.contains("улетело"), "{frame}");
+    assert!(frame.contains("[сетап]"), "{frame}");
     assert!(frame.contains("до входа:"), "{frame}");
     assert!(
-        apt.until.contains("24h") || apt.until.contains("ещё"),
-        "stretched name must show remaining to entry band: {}",
+        !apt.until.contains("надо < 4%") && !apt.until.contains("надо <4%"),
+        "green day above stretch_pct must NOT use stretch as upper cap: {}",
+        apt.until
+    );
+    assert!(
+        apt.until.contains("свечу") || apt.until.contains("ещё") || apt.until.contains("ждёт"),
+        "in-band setup must show bar/HTF until: {}",
         apt.until
     );
 }

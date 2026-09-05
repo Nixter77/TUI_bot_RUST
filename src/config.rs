@@ -104,7 +104,7 @@ impl TradeInterval {
     pub fn min_pullback_pct(self) -> Decimal {
         match self {
             Self::Minute5 => Decimal::new(10, 3),
-            Self::Minute15 => Decimal::new(12, 3),
+            Self::Minute15 => Decimal::new(10, 3), // soften vs 1.2% — empty-book killer on 15m
             Self::Minute30 => Decimal::new(15, 3),
             Self::Hour1 => Decimal::new(20, 3),
         }

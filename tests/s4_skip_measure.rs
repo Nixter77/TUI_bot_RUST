@@ -21,7 +21,7 @@ fn mk(sym: &str, last: &str, chg: &str, vol: &str, high: &str) -> Ticker {
 
 #[test]
 fn measure_near_high_skip_rate_on_fixture_universe() {
-    // Production defaults: near_high_frac=5%, stretch=4%, min_change=0.5%, max_change=12%.
+    // Production defaults: near_high_frac=5%, stretch=4% (dumps), min_change=0.5%, max_change=35%.
     let p = ContinuationParams {
         liquid_n: 20,
         ..ContinuationParams::default()
@@ -37,7 +37,7 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
                 tickers.push(mk(&sym, "10.0", "3.0", &vol, "10.05"));
             }
             1 => {
-                // stretch_pct (>=4%)
+                // green stretch (>=4%): NOT a tape skip — dump-only stretch_pct
                 tickers.push(mk(&sym, "10.0", "5.0", &vol, "12.0"));
             }
             2 => {
@@ -45,12 +45,12 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
                 tickers.push(mk(&sym, "10.0", "0.2", &vol, "11.0"));
             }
             3 => {
-                // eligible: far enough off high, mid change under max 12
+                // eligible: far enough off high, mid change under max 35
                 tickers.push(mk(&sym, "9.4", "3.0", &vol, "10.0")); // >5% off high
             }
             _ => {
-                // max_change (>12)
-                tickers.push(mk(&sym, "9.7", "15.0", &vol, "12.0"));
+                // max_change (>35)
+                tickers.push(mk(&sym, "9.7", "40.0", &vol, "12.0"));
             }
         }
     }

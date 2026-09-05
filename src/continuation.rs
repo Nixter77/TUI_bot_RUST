@@ -97,8 +97,8 @@ impl Default for ContinuationParams {
             min_change_percent: Decimal::new(5, 1),
             min_quote_volume: Decimal::from(50_000),
             min_price: Decimal::new(5, 1),
-            max_change_percent: Some(Decimal::from(20)),
-            liquid_frac: Decimal::new(2, 2),
+            max_change_percent: Some(Decimal::from(35)),
+            liquid_frac: Decimal::new(5, 3), // 0.5% of max vol — 2% zeroed book on outlier tape
             liquid_n: 20,
             week_leader_pct: Decimal::from(4),
             stretch_pct: Decimal::from(4),
@@ -112,7 +112,7 @@ impl Default for ContinuationParams {
             max_positions: 5,
             atr_period: 14,
             atr_k: Decimal::from(2),
-            volume_confirm_frac: Decimal::new(5, 1), // 0.5
+            volume_confirm_frac: Decimal::new(3, 1), // 0.3
             min_pullback_pct: TradeInterval::Minute5.min_pullback_pct(),
             stop_lookback: 3,
             interval: TradeInterval::Minute5,

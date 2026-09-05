@@ -3,11 +3,14 @@
 ## Сейчас
 **Сначала живой стол, воронка ослаблена** (UI hang fix + funnel soften).
 
-Воронка (чтобы бот чаще входил):
+Воронка расширена чтобы снова были входы (max 24h **35%**):
+- `max_change_percent` default **35** (было 20) — мега-пампы всё ещё out.
+- `liquid_frac` default **0.5%** (было 2%) — outlier vol больше не обнуляет книгу.
 - `near_high_frac` default **0.05** (было 0.02).
 - 4h entry: только close > EMA20 — **без** 4h higher-low (был choke).
 - Новые слоты до `max_positions` **без** требования «все открытые в плюсе».
-- `volume_confirm_frac` default **0.5** (было 0.8).
+- `volume_confirm_frac` default **0.3** (было 0.5 / ранее 0.8).
+- `min_pullback_pct` на **15m** **1.0%** (было 1.2%) — меньше пустых книг на 15m.
 - Loss cooldown 12h — без изменений (не env).
 
 ## Уже сделано / KEEP

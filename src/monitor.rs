@@ -403,27 +403,26 @@ fn pct_gap(value: Decimal) -> String {
     format!("{}", value.abs().round_dp(1).normalize())
 }
 
-/// How far 24h % is from the S4 buy band [min_change, stretch).
+/// How far 24h % is from the S4 buy band [min_change, max_change].
+/// `stretch_pct` only blocks dumps (negative 24h) — same as `skip_24h_tape`.
 fn tape_until(change: Decimal, p: &ContinuationParams) -> Option<String> {
     let lo = if p.min_change_percent > Decimal::ZERO {
         p.min_change_percent
     } else {
         Decimal::ZERO
     };
-    let mut hi = p.stretch_pct;
+    // Mega-pump above max_change — ask for cool-off. Green stretch under max is OK.
     if let Some(max_c) = p.max_change_percent {
-        if max_c < hi {
-            hi = max_c;
+        if change > max_c {
+            let gap = (change - max_c).max(Decimal::new(1, 1));
+            return Some(format!(
+                "ещё {}% 24h вниз (надо ≤ {}%)",
+                pct_gap(gap),
+                pct_gap(max_c)
+            ));
         }
     }
-    if change >= p.stretch_pct || p.max_change_percent.is_some_and(|m| change > m) {
-        let gap = (change - hi).max(Decimal::new(1, 1));
-        return Some(format!(
-            "ещё {}% 24h вниз (надо < {}%)",
-            pct_gap(gap),
-            pct_gap(hi)
-        ));
-    }
+    // Dump (≤ -stretch) or weak/flat day — need green lift into the band.
     if change <= -p.stretch_pct || change < lo {
         let need = (lo - change).max(Decimal::new(1, 1));
         return Some(format!(
