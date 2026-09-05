@@ -1565,20 +1565,34 @@ pub fn clear_orphan_protectives(
     }
     let live_longs = live_long_keys(snapshot);
     let mut leftover = BTreeSet::new();
-    if let Ok(rows) = client.open_algo_orders(None) {
-        leftover.extend(collect_order_symbols(&rows));
-    }
-    if let Ok(rows) = client.open_orders(None) {
-        leftover.extend(collect_order_symbols(&rows));
-    }
-    for symbol in probe_orphan_symbols(snapshot, state) {
-        if live_longs.contains(&symbol) || leftover.contains(&symbol) {
-            continue;
+    // Prefer account-wide listings. Per-symbol probes are only a fallback when
+    // both global calls fail — otherwise every TUI tick hammered BTC/ETH/SOL/chart
+    // with 2×N REST on the UI thread (felt like a hang).
+    let mut listed_ok = false;
+    match client.open_algo_orders(None) {
+        Ok(rows) => {
+            leftover.extend(collect_order_symbols(&rows));
+            listed_ok = true;
         }
-        let algos = client.open_algo_orders(Some(&symbol)).ok().unwrap_or_default();
-        let orders = client.open_orders(Some(&symbol)).ok().unwrap_or_default();
-        if !algos.is_empty() || !orders.is_empty() {
-            leftover.insert(symbol);
+        Err(_) => {}
+    }
+    match client.open_orders(None) {
+        Ok(rows) => {
+            leftover.extend(collect_order_symbols(&rows));
+            listed_ok = true;
+        }
+        Err(_) => {}
+    }
+    if !listed_ok {
+        for symbol in probe_orphan_symbols(snapshot, state) {
+            if live_longs.contains(&symbol) {
+                continue;
+            }
+            let algos = client.open_algo_orders(Some(&symbol)).ok().unwrap_or_default();
+            let orders = client.open_orders(Some(&symbol)).ok().unwrap_or_default();
+            if !algos.is_empty() || !orders.is_empty() {
+                leftover.insert(symbol);
+            }
         }
     }
     leftover.retain(|symbol| !live_longs.contains(symbol));

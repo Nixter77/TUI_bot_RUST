@@ -1870,7 +1870,8 @@ fn strategy4_skips_24h_dump_with_5m_pullback() {
 }
 
 #[test]
-fn strategy4_second_slot_waits_until_first_is_green() {
+fn strategy4_second_slot_opens_while_first_not_green() {
+    // Desk restore: allow next liquid up to max_positions even if open slots are flat/red.
     let mut snap = strategy4_ready_snap();
     snap.live_book = true;
     snap.tickers = vec![
@@ -1895,15 +1896,8 @@ fn strategy4_second_slot_waits_until_first_is_green() {
     };
     let (_, flat) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
     assert!(
-        !flat.iter().any(is_enter),
-        "0-pnl slot must not scale in: {flat:?}"
-    );
-    state.positions[0].unrealized_pnl = d("0.001");
-    snap.open_positions[0].unrealized_pnl = d("0.001");
-    let (_, green) = tick_decisions(&state, &snap, london_ts() + 60.0, Some(&mom), None, None);
-    assert!(
-        green.iter().any(|d| is_enter(d) && d.symbol() == "LINKUSDT"),
-        "{green:?}"
+        flat.iter().any(|d| is_enter(d) && d.symbol() == "LINKUSDT"),
+        "flat first slot must not block next liquid: {flat:?}"
     );
 }
 
@@ -2384,8 +2378,8 @@ fn strategy4_book_uses_liquid_n_not_max_plus_four() {
 }
 
 #[test]
-fn strategy4_htf_skips_flat_swings_even_if_close_above_ema20() {
-    // Declining 4h swing lows block entry even when close > EMA20.
+fn strategy4_htf_allows_entry_without_4h_higher_low_if_close_above_ema20() {
+    // 4h HL dropped from the funnel; declining swings alone must not block when close > EMA20.
     let mut snap = strategy4_ready_snap();
     let mut htf = htf_up_4h_at(100.0);
     let n = htf.len();
@@ -2411,9 +2405,12 @@ fn strategy4_htf_skips_flat_swings_even_if_close_above_ema20() {
         ..MomentumParams::default()
     };
     let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
-    assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
-        decisions.iter().any(|d| d.reason().contains("4ч нет higher low")),
+        decisions.iter().any(is_enter),
+        "close>EMA20 without 4h HL must still enter: {decisions:?}"
+    );
+    assert!(
+        !decisions.iter().any(|d| d.reason().contains("4ч нет higher low")),
         "{decisions:?}"
     );
 }
@@ -2445,7 +2442,7 @@ fn strategy4_default_s4_max_positions_is_five() {
 }
 
 #[test]
-fn skip_no_htf_trend_requires_4h_higher_low_when_swings_exist() {
+fn skip_no_htf_trend_only_requires_close_above_ema20() {
     let mut snap = MarketSnapshot::empty(d("10000"));
     let mut htf = htf_up_4h_at(100.0);
     let n = htf.len();
@@ -2464,10 +2461,9 @@ fn skip_no_htf_trend_requires_4h_higher_low_when_swings_exist() {
         last.low = d("98");
     }
     snap.htf_bars.insert("AVAXUSDT".into(), htf.clone());
-    let flat = tui_bot::continuation::skip_no_htf_trend(&snap, "AVAXUSDT");
     assert!(
-        flat.as_deref().unwrap_or("").contains("4ч нет higher low"),
-        "declining 4h swings must skip: {flat:?}"
+        tui_bot::continuation::skip_no_htf_trend(&snap, "AVAXUSDT").is_none(),
+        "declining 4h swings with close>EMA20 must pass (HL gate removed)"
     );
     snap.htf_bars.insert("AVAXUSDT".into(), htf_up_4h_at(100.0));
     assert!(

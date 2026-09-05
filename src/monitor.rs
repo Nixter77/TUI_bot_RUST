@@ -223,8 +223,10 @@ fn global_gate(
     if open.len() as i32 >= max.max(1) {
         return Some(format!("корзина полная ({}/{})", open.len(), max.max(1)));
     }
+    // S4: allow next liquid up to max_positions regardless of open PnL (desk restore).
+    // S1: still wait for green before scaling the basket.
     let not_green = open.iter().any(|p| p.unrealized_pnl <= Decimal::ZERO);
-    if !open.is_empty() && not_green && (state.strategy_id == 1 || state.strategy_id == 4) {
+    if !open.is_empty() && not_green && state.strategy_id == 1 {
         return Some("слот не в плюсе — новый не открываю".into());
     }
     None

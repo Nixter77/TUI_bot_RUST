@@ -95,6 +95,15 @@ fn with_live<R>(
     g.as_mut().map(|c| f(c as &mut dyn LiveClient))
 }
 
+/// Prefer not blocking the TUI paint/key loop when the snapshot poller holds the client.
+fn with_live_try<R>(
+    client: &Mutex<Option<BinanceFutures>>,
+    f: impl FnOnce(&mut dyn LiveClient) -> R,
+) -> Option<R> {
+    let mut g = client.try_lock().ok()?;
+    g.as_mut().map(|c| f(c as &mut dyn LiveClient))
+}
+
 /// True when the tape (tickers / «Топ роста») must be re-fetched.
 /// Independent of the 200ms key poll so resize/mouse/keys cannot freeze the board.
 pub fn snapshot_due(now: f64, last_at: f64) -> bool {
@@ -105,22 +114,14 @@ pub fn snapshot_stale(now: f64, last_at: f64) -> bool {
     now - last_at >= SNAPSHOT_STALE_SECS
 }
 
-fn scan_once(
-    cfg: &Config,
-    client: &Mutex<Option<BinanceFutures>>,
+/// Pure strategy tick + last_text. No exchange HTTP (keeps the key/paint loop moving).
+fn tick_once(
     state: &mut EngineState,
     snapshot: &MarketSnapshot,
     last_text: &mut String,
     momentum: &MomentumParams,
     scalp: &ScalpParams,
-) {
-    if cfg.live {
-        if let Some(rec) = with_live(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
-            if !rec.last_text.is_empty() {
-                *last_text = rec.last_text;
-            }
-        }
-    }
+) -> Vec<Decision> {
     let (new_state, decisions) =
         tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None);
     *state = new_state;
@@ -128,29 +129,44 @@ fn scan_once(
         .first()
         .map(|d| d.reason().to_string())
         .unwrap_or_else(|| "—".into());
-    if cfg.live {
-        if let Some(()) = with_live(client, |c| {
-            for d in &decisions {
-                apply_decision(cfg, c, state, snapshot, d);
-            }
-        }) {
-            return;
-        }
-    } else {
-        for d in &decisions {
+    if state.strategy_id == 4 {
+        crate::s4stats::flush_s4_skip_stats();
+    }
+    decisions
+}
+
+/// Live reconcile + apply. Uses try_lock so a long snapshot pull cannot freeze keys.
+fn apply_live_once(
+    cfg: &Config,
+    client: &Mutex<Option<BinanceFutures>>,
+    state: &mut EngineState,
+    snapshot: &MarketSnapshot,
+    last_text: &mut String,
+    decisions: &[Decision],
+) {
+    if !cfg.live {
+        for d in decisions {
             apply_paper_decision(state, snapshot, d);
         }
+        return;
     }
+    if let Some(rec) = with_live_try(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
+        if !rec.last_text.is_empty() {
+            *last_text = rec.last_text;
+        }
+    }
+    let _ = with_live_try(client, |c| {
+        for d in decisions {
+            apply_decision(cfg, c, state, snapshot, d);
+        }
+    });
     let has_pos = snapshot.position.is_some()
         || !state.positions.is_empty()
         || snapshot
             .open_positions
             .iter()
             .any(|p| p.qty > rust_decimal::Decimal::ZERO);
-    if state.strategy_id == 4 {
-        crate::s4stats::flush_s4_skip_stats();
-    }
-    for d in &decisions {
+    for d in decisions {
         let won = if let Decision::ExitPosition { reason, symbol } = d {
             if reason_suggests_win(reason) {
                 Some(true)
@@ -171,6 +187,19 @@ fn scan_once(
         };
         emit_decision(d, &LiveApplyResult::default(), false, has_pos, won);
     }
+}
+
+fn scan_once(
+    cfg: &Config,
+    client: &Mutex<Option<BinanceFutures>>,
+    state: &mut EngineState,
+    snapshot: &MarketSnapshot,
+    last_text: &mut String,
+    momentum: &MomentumParams,
+    scalp: &ScalpParams,
+) {
+    let decisions = tick_once(state, snapshot, last_text, momentum, scalp);
+    apply_live_once(cfg, client, state, snapshot, last_text, &decisions);
 }
 
 /// Always leave the user's terminal usable, even on panic after raw mode.
@@ -367,6 +396,7 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     let result = (|| -> io::Result<()> {
         loop {
             note_poller_panic(poller.as_ref(), state);
+            let mut pending_live: Option<Vec<Decision>> = None;
             if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
                 apply_tradfi_skip(state, &pulled.tradfi);
                 snapshot = pulled.snapshot;
@@ -379,13 +409,18 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
                 ) {
                     state.last_error = None;
                 }
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
+                // CPU tick first so paint shows waiting criteria before any REST.
+                pending_live = Some(tick_once(
+                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
                 last_snap_at = now();
             } else if poller.is_none() && snapshot_due(now(), last_snap_at) {
                 last_snap_at = now();
                 snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
+                pending_live = Some(tick_once(
+                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
             } else if poller.is_some() && snapshot_stale(now(), last_snap_at) && state.last_error.is_none() {
                 state.last_error = Some(SNAPSHOT_STALE_MSG.into());
@@ -401,6 +436,12 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
             );
             let frame = render_frame(&view);
             paint(&mut stdout, &view, &frame)?;
+
+            // Live REST after paint. try_lock skips if poller already grabbed the client.
+            if let Some(decisions) = pending_live.take() {
+                apply_live_once(cfg, &client, state, &snapshot, &mut last_text, &decisions);
+                publish_poll(&poll_in, state, &snapshot, &pin);
+            }
 
             if !event::poll(Duration::from_millis(200))? {
                 continue;

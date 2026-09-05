@@ -102,7 +102,7 @@ impl Default for ContinuationParams {
             liquid_n: 20,
             week_leader_pct: Decimal::from(4),
             stretch_pct: Decimal::from(4),
-            near_high_frac: Decimal::new(2, 2),
+            near_high_frac: Decimal::new(5, 2), // 0.05 — widen near-high book
             reward_r: TradeInterval::Minute5.reward_r(),
             min_stop_pct: TradeInterval::Minute5.min_stop_pct(),
             max_stop_pct: TradeInterval::Minute5.max_stop_pct(),
@@ -112,7 +112,7 @@ impl Default for ContinuationParams {
             max_positions: 5,
             atr_period: 14,
             atr_k: Decimal::from(2),
-            volume_confirm_frac: Decimal::new(8, 1), // 0.8
+            volume_confirm_frac: Decimal::new(5, 1), // 0.5
             min_pullback_pct: TradeInterval::Minute5.min_pullback_pct(),
             stop_lookback: 3,
             interval: TradeInterval::Minute5,
@@ -636,9 +636,7 @@ fn skip_no_pullback(
 }
 
 /// Skip unless last 4h close is above EMA20. Missing 4h history skips.
-/// When two 4h swing lows exist and the newer is not higher, skip.
-/// Missing swings do not skip (EMA remains the hard gate).
-/// Signal-TF higher-lows stay in `skip_no_uptrend`.
+/// 4h higher-low removed (was a choke); signal-TF higher-lows stay in `skip_no_uptrend`.
 pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<String> {
     let bars = snapshot.htf_bars_for(symbol);
     if bars.len() < 21 {
@@ -654,10 +652,7 @@ pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<Stri
     if last.close <= ema {
         return Some("4ч ниже EMA20 — не вхожу".into());
     }
-    match last_two_swing_lows(bars) {
-        Some((prev, newer)) if newer <= prev => Some("4ч нет higher low — не вхожу".into()),
-        _ => None,
-    }
+    None
 }
 
 /// Skip unless last close is above EMA20 and the last two swing lows rise.
@@ -995,19 +990,13 @@ fn maybe_enter(
             blocked.insert(sym.to_ascii_uppercase());
         }
     }
+    // Allow fills up to max_positions even if open slots are flat/red (desk restore).
     let mut slots = p.max_positions
         - held.len() as i32
         - inflight
             .iter()
             .filter(|s| !held.contains(&s.to_ascii_uppercase()))
             .count() as i32;
-    let not_green: Vec<&Position> = positions
-        .iter()
-        .filter(|pos| pos.qty > Decimal::ZERO && pos.unrealized_pnl <= Decimal::ZERO)
-        .collect();
-    if !not_green.is_empty() {
-        slots = 0;
-    }
     let liquid = liquid_keys(&snapshot.tickers, exclude, p);
     let mut last_skip: Option<String> = None;
     let book = pick_strategy4_book(
@@ -1037,8 +1026,6 @@ fn maybe_enter(
     }
     if !out.is_empty() {
         out
-    } else if !not_green.is_empty() {
-        vec![Decision::hold("слот не в плюсе — новый не открываю")]
     } else if held.len() as i32 >= p.max_positions {
         vec![Decision::hold("continuation book full")]
     } else {

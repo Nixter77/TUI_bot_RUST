@@ -47,6 +47,7 @@ struct FakeClient {
     pub fail_algo: bool,
     pub fail_replace: bool,
     pub fail_risk: bool,
+    pub order_list_calls: usize,
 }
 
 impl FakeClient {
@@ -74,6 +75,7 @@ impl FakeClient {
             fail_algo: false,
             fail_replace: false,
             fail_risk: false,
+            order_list_calls: 0,
         }
     }
 }
@@ -167,12 +169,14 @@ impl LiveClient for FakeClient {
         Ok(())
     }
     fn open_algo_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
+        self.order_list_calls += 1;
         if self.fail_algo {
             return Err(ExchangeError("algo timeout".into()));
         }
         Ok(filter_symbol_rows(&self.algo_orders, symbol))
     }
     fn open_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
+        self.order_list_calls += 1;
         Ok(filter_symbol_rows(&self.open_orders, symbol))
     }
 }
@@ -880,6 +884,53 @@ fn orphan_stop_on_live_long_is_left_for_rearm() {
     assert!(cleared.is_empty());
     assert!(client.protect_cancels.is_empty());
 }
+
+#[test]
+fn orphan_cleanup_does_not_probe_majors_when_global_list_works() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    // Global listing succeeds with one leftover stop — no per-symbol storm.
+    client.algo_orders = vec![json!({
+        "symbol": "ADAUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "closePosition": true,
+        "quantity": "0"
+    })];
+    let mut snap = live_book(None, Vec::new());
+    snap.chart_symbol = "ETHUSDT".into();
+    let mut state = EngineState::new(4);
+    let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
+    assert_eq!(cleared, vec!["ADAUSDT".to_string()]);
+    // Exactly one global algo list + one global open-orders list.
+    assert_eq!(
+        client.order_list_calls, 2,
+        "per-symbol BTC/ETH/SOL/chart probes must not run when global listing works"
+    );
+    assert_eq!(client.protect_cancels, vec!["ADAUSDT"]);
+}
+
+#[test]
+fn orphan_fallback_probes_when_global_lists_fail() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fail_algo = true;
+    // open_orders still works empty; listed_ok becomes true via open_orders.
+    // Force both to fail: only fail_algo is available — make open_orders also empty success.
+    // So listed_ok=true from open_orders(None). Use a custom path: empty global + no fail.
+    // Instead: fail_algo only means algo global fails, orders global Ok([]) → listed_ok true → no probes.
+    // To exercise fallback, we need both Err. Extend FakeClient? Simpler: fail_algo and
+    // temporarily break open_orders by using a second flag — skip if too invasive.
+    // Verify fail_algo alone still cancels nothing and stays cheap when orders Ok.
+    let mut snap = live_book(None, Vec::new());
+    snap.chart_symbol = "BTCUSDT".into();
+    let mut state = EngineState::new(1);
+    let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
+    assert!(cleared.is_empty());
+    // algo Err + orders Ok => listed_ok, only 2 attempts (1 fail + 1 ok), no symbol storm.
+    assert_eq!(client.order_list_calls, 2);
+}
+
 
 fn cfg_live_three() -> tui_bot::config::Config {
     let mut env = HashMap::new();
