@@ -192,7 +192,7 @@ pub fn pick_momentum_book(
     );
     rows.retain(|t| t.quote_volume > Decimal::ZERO);
     if drop_range_top {
-        let frac = Decimal::new(2, 2); // 0.02
+        let frac = Decimal::new(5, 2); // 0.05 — match ContinuationParams::near_high_frac
         rows.retain(|t| !near_24h_high(t, frac));
     }
     rows.sort_by(|a, b| {
