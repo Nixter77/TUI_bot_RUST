@@ -491,21 +491,19 @@ fn peak_since_entry(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) ->
             peak = implied;
         }
     }
+    // Restorations have opened_bar_time None. Scanning the 1h book treats
+    // yesterday's high as this trade's 0.8R peak and S5 market-closes red
+    // slots ("откат с пика", ZEC/DASH/ZEN 2026-09-06, ~30s after attach).
+    let Some(since) = pos.opened_bar_time else {
+        return peak;
+    };
     for b in snapshot.bars_for(&pos.symbol) {
-        let after = match pos.opened_bar_time {
-            Some(since) => b.open_time >= since,
-            None => true,
-        };
-        if after && b.high > peak {
+        if b.open_time >= since && b.high > peak {
             peak = b.high;
         }
     }
     if let Some(last) = snapshot.last_bars.get(&pos.symbol) {
-        let after = match pos.opened_bar_time {
-            Some(since) => last.open_time >= since,
-            None => true,
-        };
-        if after && last.high > peak {
+        if last.open_time >= since && last.high > peak {
             peak = last.high;
         }
     }

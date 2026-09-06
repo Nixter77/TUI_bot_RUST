@@ -3275,6 +3275,70 @@ fn strategy5_ignores_stale_1h_history_as_one_r() {
 }
 
 #[test]
+fn strategy5_stale_peak_does_not_flatten_pullback() {
+    // Restored S5 long, no opened_bar_time: 1h history printed 0.8R (not 1R)
+    // and mark is below 0.25R. Must not "откат с пика" — live ZEC/DASH/ZEN
+    // 2026-09-06 22:27 flattened ~30s after attach stop.
+    let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
+    pos.opened_bar_time = None;
+    pos.unrealized_pnl = d("-0.5");
+    let mut old = Vec::new();
+    for i in 0..40 {
+        old.push(Bar {
+            open_time: 1_700_000_000_000 + i * 3_600_000,
+            open: d("101"),
+            high: d("102.6"), // 0.8R=102.4, 1R=103
+            low: d("100"),
+            close: d("101.2"),
+            volume: d("20"),
+        });
+    }
+    old.push(Bar {
+        open_time: 1_700_000_000_000 + 40 * 3_600_000,
+        open: d("100"),
+        high: d("101.2"),
+        low: d("99.4"),
+        close: d("100.1"),
+        volume: d("20"),
+    });
+    let current = Bar {
+        open_time: 1_700_000_000_000 + 41 * 3_600_000,
+        open: d("100.1"),
+        high: d("102.6"),
+        low: d("99.2"),
+        close: d("99.6"),
+        volume: d("20"),
+    };
+    old.push(current.clone());
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("99.5"), d("2.0"), d("50000000"))];
+    snap.account = account();
+    snap.chart_symbol = "AVAXUSDT".into();
+    snap.account_ok = true;
+    snap.live_book = true;
+    snap.bars = old.clone();
+    snap.universe_bars.insert("AVAXUSDT".into(), old);
+    snap.last_bars.insert("AVAXUSDT".into(), current);
+    snap.open_positions = vec![pos.clone()];
+    snap.position = Some(pos.clone());
+    let mut state = EngineState::new(5);
+    state.position = Some(pos.clone());
+    state.positions = vec![pos];
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    assert!(
+        !decisions.iter().any(|d| matches!(
+            d,
+            Decision::ExitPosition { reason, .. } if reason.contains("откат с пика")
+        )),
+        "stale 0.8R highs must not flatten pullback: {decisions:?}"
+    );
+    assert!(
+        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        "stale 1h peak must not exit restored S5 long: {decisions:?}"
+    );
+}
+
+#[test]
 fn strategy5_trails_1h_bar_low_not_mark_pct() {
     let be = d("100.08");
     let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(be), Some(d("112.0")));
