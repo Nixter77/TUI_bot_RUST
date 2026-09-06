@@ -9,6 +9,7 @@ fn keys_bind_strategy_refresh_quit() {
     assert_eq!(handle_key('2', false), KeyAction::Strategy(2));
     assert_eq!(handle_key('3', false), KeyAction::Strategy(3));
     assert_eq!(handle_key('4', false), KeyAction::Strategy(4));
+    assert_eq!(handle_key('5', false), KeyAction::Strategy(5));
     assert_eq!(handle_key('r', false), KeyAction::Refresh);
     assert_eq!(handle_key('R', false), KeyAction::Refresh);
     assert_eq!(handle_key('q', false), KeyAction::Quit);

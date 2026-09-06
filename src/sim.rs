@@ -128,6 +128,23 @@ pub fn change_percent(bars: &[Bar], index: usize, lookback: usize) -> Decimal {
     (last - prev) / prev * Decimal::from(100)
 }
 
+/// Optional HTF series for continuation backtests (4h). No lookahead: only bars
+/// whose period has closed by the current signal bar open time are visible.
+#[derive(Clone, Default)]
+pub struct SimOpts<'a> {
+    pub htf: Option<&'a [Bar]>,
+    pub btc_htf: Option<&'a [Bar]>,
+}
+
+const H4_MS: i64 = 4 * 60 * 60 * 1000;
+
+fn htf_closed_asof(htf: &[Bar], asof_open_ms: i64) -> Vec<Bar> {
+    htf.iter()
+        .filter(|b| b.open_time + H4_MS <= asof_open_ms)
+        .cloned()
+        .collect()
+}
+
 pub fn simulate_bars(
     strategy_id: i32,
     bars: &[Bar],
@@ -142,10 +159,45 @@ pub fn simulate_bars(
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
 ) -> SimResult {
+    simulate_bars_opts(
+        strategy_id,
+        bars,
+        symbol,
+        name,
+        notional,
+        fee_rate,
+        slip,
+        warmup,
+        start_equity,
+        momentum,
+        scalp,
+        trend,
+        SimOpts::default(),
+    )
+}
+
+pub fn simulate_bars_opts(
+    strategy_id: i32,
+    bars: &[Bar],
+    symbol: &str,
+    name: &str,
+    notional: Decimal,
+    fee_rate: Decimal,
+    slip: Decimal,
+    warmup: Option<usize>,
+    start_equity: Decimal,
+    momentum: Option<&MomentumParams>,
+    scalp: Option<&ScalpParams>,
+    trend: Option<&TrendParams>,
+    opts: SimOpts<'_>,
+) -> SimResult {
     let warmup = warmup.unwrap_or(if strategy_id == 2 {
         80
     } else if strategy_id == 3 {
         70
+    } else if strategy_id == 4 || strategy_id == 5 {
+        // Need ~21 closed 4h bars before HTF EMA gate can pass.
+        360
     } else {
         40
     });
@@ -165,17 +217,24 @@ pub fn simulate_bars(
     if bars.len() <= warmup + 2 {
         return result;
     }
-    let lookback = if bars.len() >= 2 && bars[1].open_time - bars[0].open_time <= 60_000 {
-        1440
+    // Approximate a 24h lookback from bar spacing (ms).
+    let lookback = if bars.len() >= 2 {
+        let step = (bars[1].open_time - bars[0].open_time).max(60_000);
+        let bars_per_day = (86_400_000 / step).max(1) as usize;
+        bars_per_day.min(bars.len().saturating_sub(1)).max(1)
     } else {
-        288
+        96
     };
     let mut state = EngineState::new(strategy_id);
     let mut pos: Option<Position> = None;
     let mut pending: Option<Decision> = None;
     let mut peak = start_equity;
     let mut equity = start_equity;
-    let window = 120;
+    let window = if strategy_id == 4 || strategy_id == 5 {
+        500
+    } else {
+        120
+    };
 
     for i in warmup..bars.len() {
         let bar = &bars[i];
@@ -254,7 +313,7 @@ pub fn simulate_bars(
         let tickers = vec![ticker];
         let mut snap = MarketSnapshot::empty(equity);
         snap.tickers = tickers;
-        snap.bars = chunk;
+        snap.bars = chunk.clone();
         snap.account = Account {
             wallet_balance: equity,
             unrealized_pnl: Decimal::ZERO,
@@ -267,6 +326,21 @@ pub fn simulate_bars(
         snap.live_book = true;
         snap.open_positions = pos.clone().into_iter().collect();
         snap.account_ok = true;
+        snap.account_fresh = true;
+        snap.last_bars.insert(symbol.to_string(), bar.clone());
+        snap.universe_bars.insert(symbol.to_string(), chunk);
+        if let Some(htf) = opts.htf {
+            let closed = htf_closed_asof(htf, bar.open_time);
+            if !closed.is_empty() {
+                snap.htf_bars.insert(symbol.to_string(), closed);
+            }
+        }
+        if let Some(btc) = opts.btc_htf {
+            let closed = htf_closed_asof(btc, bar.open_time);
+            if !closed.is_empty() {
+                snap.htf_bars.insert("BTCUSDT".into(), closed);
+            }
+        }
         let (new_state, decision) = tick(&state, &snap, now, momentum, scalp, trend);
         state = new_state;
         match decision {

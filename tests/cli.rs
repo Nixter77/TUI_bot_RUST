@@ -33,6 +33,8 @@ fn live_without_keys_is_refused() {
     assert_eq!(args.strategy, "3");
     let args4 = parse_args(["--dump-frame", "--strategy", "4", "--offline"]).unwrap();
     assert_eq!(args4.strategy, "4");
+    let args5 = parse_args(["--dump-frame", "--strategy", "5", "--offline"]).unwrap();
+    assert_eq!(args5.strategy, "5");
     assert!(args.offline);
     assert!(parse_args(["--backtest"]).unwrap().backtest);
     assert!(parse_args(["--report"]).unwrap().report);
@@ -68,4 +70,17 @@ fn help_lists_flags() {
         assert!(h.contains(flag), "help missing {flag}:\n{h}");
     }
     assert!(parse_args(["--monitor"]).unwrap().monitor);
+}
+
+#[test]
+fn dump_frame_strategy_5_shows_title() {
+    let (code, text, _) = dump_frame_offline_strategy("5");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("S5 Verify: continuation 1ч (A/B vs S4)"), "{text}");
+    assert!(text.contains("Текущая: 5"), "{text}");
+    assert!(text.contains("1ч"), "{text}");
+    assert!(
+        text.contains("SL 3") && text.contains("8%"),
+        "S5 geometry must be Hour1 3–8%, got:\n{text}"
+    );
 }

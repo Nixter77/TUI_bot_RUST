@@ -1,7 +1,7 @@
 //! Strategy orchestration over market snapshots. Pure: returns decisions only.
 
 use crate::config::default_risk_pct;
-use crate::continuation::{continuation_decisions, ContinuationParams};
+use crate::continuation::{continuation_decisions, ContinuationParams, SCAN_SEC};
 use crate::dayrisk::{apply_day_risk, default_daily_loss_r, default_daily_loss_usdt};
 use crate::errors::is_retry_error;
 use crate::models::{
@@ -18,14 +18,61 @@ use std::collections::{HashMap, HashSet};
 
 pub use crate::momentum::{momentum_decision, momentum_decisions, MomentumParams};
 
-pub const STRATEGY_IDS: [i32; 4] = [1, 2, 3, 4];
+pub const STRATEGY_IDS: [i32; 5] = [1, 2, 3, 4, 5];
 
-pub const STRATEGY_NAMES: [(i32, &'static str); 4] = [
+pub const STRATEGY_NAMES: [(i32, &'static str); 5] = [
     (1, "Momentum rider (растущий + TP + SL вверх)"),
     (2, "Скальп: откат к VWAP/EMA9"),
     (3, "Тренд: пробой Donchian 20/10 (день)"),
     (4, "Continuation: откат ликвидных (не догон 24h %)"),
+    (5, "S5 Verify: continuation 1ч (A/B vs S4)"),
 ];
+
+/// S4 (env TF) and S5 Verify (locked 1h) share the continuation core.
+pub fn is_continuation(strategy_id: i32) -> bool {
+    matches!(strategy_id, 4 | 5)
+}
+
+/// Signal TF: S5 is the 1h verification arm; S4 keeps STRATEGY4_INTERVAL.
+pub fn continuation_interval(
+    strategy_id: i32,
+    s4_interval: crate::config::TradeInterval,
+) -> crate::config::TradeInterval {
+    if strategy_id == 5 {
+        crate::config::TradeInterval::Hour1
+    } else {
+        s4_interval
+    }
+}
+
+/// Stop/pullback band follows the signal TF. S5 Verify uses Hour1 geometry
+/// (3–8%) so 1h ATR fits; pinning the 15m 2–5% soak band skipped setups and
+/// put the stop inside 1h noise.
+pub fn continuation_stop_band(
+    strategy_id: i32,
+    s4_interval: crate::config::TradeInterval,
+) -> crate::config::TradeInterval {
+    continuation_interval(strategy_id, s4_interval)
+}
+
+/// Basket cap: S5 reads `STRATEGY5_MAX_POSITIONS` (falls back to S4 when unset).
+pub fn continuation_slot_cap(strategy_id: i32, s4: i32, s5: i32) -> i32 {
+    if strategy_id == 5 {
+        s5
+    } else {
+        s4
+    }
+}
+
+/// Continuation params: signal TF + matching stop/pullback band.
+pub fn continuation_trade_params(
+    strategy_id: i32,
+    s4_interval: crate::config::TradeInterval,
+) -> crate::continuation::ContinuationParams {
+    use crate::continuation::ContinuationParams;
+    let signal = continuation_interval(strategy_id, s4_interval);
+    ContinuationParams::default().with_interval(signal)
+}
 
 pub fn strategy_title(id: i32) -> &'static str {
     STRATEGY_NAMES
@@ -37,7 +84,7 @@ pub fn strategy_title(id: i32) -> &'static str {
 
 pub fn select_strategy(raw: i32) -> Result<i32, String> {
     if !STRATEGY_IDS.contains(&raw) {
-        return Err("strategy must be 1, 2, 3, or 4".into());
+        return Err("strategy must be 1, 2, 3, 4, or 5".into());
     }
     Ok(raw)
 }
@@ -45,7 +92,7 @@ pub fn select_strategy(raw: i32) -> Result<i32, String> {
 pub fn select_strategy_str(raw: &str) -> Result<i32, String> {
     let sid: i32 = raw
         .parse()
-        .map_err(|_| "strategy must be 1, 2, 3, or 4".to_string())?;
+        .map_err(|_| "strategy must be 1, 2, 3, 4, or 5".to_string())?;
     select_strategy(sid)
 }
 
@@ -71,11 +118,10 @@ fn combine_holds(rows: &[(String, String)]) -> String {
     for (symbol, reason) in rows {
         if !by_reason.contains_key(reason) {
             order.push(reason.clone());
-            by_reason.insert(reason.clone(), Vec::new());
         }
         by_reason
-            .get_mut(reason)
-            .unwrap()
+            .entry(reason.clone())
+            .or_default()
             .push(short_usdt(symbol));
     }
     if order.len() == 1 {
@@ -148,7 +194,7 @@ pub fn decide(
             momentum,
         ));
     }
-    if sid == 4 {
+    if is_continuation(sid) {
         let held: Vec<Position> = snapshot
             .open_positions
             .iter()
@@ -223,11 +269,16 @@ pub fn decide(
     Ok((Decision::hold(combine_holds(&holds)), last_scan_ts))
 }
 
-fn persist_last_error(held: Option<&str>) -> Option<String> {
-    if is_retry_error(held) {
+fn persist_last_error(held: Option<&str>, retry_until: f64, now: f64) -> Option<String> {
+    let Some(s) = held else {
+        return None;
+    };
+    // Drop stale retry noise only after backoff; during backoff the footer
+    // must still show why entries are blocked (3AM timeout / 5xx).
+    if is_retry_error(Some(s)) && now >= retry_until {
         None
     } else {
-        held.map(|s| s.to_string())
+        Some(s.to_string())
     }
 }
 
@@ -240,7 +291,7 @@ fn base_cooldown(
     match strategy_id {
         1 => momentum.map(|m| m.cooldown_sec).unwrap_or(1800.0),
         2 => scalp.map(|s| s.cooldown_sec).unwrap_or(1200.0),
-        4 => ContinuationParams::default().cooldown_sec,
+        4 | 5 => ContinuationParams::default().cooldown_sec,
         _ => trend.map(|t| t.cooldown_sec).unwrap_or(3600.0),
     }
 }
@@ -266,12 +317,42 @@ fn set_cooldown(map: &mut HashMap<String, f64>, symbol: &str, until: f64) {
     map.insert(key, cur.max(until));
 }
 
-fn continuation_params(momentum: Option<&MomentumParams>) -> ContinuationParams {
-    let interval = momentum.map(|m| m.s4_interval).unwrap_or_default();
-    let mut p = ContinuationParams::default().with_interval(interval);
+fn drop_stale_inflight(
+    pending: Vec<String>,
+    snapshot: &MarketSnapshot,
+    last_scan_ts: f64,
+    now: f64,
+    retry_until: f64,
+) -> Vec<String> {
+    // Buy timed out and positionRisk 502: keep the slot so we do not double-buy.
+    if now < retry_until {
+        return pending;
+    }
+    if snapshot.live_book
+        && snapshot.account_fresh
+        && last_scan_ts > 0.0
+        && now - last_scan_ts >= SCAN_SEC
+    {
+        Vec::new()
+    } else {
+        pending
+    }
+}
+
+fn expire_entries_paused(paused: bool, cooldown_until: f64, now: f64) -> bool {
+    if paused && cooldown_until > 0.0 && now >= cooldown_until {
+        false
+    } else {
+        paused
+    }
+}
+
+fn continuation_params(strategy_id: i32, momentum: Option<&MomentumParams>) -> ContinuationParams {
+    let s4 = momentum.map(|m| m.s4_interval).unwrap_or_default();
+    let mut p = continuation_trade_params(strategy_id, s4);
     if let Some(m) = momentum {
-        // Never shrink below 3; STRATEGY4_MAX_POSITIONS (default 5) sets the working cap.
-        p.max_positions = m.s4_max_positions.max(3);
+        // Never shrink below 3; STRATEGY4/5_MAX_POSITIONS (default 5) sets the working cap.
+        p.max_positions = continuation_slot_cap(strategy_id, m.s4_max_positions, m.s5_max_positions).max(3);
         p.always_enter = m.s4_always_enter;
         p.entry_windows = m.s4_entry_windows.clone();
     }
@@ -327,12 +408,18 @@ pub fn tick_decisions(
             })
             .collect();
         let live_keys: HashSet<String> = merged.iter().map(|p| p.symbol.to_ascii_uppercase()).collect();
-        let pending = state
-            .inflight_symbols
-            .iter()
-            .filter(|s| !live_keys.contains(&s.to_ascii_uppercase()))
-            .cloned()
-            .collect();
+        let pending = drop_stale_inflight(
+            state
+                .inflight_symbols
+                .iter()
+                .filter(|s| !live_keys.contains(&s.to_ascii_uppercase()))
+                .cloned()
+                .collect(),
+            snapshot,
+            state.last_scan_ts,
+            now,
+            state.retry_until,
+        );
         (merged, pending)
     } else {
         let mut merged_list = remembered.clone();
@@ -352,6 +439,7 @@ pub fn tick_decisions(
     };
 
     let merged = merged_list.first().cloned();
+    crate::openmeta::update_from_positions(&merged_list, snapshot, now);
     let mut work = snapshot.clone();
     work.position = merged.clone();
     let prev_syms: HashSet<String> = remembered
@@ -363,7 +451,7 @@ pub fn tick_decisions(
         .map(|p| p.symbol.to_ascii_uppercase())
         .collect();
     let pause_sec = base_cooldown(state.strategy_id, momentum, scalp, trend);
-    let loss_windows: Vec<crate::sessions::HourWindow> = if state.strategy_id == 4 {
+    let loss_windows: Vec<crate::sessions::HourWindow> = if is_continuation(state.strategy_id) {
         momentum
             .map(|m| m.s4_entry_windows.clone())
             .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
@@ -399,6 +487,23 @@ pub fn tick_decisions(
             }
         }
     }
+    // Restore latch after a transient book blip cleared scaled_one_r:
+    // (1) SL already at/above entry (BE done), or (2) open_meta scaled_at_1r for *this* entry.
+    for pos in &merged_list {
+        if pos.side != Side::Long || pos.qty <= Decimal::ZERO {
+            continue;
+        }
+        let key = pos.symbol.to_ascii_uppercase();
+        if let Some(sl) = pos.stop_loss {
+            if sl >= pos.entry_price {
+                state.scaled_one_r.insert(key.clone());
+                continue;
+            }
+        }
+        if crate::openmeta::meta_scaled_for_entry(&key, pos.entry_price, state.strategy_id) {
+            state.scaled_one_r.insert(key);
+        }
+    }
     let now_flat = merged_list.is_empty();
 
     let sid = state.strategy_id;
@@ -421,7 +526,8 @@ pub fn tick_decisions(
     }
 
     let mut next_leaders = state.recent_leaders.clone();
-    let (mut decisions, scan_ts) = if state.entries_paused {
+    let entries_paused = expire_entries_paused(state.entries_paused, state.cooldown_until, now);
+    let (mut decisions, scan_ts) = if entries_paused {
         (
             vec![Decision::hold("вход на паузе после закрытия всех")],
             state.last_scan_ts,
@@ -454,10 +560,11 @@ pub fn tick_decisions(
             &snapshot.last_bars,
             !state.daily_halt,
             cooldown_until,
+            Some(snapshot),
         )
-    } else if sid == 4 {
+    } else if is_continuation(sid) {
         let inflight_f: Vec<String> = inflight.iter().filter(|s| s.as_str() != "*").cloned().collect();
-        let cont = continuation_params(momentum);
+        let cont = continuation_params(sid, momentum);
         let (d, ts, leaders) = continuation_decisions(
             snapshot,
             &merged_list,
@@ -531,6 +638,12 @@ pub fn tick_decisions(
                 inflight.push(symbol.clone());
             }
         }
+        // Latch on decision (before apply). try_lock skip / failed BE must not re-Reduce.
+        if let Decision::ReduceLong { symbol, .. } = decision {
+            let key = symbol.to_ascii_uppercase();
+            state.scaled_one_r.insert(key.clone());
+            crate::openmeta::mark_scaled(&key);
+        }
     }
 
     let mut actions = state.recent_actions.clone();
@@ -540,7 +653,7 @@ pub fn tick_decisions(
         }
     }
     let book: Vec<Position> = merged_list.into_iter().filter(|p| p.qty > Decimal::ZERO).collect();
-    let mut last_error = persist_last_error(state.last_error.as_deref());
+    let mut last_error = persist_last_error(state.last_error.as_deref(), state.retry_until, now);
     if last_error.is_none() {
         last_error = crate::journal::take_last_error();
     }
@@ -555,7 +668,7 @@ pub fn tick_decisions(
         inflight_symbols: inflight.into_iter().filter(|s| s != "*").collect(),
         cooldowns,
         strategy_id: state.strategy_id,
-        entries_paused: state.entries_paused,
+        entries_paused,
         skip_symbols: state.skip_symbols,
         skip_reasons: state.skip_reasons,
         day_utc: state.day_utc,

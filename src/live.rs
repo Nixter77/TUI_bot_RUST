@@ -34,7 +34,6 @@ pub struct LiveApplyResult {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReconcileResult {
-    pub skip_tick: bool,
     pub last_text: String,
 }
 
@@ -162,8 +161,16 @@ fn symbol_hint(snapshot: &MarketSnapshot, state: Option<&EngineState>) -> String
         .unwrap_or_default()
 }
 
+fn arm_entry_pause(state: &mut EngineState, now: f64) {
+    state.entries_paused = true;
+    let until = now + COOLDOWN_SEC;
+    if until > state.cooldown_until {
+        state.cooldown_until = until;
+    }
+}
+
 fn desk_pause_after_loss(cfg: &Config, state: &mut EngineState, now: f64) {
-    let windows = if state.strategy_id == 4 {
+    let windows = if crate::engine::is_continuation(state.strategy_id) {
         cfg.s4_entry_windows.as_slice()
     } else {
         cfg.entry_windows.as_slice()
@@ -304,8 +311,15 @@ fn place_fill_protectives(
         Ok(()) => Ok(()),
         Err(exc) => {
             let info = classify(&exc.0);
+            // Never treat -4130 as armed: drop closePosition SELLs and verify sized pair.
             if info.code == Some(-4130) {
-                return Ok(());
+                crate::exchange::cancel_close_position_sells(client, symbol);
+                if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
+                    if sell_protectives_are_sized(&rows) {
+                        return Ok(());
+                    }
+                }
+                return client.place_tp_sl(symbol, take_profit, stop_loss, Some(qty));
             }
             if info.code != Some(-2022) {
                 return Err(exc);
@@ -323,10 +337,15 @@ fn place_fill_protectives(
                 Ok(()) => Ok(()),
                 Err(retry) => {
                     if classify(&retry.0).code == Some(-4130) {
-                        Ok(())
-                    } else {
-                        Err(retry)
+                        crate::exchange::cancel_close_position_sells(client, symbol);
+                        if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
+                            if sell_protectives_are_sized(&rows) {
+                                return Ok(());
+                            }
+                        }
+                        return client.place_tp_sl(symbol, take_profit, stop_loss, Some(qty));
                     }
+                    Err(retry)
                 }
             }
         }
@@ -421,8 +440,8 @@ fn enter_live(
     if held.iter().any(|s| s.eq_ignore_ascii_case(&want)) {
         return err("skip enter: already in position");
     }
-    let cap = if state.map(|s| s.strategy_id == 4).unwrap_or(false) {
-        cfg.s4_max_positions
+    let cap = if let Some(s) = state.filter(|s| crate::engine::is_continuation(s.strategy_id)) {
+        crate::engine::continuation_slot_cap(s.strategy_id, cfg.s4_max_positions, cfg.s5_max_positions)
     } else {
         cfg.max_positions
     };
@@ -442,12 +461,25 @@ fn enter_live(
         return err("skip enter: no mark");
     };
     // S4 live path: RISK_PCT of account equity (wallet+uPnL). 0 = fall back to ORDER_NOTIONAL_USDT.
+    // Phase-2: Neutral → 0.5×; Bear/Panic should not reach here (skip_new_long) — fail-closed skip.
     // Never bump qty so qty*(entry-SL) exceeds the risk budget — skip the symbol instead.
-    let s4_risk = state.map(|s| s.strategy_id == 4).unwrap_or(false) && cfg.risk_pct > Decimal::ZERO;
+    let s4_risk = state.map(|s| crate::engine::is_continuation(s.strategy_id)).unwrap_or(false) && cfg.risk_pct > Decimal::ZERO;
+    let regime = crate::regime::classify_snapshot(snapshot);
+    if s4_risk && regime.blocks_alt_entry() {
+        return err(regime.block_reason().unwrap_or("skip enter: btc regime"));
+    }
+    let sized_risk = if s4_risk {
+        crate::regime::effective_risk_pct(cfg.risk_pct, snapshot)
+    } else {
+        cfg.risk_pct
+    };
     let mut qty = if s4_risk {
+        if sized_risk <= Decimal::ZERO {
+            return err("skip enter: btc regime risk=0");
+        }
         match size_risk_market_order(
             snapshot.account.equity(),
-            cfg.risk_pct,
+            sized_risk,
             mark,
             stop_loss,
             &filters,
@@ -506,14 +538,22 @@ fn enter_live(
             ..Default::default()
         },
         Err(exc) => {
+            // -4130 is not proof protectives are sized; only accept after verify.
             if classify(&exc.0).code == Some(-4130) {
-                LiveApplyResult {
-                    filled: true,
-                    mark: Some(mark),
-                    qty: Some(qty),
-                    ..Default::default()
+                crate::exchange::cancel_close_position_sells(client, symbol);
+                if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
+                    if sell_protectives_are_sized(&rows) {
+                        return LiveApplyResult {
+                            filled: true,
+                            mark: Some(mark),
+                            qty: Some(qty),
+                            ..Default::default()
+                        };
+                    }
                 }
-            } else {
+                // Fall through to flatten naked fill.
+            }
+            {
                 let _ = client.cancel_protectives(symbol);
                 let close_note = match client.market_close(symbol, "LONG", qty) {
                     Ok(()) => String::new(),
@@ -688,12 +728,27 @@ fn reduce_live(
     if pos.side != Side::Long || pos.qty <= Decimal::ZERO {
         return err("skip reduce: нет живого лонга");
     }
-    let close_qty = reduce_qty.min(pos.qty);
-    if close_qty <= Decimal::ZERO || close_qty >= pos.qty {
+    let mut close_qty = reduce_qty.min(pos.qty);
+    // Quantize to stepSize so half-lots like 273.5 on step=1 cannot -1111-spam.
+    // If remain or close_qty < minQty after floor → BE-only (or full exit via amend path).
+    let min_qty = match client.filters_for(&pos.symbol) {
+        Ok(filters) => {
+            match crate::money::quantize_to_step(close_qty, filters.step_size, false) {
+                Ok(q) => close_qty = q,
+                Err(e) => return err(e.to_string()),
+            }
+            filters.min_qty
+        }
+        Err(_) => Decimal::ZERO,
+    };
+    let remain = pos.qty - close_qty;
+    if close_qty <= Decimal::ZERO
+        || close_qty >= pos.qty
+        || (min_qty > Decimal::ZERO && (close_qty < min_qty || remain < min_qty))
+    {
         // Cannot partial — fall through to full BE amend path semantics.
         return amend_live(cfg, client, snapshot, state, stop_loss, &pos.symbol, "безубыток на 1R");
     }
-    let remain = pos.qty - close_qty;
     // Do not cancel protectives first — that would naked the remainder.
     if let Err(e) = client.market_close(&pos.symbol, "LONG", close_qty) {
         return err(e.0);
@@ -705,7 +760,15 @@ fn reduce_live(
             take_profit_price_net(pos.entry_price, "LONG", cfg.tp_pct).ok()
         }
     });
-    if let Err(e) = client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
+    // BE amend: retry once; if still fail → flatten remain AND keep scaled latch (no reduce spam).
+    let be_err = match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
+        Ok(()) => None,
+        Err(_first) => match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
+            Ok(()) => None,
+            Err(e2) => Some(e2),
+        },
+    };
+    if let Some(e) = be_err {
         let _ = client.cancel_protectives(&pos.symbol);
         let close_note = match client.market_close(&pos.symbol, "LONG", remain) {
             Ok(()) => String::new(),
@@ -720,6 +783,7 @@ fn reduce_live(
             );
         }
         let mark = mark_for_symbol(snapshot, &pos.symbol);
+        // filled=true so apply_decision keeps scaled_one_r latch (early + adopt).
         return LiveApplyResult {
             error: Some(format!("flattened naked fill after reduce: {e}{close_note}")),
             filled: true,
@@ -821,7 +885,8 @@ fn adopt_reduced_long(state: &mut EngineState, symbol: &str, closed_qty: Decimal
     }
     let key = symbol.to_ascii_uppercase();
     state.sized_stops.insert(key.clone());
-    state.scaled_one_r.insert(key);
+    state.scaled_one_r.insert(key.clone());
+    crate::openmeta::mark_scaled(&key);
 }
 
 /// Paper/offline adopt: mutate local book on AmendStop / ReduceLong / Exit.
@@ -882,6 +947,7 @@ pub fn apply_paper_decision(
                     false,
                     pos.stop_loss,
                     pos.take_profit,
+                    false,
                 );
                 drop_symbol(state, symbol);
                 return;
@@ -897,7 +963,8 @@ pub fn apply_paper_decision(
                 false,
                 pos.stop_loss,
                 pos.take_profit,
-            );
+                    true,
+                );
             adopt_reduced_long(state, symbol, close_qty, *stop_loss);
             let tp = state
                 .positions
@@ -929,7 +996,8 @@ pub fn apply_paper_decision(
                 false,
                 pos.stop_loss,
                 pos.take_profit,
-            );
+                    false,
+                );
             drop_symbol(state, symbol);
         }
         _ => {}
@@ -974,7 +1042,7 @@ pub fn record_flatten(state: &mut EngineState, result: FlattenResult, pause_entr
             state.positions.clear();
             state.entry_inflight = false;
             state.inflight_symbols.clear();
-            state.entries_paused = true;
+            arm_entry_pause(state, unix_now());
         } else {
             state.positions.retain(|p| !closed_syms.contains(&p.symbol));
             state.position = state.positions.first().cloned();
@@ -1055,7 +1123,26 @@ pub fn apply_decision(
     } else {
         None
     };
+    // Latch BEFORE exchange ack so concurrent ticks cannot re-emit ReduceLong spam
+    // (TRADOOR 2026-09-06). Unlatch only if reduce path makes no progress.
+    let mut early_latched = false;
+    if let Decision::ReduceLong { symbol, .. } = decision {
+        if reducing.is_some() {
+            let key = symbol.to_ascii_uppercase();
+            state.scaled_one_r.insert(key.clone());
+            crate::openmeta::mark_scaled(&key);
+            early_latched = true;
+        }
+    }
     let result = apply_live(cfg, client, snapshot, decision, Some(state));
+    if early_latched {
+        let no_progress = result.error.is_some() && !result.filled && result.forget_symbol.is_empty();
+        if no_progress {
+            if let Decision::ReduceLong { symbol, .. } = decision {
+                state.scaled_one_r.remove(&symbol.to_ascii_uppercase());
+            }
+        }
+    }
     if let Some((pos, reason)) = &closing {
         // Vanished live longs are journaled in clear_vanished_longs. A second
         // close line double-counts PnL in --report.
@@ -1074,7 +1161,8 @@ pub fn apply_decision(
                 cfg.live,
                 pos.stop_loss,
                 pos.take_profit,
-            );
+                    false,
+                );
             let won = journal::long_close_was_win(pos.entry_price, exit_px, pos.take_profit);
             if !won {
                 desk_pause_after_loss(cfg, state, unix_now());
@@ -1102,11 +1190,20 @@ pub fn apply_decision(
                 cfg.live,
                 pos.stop_loss,
                 pos.take_profit,
-            );
+                    true,
+                );
         }
     }
     if !result.forget_symbol.is_empty() {
+        let keep_scaled = matches!(decision, Decision::ReduceLong { .. }) && result.filled;
         drop_symbol(state, &result.forget_symbol);
+        // Flatten-after-BE-fail still latches: remain close may fail and reconcile
+        // must not re-Reduce the leftover long.
+        if keep_scaled {
+            let key = result.forget_symbol.to_ascii_uppercase();
+            state.scaled_one_r.insert(key.clone());
+            crate::openmeta::mark_scaled(&key);
+        }
         if result
             .error
             .as_deref()
@@ -1139,7 +1236,7 @@ pub fn apply_decision(
                 }
             }
             if info.action == ACTION_OPERATOR {
-                state.entries_paused = true;
+                arm_entry_pause(state, unix_now());
             } else if let Decision::EnterLong { symbol, .. } = decision {
                 if info.action == ACTION_SKIP || info.action == ACTION_COOLDOWN {
                     let up = symbol.to_ascii_uppercase();
@@ -1210,7 +1307,8 @@ pub fn apply_decision(
                 adopt_amended_stop(state, symbol, *stop_loss);
                 let key = symbol.to_ascii_uppercase();
                 state.scaled_one_r.insert(key.clone());
-                state.sized_stops.insert(key);
+                state.sized_stops.insert(key.clone());
+                crate::openmeta::mark_scaled(&key);
                 let tp = remembered_sl_tp(state, symbol).1;
                 journal::record_amend(
                     state.strategy_id,
@@ -1236,6 +1334,28 @@ pub fn apply_decision(
                     } = decision
                     {
                         state.sized_stops.insert(symbol.to_ascii_uppercase());
+                        let snap_risk = if crate::engine::is_continuation(state.strategy_id) && cfg.risk_pct > Decimal::ZERO {
+                            crate::regime::effective_risk_pct(cfg.risk_pct, snapshot)
+                        } else {
+                            cfg.risk_pct
+                        };
+                        let snap = crate::openmeta::build_entry_snapshot(
+                            snapshot,
+                            symbol,
+                            mark,
+                            *stop_loss,
+                            Some(snap_risk),
+                            Some(snapshot.account.equity()),
+                        );
+                        crate::openmeta::on_open(
+                            state.strategy_id,
+                            symbol,
+                            mark,
+                            *stop_loss,
+                            qty,
+                            crate::sessions::unix_now(),
+                            snap.btc_regime.clone(),
+                        );
                         journal::record_open(
                             state.strategy_id,
                             symbol,
@@ -1245,6 +1365,7 @@ pub fn apply_decision(
                             cfg.live,
                             Some(*stop_loss),
                             Some(*take_profit),
+                            Some(&snap),
                         );
                     }
                 }
@@ -1311,7 +1432,7 @@ pub fn rearm_live_protectives(
                     (Some(sl), Some(tp)) => (sl, tp),
                     _ => {
                         // Try attach-from-entry once; still naked after budget → flatten.
-                        let derived = derive_protectives_from_entry(cfg, &live);
+                        let derived = derive_protectives_from_entry(cfg, state.strategy_id, &live);
                         match derived {
                             Some(pair) => pair,
                             None => {
@@ -1338,10 +1459,17 @@ pub fn rearm_live_protectives(
             _ => {}
         }
         if let Err(exc) = client.replace_stop(&live.symbol, sl, Some(tp), Some(live.qty)) {
+            // -4130 ≠ armed. Drop closePosition blockers; only mark sized if verified.
             if classify(&exc.0).code == Some(-4130) {
-                clear_rearm_tracking(state, &key);
-                state.sized_stops.insert(key);
-                continue;
+                crate::exchange::cancel_close_position_sells(client, &live.symbol);
+                if let Ok(rows) = client.open_algo_orders(Some(&key)) {
+                    if sell_protectives_are_sized(&rows) {
+                        clear_rearm_tracking(state, &key);
+                        state.sized_stops.insert(key);
+                        continue;
+                    }
+                }
+                // Not sized — count as rearm failure below.
             }
             if note_rearm_failure(state, &key, now) {
                 flatten_missing_protectives(cfg, client, state, &live, &exc.0);
@@ -1382,15 +1510,21 @@ fn note_rearm_failure(state: &mut EngineState, key: &str, now: f64) -> bool {
     *count >= REARM_FAIL_MAX || (now - since) >= REARM_FAIL_BUDGET_SEC
 }
 
-fn derive_protectives_from_entry(cfg: &Config, live: &Position) -> Option<(Decimal, Decimal)> {
+fn derive_protectives_from_entry(cfg: &Config, strategy_id: i32, live: &Position) -> Option<(Decimal, Decimal)> {
     if live.entry_price <= Decimal::ZERO {
         return None;
     }
-    let min_stop = crate::continuation::ContinuationParams::default()
-        .with_interval(cfg.s4_interval)
-        .min_stop_pct;
-    let sl = candidate_stop(live.entry_price, "LONG", min_stop).ok()?;
-    let tp = take_profit_price_net(live.entry_price, "LONG", cfg.tp_pct).ok()?;
+    let p = crate::engine::continuation_trade_params(strategy_id, cfg.s4_interval);
+    let sl = candidate_stop(live.entry_price, "LONG", p.min_stop_pct).ok()?;
+    let tp = if crate::engine::is_continuation(strategy_id) {
+        let risk = live.entry_price - sl;
+        if risk <= Decimal::ZERO {
+            return None;
+        }
+        (live.entry_price + p.reward_r * risk) * (Decimal::ONE + crate::money::round_trip_taker_pct())
+    } else {
+        take_profit_price_net(live.entry_price, "LONG", cfg.tp_pct).ok()?
+    };
     if sl <= Decimal::ZERO || tp <= sl {
         return None;
     }
@@ -1533,7 +1667,8 @@ pub fn clear_vanished_longs(
             cfg.live,
             pos.stop_loss,
             pos.take_profit,
-        );
+                    false,
+                );
         cool_symbol(state, &pos.symbol, now, won);
         if !won {
             desk_pause_after_loss(cfg, state, now);
@@ -1558,20 +1693,34 @@ pub fn clear_orphan_protectives(
     }
     let live_longs = live_long_keys(snapshot);
     let mut leftover = BTreeSet::new();
-    if let Ok(rows) = client.open_algo_orders(None) {
-        leftover.extend(collect_order_symbols(&rows));
-    }
-    if let Ok(rows) = client.open_orders(None) {
-        leftover.extend(collect_order_symbols(&rows));
-    }
-    for symbol in probe_orphan_symbols(snapshot, state) {
-        if live_longs.contains(&symbol) || leftover.contains(&symbol) {
-            continue;
+    // Prefer account-wide listings. Per-symbol probes are only a fallback when
+    // both global calls fail — otherwise every TUI tick hammered BTC/ETH/SOL/chart
+    // with 2×N REST on the UI thread (felt like a hang).
+    let mut listed_ok = false;
+    match client.open_algo_orders(None) {
+        Ok(rows) => {
+            leftover.extend(collect_order_symbols(&rows));
+            listed_ok = true;
         }
-        let algos = client.open_algo_orders(Some(&symbol)).ok().unwrap_or_default();
-        let orders = client.open_orders(Some(&symbol)).ok().unwrap_or_default();
-        if !algos.is_empty() || !orders.is_empty() {
-            leftover.insert(symbol);
+        Err(_) => {}
+    }
+    match client.open_orders(None) {
+        Ok(rows) => {
+            leftover.extend(collect_order_symbols(&rows));
+            listed_ok = true;
+        }
+        Err(_) => {}
+    }
+    if !listed_ok {
+        for symbol in probe_orphan_symbols(snapshot, state) {
+            if live_longs.contains(&symbol) {
+                continue;
+            }
+            let algos = client.open_algo_orders(Some(&symbol)).ok().unwrap_or_default();
+            let orders = client.open_orders(Some(&symbol)).ok().unwrap_or_default();
+            if !algos.is_empty() || !orders.is_empty() {
+                leftover.insert(symbol);
+            }
         }
     }
     leftover.retain(|symbol| !live_longs.contains(symbol));
@@ -1662,24 +1811,15 @@ pub fn reconcile_live(
     clear_vanished_longs(cfg, client, state, snapshot, now_ts);
     let orphans = clear_orphan_protectives(cfg, client, state, snapshot);
     let swept = sweep_rogue_shorts(cfg, client, state, snapshot, now);
-    if !swept.closed.is_empty() {
-        return ReconcileResult {
-            skip_tick: true,
-            last_text: format!("закрыл чужой шорт: {}", swept.closed.join(", ")),
-        };
-    }
-    if !orphans.is_empty() {
-        return ReconcileResult {
-            skip_tick: true,
-            last_text: format!("снял сиротский стоп: {}", orphans.join(", ")),
-        };
-    }
     let rearmed = rearm_live_protectives(cfg, client, state, snapshot);
-    if !rearmed.is_empty() {
-        return ReconcileResult {
-            skip_tick: false,
-            last_text: format!("TP/SL на размер лонга: {}", rearmed.join(", ")),
-        };
-    }
-    ReconcileResult::default()
+    let last_text = if !swept.closed.is_empty() {
+        format!("закрыл чужой шорт: {}", swept.closed.join(", "))
+    } else if !orphans.is_empty() {
+        format!("снял сиротский стоп: {}", orphans.join(", "))
+    } else if !rearmed.is_empty() {
+        format!("TP/SL на размер лонга: {}", rearmed.join(", "))
+    } else {
+        String::new()
+    };
+    ReconcileResult { last_text }
 }

@@ -25,8 +25,8 @@ pub struct CliArgs {
     /// send real TestNet orders (requires BINANCE_API_KEY and BINANCE_API_SECRET)
     #[arg(long)]
     pub live: bool,
-    /// initial strategy: 1 momentum, 2 scalp, 3 trend+stop, 4 liquid continuation
-    #[arg(long, default_value = "1", value_parser = clap::builder::PossibleValuesParser::new(["1", "2", "3", "4"]))]
+    /// initial strategy: 1 momentum, 2 scalp, 3 trend+stop, 4 continuation, 5 S5 Verify (1h)
+    #[arg(long, default_value = "1", value_parser = clap::builder::PossibleValuesParser::new(["1", "2", "3", "4", "5"]))]
     pub strategy: String,
     /// do not call the network; render an empty snapshot
     #[arg(long)]
@@ -37,6 +37,9 @@ pub struct CliArgs {
     /// print a summary of .state/trades.jsonl and .state/errors.jsonl
     #[arg(long)]
     pub report: bool,
+    /// alias of --report focused on R research table (same journals)
+    #[arg(long)]
+    pub research: bool,
     /// watch-only radar: waiting names, 24h tape, open/closed P&L (never sends orders)
     #[arg(long)]
     pub monitor: bool,
@@ -130,7 +133,7 @@ pub fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let strategy = match args.strategy.parse::<i32>().map_err(|_| "strategy must be 1, 2, 3, or 4".to_string()).and_then(select_strategy) {
+    let strategy = match args.strategy.parse::<i32>().map_err(|_| "strategy must be 1, 2, 3, 4, or 5".to_string()).and_then(select_strategy) {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(stderr, "config error: {e}");
@@ -147,8 +150,10 @@ pub fn run(
         }
     };
 
-    if args.report {
-        return crate::report::run_cli();
+    if args.report || args.research {
+        // --research focuses on one strategy; --report keeps all strategies.
+        let filter = if args.research { Some(strategy) } else { None };
+        return crate::report::run_cli_filtered(filter);
     }
     if args.backtest {
         return crate::backtest::run_cli();
@@ -244,6 +249,7 @@ pub fn dump_frame_offline_strategy(strategy: &str) -> (i32, String, String) {
         offline: true,
         backtest: false,
         report: false,
+        research: false,
         monitor: false,
     };
     let env = HashMap::new();
@@ -265,6 +271,7 @@ pub fn dump_monitor_offline_strategy(strategy: &str) -> (i32, String, String) {
         offline: true,
         backtest: false,
         report: false,
+        research: false,
         monitor: true,
     };
     let env = HashMap::new();
@@ -286,6 +293,7 @@ pub fn live_without_keys_isolated() -> (i32, String) {
         offline: true,
         backtest: false,
         report: false,
+        research: false,
         monitor: false,
     };
     let env = HashMap::new();

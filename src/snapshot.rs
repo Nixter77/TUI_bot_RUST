@@ -138,11 +138,12 @@ fn closed_klines(
     Ok(raw)
 }
 
-fn chart_spec(strategy_id: i32, s4: crate::config::TradeInterval) -> (&'static str, usize) {
+pub fn chart_spec(strategy_id: i32, s4: crate::config::TradeInterval) -> (&'static str, usize) {
     if strategy_id == 3 {
         (CHART_INTERVAL, CHART_LIMIT)
-    } else if strategy_id == 4 {
-        (s4.as_binance(), s4.chart_limit())
+    } else if crate::engine::is_continuation(strategy_id) {
+        let iv = crate::engine::continuation_interval(strategy_id, s4);
+        (iv.as_binance(), iv.chart_limit())
     } else {
         ("5m", 121)
     }
@@ -158,14 +159,22 @@ fn collect_s4_history(
     n: i32,
     scan_due: bool,
     interval: crate::config::TradeInterval,
+    prior: Option<&MarketSnapshot>,
 ) -> (
     HashMap<String, Bar>,
     HashMap<String, Vec<Bar>>,
     HashMap<String, Vec<Bar>>,
 ) {
+    // Seed from prior so between-scan polls and incomplete first pulls keep bars.
+    // Monitor desk = liquid_universe (liquid_n); entry book is a subset — fetch the desk.
     let mut last_bars = HashMap::new();
     let mut universe = HashMap::new();
     let mut htf_bars = HashMap::new();
+    if let Some(prev) = prior {
+        last_bars = prev.last_bars.clone();
+        universe = prev.universe_bars.clone();
+        htf_bars = prev.htf_bars.clone();
+    }
     if !chart_symbol.is_empty() && !chart_bars.is_empty() {
         universe.insert(chart_symbol.to_string(), chart_bars.to_vec());
         if let Some(closed) = chart_bars.last() {
@@ -174,19 +183,16 @@ fn collect_s4_history(
     }
     let mut s4 = crate::continuation::ContinuationParams::default().with_interval(interval);
     s4.max_positions = n.max(1);
-    let mut want: Vec<String> = if scan_due {
-        crate::continuation::pick_strategy4_book(
-            tickers,
-            s4.liquid_n.max(1),
-            &state.skip_symbols,
-            Some(&s4),
-        )
-        .into_iter()
-        .map(|t| t.symbol)
-        .collect()
-    } else {
-        Vec::new()
-    };
+    // Full liquid desk (not pick_strategy4_book): near-high / tape filters must not
+    // starve monitor/setup of signal-TF + 4h history -> missing signal bars.
+    let mut want: Vec<String> = crate::continuation::liquid_universe(
+        tickers,
+        &state.skip_symbols,
+        &s4,
+    )
+    .into_iter()
+    .map(|t| t.symbol.clone())
+    .collect();
     for pos in remembered {
         if pos.qty > Decimal::ZERO
             && !want
@@ -205,11 +211,18 @@ fn collect_s4_history(
         htf_want.push(chart_symbol.to_string());
     }
     for symbol in want {
-        if universe.contains_key(&symbol) {
+        let have = universe
+            .get(&symbol)
+            .map(|b| b.len() >= 21)
+            .unwrap_or(false)
+            && last_bars.contains_key(&symbol);
+        let held = remembered
+            .iter()
+            .any(|p| p.symbol.eq_ignore_ascii_case(&symbol));
+        if have && !scan_due && !held {
             continue;
         }
-        let limit = if remembered.iter().any(|p| p.symbol.eq_ignore_ascii_case(&symbol)) && !scan_due
-        {
+        let limit = if held && !scan_due && have {
             6
         } else {
             interval.fetch_limit()
@@ -219,13 +232,28 @@ fn collect_s4_history(
                 if let Some(closed) = extra.last() {
                     last_bars.insert(symbol.clone(), closed.clone());
                 }
-                universe.insert(symbol, extra);
+                // Shallow refresh keeps prior depth when we only re-pull a few bars.
+                if extra.len() >= 21 || !universe.contains_key(&symbol) {
+                    universe.insert(symbol, extra);
+                } else if let Some(prev) = universe.get_mut(&symbol) {
+                    if let Some(closed) = extra.last() {
+                        if prev.last().map(|b| b.open_time) != Some(closed.open_time) {
+                            prev.push(closed.clone());
+                        } else if let Some(last) = prev.last_mut() {
+                            *last = closed.clone();
+                        }
+                    }
+                }
             }
             Ok(_) => {}
             Err(_) => {}
         }
     }
     for symbol in htf_want {
+        let have_htf = htf_bars.get(&symbol).map(|b| b.len() >= 21).unwrap_or(false);
+        if have_htf && !scan_due {
+            continue;
+        }
         match closed_klines(client, &symbol, "4h", 50) {
             Ok(extra) if !extra.is_empty() => {
                 htf_bars.insert(symbol, extra);
@@ -250,7 +278,7 @@ fn collect_last_bars(
             out.insert(chart_symbol.to_string(), closed.clone());
         }
     }
-    if state.strategy_id == 4 {
+    if crate::engine::is_continuation(state.strategy_id) {
         let mut s4 = crate::continuation::ContinuationParams::default();
         s4.max_positions = n.max(1);
         let book = crate::continuation::pick_strategy4_book(
@@ -290,6 +318,61 @@ fn collect_last_bars(
         }
     }
     out
+}
+
+
+/// Ensure BTCUSDT 4h (regime) and optional 1h series are present.
+/// Reuses prior snapshot bars; refreshes only when missing or on S4 scan_due
+/// so the 5s poll path does not hammer klines.
+fn ensure_btc_regime_bars(
+    client: &mut dyn SnapshotClient,
+    htf_bars: &mut HashMap<String, Vec<Bar>>,
+    universe_bars: &mut HashMap<String, Vec<Bar>>,
+    prior: Option<&MarketSnapshot>,
+    scan_due: bool,
+) {
+    const BTC: &str = "BTCUSDT";
+    if let Some(prev) = prior {
+        if !htf_bars.contains_key(BTC) {
+            if let Some(b) = prev.htf_bars.get(BTC) {
+                if !b.is_empty() {
+                    htf_bars.insert(BTC.to_string(), b.clone());
+                }
+            }
+        }
+        if !universe_bars.contains_key(BTC) {
+            if let Some(b) = prev.universe_bars.get(BTC) {
+                if !b.is_empty() {
+                    universe_bars.insert(BTC.to_string(), b.clone());
+                }
+            }
+        }
+    }
+    let have_htf = htf_bars.get(BTC).map(|b| b.len() >= 21).unwrap_or(false);
+    if !have_htf || scan_due {
+        match closed_klines(client, BTC, "4h", 50) {
+            Ok(extra) if !extra.is_empty() => {
+                htf_bars.insert(BTC.to_string(), extra);
+            }
+            _ => {}
+        }
+    }
+    // 1h return helper series — only if we still lack any BTC signal bars.
+    let have_px_bars = universe_bars.get(BTC).map(|b| b.len() >= 3).unwrap_or(false);
+    if !have_px_bars || scan_due {
+        // Skip overwrite when universe already holds a deeper non-1h series (≥21).
+        let deep = universe_bars.get(BTC).map(|b| b.len() >= 21).unwrap_or(false);
+        if !deep || !have_px_bars {
+            match closed_klines(client, BTC, "1h", 30) {
+                Ok(extra) if !extra.is_empty() => {
+                    if !deep {
+                        universe_bars.insert(BTC.to_string(), extra);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 pub fn fetch_snapshot(
@@ -388,10 +471,14 @@ pub fn fetch_snapshot(
             pick_strategy1_book(&tickers, cfg.max_positions.max(1) as usize, skip)
                 .into_iter()
                 .next()
-        } else if state.strategy_id == 4 {
+        } else if crate::engine::is_continuation(state.strategy_id) {
             let mut s4 = crate::continuation::ContinuationParams::default()
-                .with_interval(cfg.s4_interval);
-            s4.max_positions = cfg.s4_max_positions;
+                .with_interval(crate::engine::continuation_interval(state.strategy_id, cfg.s4_interval));
+            s4.max_positions = crate::engine::continuation_slot_cap(
+                state.strategy_id,
+                cfg.s4_max_positions,
+                cfg.s5_max_positions,
+            );
             crate::continuation::pick_strategy4_book(
                 &tickers,
                 s4.liquid_n.max(1),
@@ -433,7 +520,7 @@ pub fn fetch_snapshot(
                     live_book = true;
                     let sl_overlay = merge_overlay_with_journal(
                         remembered.clone(),
-                        crate::journal::unmatched_open_positions(),
+                        crate::journal::unmatched_open_positions_for(Some(state.strategy_id)),
                     );
                     let managed = pick_managed_longs(&positions, &sl_overlay);
                     let by_sym: HashMap<&str, &Position> =
@@ -523,9 +610,17 @@ pub fn fetch_snapshot(
             }
         }
     }
-    if state.strategy_id == 4 {
-        let now = unix_now();
-        let scan_due = state.last_scan_ts <= 0.0 || (now - state.last_scan_ts) >= 60.0;
+    let scan_due = if crate::engine::is_continuation(state.strategy_id) {
+        crate::continuation::scan_due(state.last_scan_ts, unix_now())
+    } else if state.strategy_id == 1 {
+        // Align with S1 poll: refresh BTC regime at most ~once per scan cadence.
+        state.last_scan_ts <= 0.0
+            || (unix_now() - state.last_scan_ts) >= 60.0
+    } else {
+        false
+    };
+    if crate::engine::is_continuation(state.strategy_id) {
+        let signal_iv = crate::engine::continuation_interval(state.strategy_id, cfg.s4_interval);
         let (lb, ub, htf) = collect_s4_history(
             client,
             state,
@@ -533,16 +628,27 @@ pub fn fetch_snapshot(
             &chart_symbol,
             &bars,
             &remembered,
-            cfg.s4_max_positions,
+            crate::engine::continuation_slot_cap(
+                state.strategy_id,
+                cfg.s4_max_positions,
+                cfg.s5_max_positions,
+            ),
             scan_due,
-            cfg.s4_interval,
+            signal_iv,
+            prior,
         );
         last_bars = lb;
         universe_bars.extend(ub);
         htf_bars = htf;
     } else {
         last_bars = collect_last_bars(client, state, &tickers, &chart_symbol, &bars, cfg.max_positions);
+        if let Some(prev) = prior {
+            if htf_bars.is_empty() {
+                htf_bars = prev.htf_bars.clone();
+            }
+        }
     }
+    ensure_btc_regime_bars(client, &mut htf_bars, &mut universe_bars, prior, scan_due);
 
     MarketSnapshot {
         tickers,
@@ -577,6 +683,8 @@ pub fn pull_snapshot(
         }
     }
     let overlay = state.positions.clone();
+    let scan_was_due = crate::engine::is_continuation(state.strategy_id)
+        && crate::continuation::scan_due(state.last_scan_ts, unix_now());
     let snapshot = fetch_snapshot(
         cfg,
         client,
@@ -590,6 +698,13 @@ pub fn pull_snapshot(
     );
     if snapshot.live_book && snapshot.account_fresh {
         pin.capture(snapshot.account.starting_equity);
+    }
+    // Monitor/watch never ticks the engine; advance book-kline cadence here so
+    // the poller reuses prior liquid history instead of re-hammering REST every 5s.
+    // Live must NOT consume scan here — continuation_decisions returns `now`
+    // after maybe_enter and the engine writes state.last_scan_ts.
+    if scan_was_due && !cfg.live {
+        state.last_scan_ts = unix_now();
     }
     snapshot
 }

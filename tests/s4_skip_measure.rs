@@ -21,7 +21,7 @@ fn mk(sym: &str, last: &str, chg: &str, vol: &str, high: &str) -> Ticker {
 
 #[test]
 fn measure_near_high_skip_rate_on_fixture_universe() {
-    // Production defaults: near_high_frac=2%, stretch=4%, min_change=0.5%, max_change=12%.
+    // Production defaults: near_high_frac=5%, stretch=4% (dumps), min_change=0.5%, max_change=35%.
     let p = ContinuationParams {
         liquid_n: 20,
         ..ContinuationParams::default()
@@ -33,11 +33,11 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
         let vol = format!("{}", 50_000_000 - i * 100_000);
         match i % 5 {
             0 => {
-                // near 24h high (within 2%), healthy mid change
+                // near 24h high (within near_high_frac), healthy mid change
                 tickers.push(mk(&sym, "10.0", "3.0", &vol, "10.05"));
             }
             1 => {
-                // stretch_pct (>=4%)
+                // green stretch (>=4%): NOT a tape skip — dump-only stretch_pct
                 tickers.push(mk(&sym, "10.0", "5.0", &vol, "12.0"));
             }
             2 => {
@@ -45,12 +45,12 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
                 tickers.push(mk(&sym, "10.0", "0.2", &vol, "11.0"));
             }
             3 => {
-                // eligible: >2% off high, mid change under max 12
-                tickers.push(mk(&sym, "9.5", "3.0", &vol, "10.0"));
+                // eligible: far enough off high, mid change under max 35
+                tickers.push(mk(&sym, "9.4", "3.0", &vol, "10.0")); // >5% off high
             }
             _ => {
-                // max_change (>12)
-                tickers.push(mk(&sym, "9.7", "15.0", &vol, "12.0"));
+                // max_change (>35)
+                tickers.push(mk(&sym, "9.7", "40.0", &vol, "12.0"));
             }
         }
     }
@@ -68,8 +68,7 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
     // Mirror pick_strategy4_book filter (measurement only; thresholds untouched).
     for t in &uni {
         let c = t.price_change_percent;
-        let tape = c >= p.stretch_pct
-            || c <= -p.stretch_pct
+        let tape = c <= -p.stretch_pct
             || c < Decimal::ZERO
             || c < p.min_change_percent
             || p.max_change_percent.map(|m| c > m).unwrap_or(false);
@@ -102,7 +101,11 @@ fn measure_near_high_skip_rate_on_fixture_universe() {
     );
     // Sanity: fixture construction guarantees some near_high skips among tape-passers.
     assert!(near_high_skip > 0, "fixture should include near_high skips");
-    assert_eq!(book.len() as u64, pass.min(p.liquid_n as u64));
+    // pick_strategy4_book is tape-only; near_high lives in s4_setup_skip / skip_new_long.
+    assert_eq!(
+        book.len() as u64,
+        (pass + near_high_skip).min(p.liquid_n as u64)
+    );
 
     flush_s4_skip_stats();
     let top = s4_skip_stats_top(8);
@@ -148,7 +151,7 @@ fn measure_near_high_skip_rate_from_public_tape_if_reachable() {
     let mut reasons: HashMap<&'static str, u64> = HashMap::new();
     for t in &uni {
         let c = t.price_change_percent;
-        if c >= p.stretch_pct || c <= -p.stretch_pct {
+        if c <= -p.stretch_pct {
             tape_skip += 1;
             *reasons.entry("stretch").or_default() += 1;
             continue;

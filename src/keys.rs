@@ -19,6 +19,7 @@ pub fn handle_key(ch: char, flatten_armed: bool) -> KeyAction {
         '2' => KeyAction::Strategy(2),
         '3' => KeyAction::Strategy(3),
         '4' => KeyAction::Strategy(4),
+        '5' => KeyAction::Strategy(5),
         'r' | 'R' => KeyAction::Refresh,
         'x' | 'X' => {
             if flatten_armed {

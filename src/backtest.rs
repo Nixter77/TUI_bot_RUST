@@ -8,7 +8,6 @@ use crate::trend::TrendParams;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
 
 const PUBLIC_FAPI: &str = "https://fapi.binance.com";
 const CACHE_DIR: &str = ".state/klines";
@@ -64,7 +63,7 @@ fn fetch_klines(symbol: &str, interval: &str) -> Option<Vec<Bar>> {
     if let Some(bars) = load_cached(symbol, interval) {
         return Some(bars);
     }
-    let url = format!("{PUBLIC_FAPI}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=500");
+    let url = format!("{PUBLIC_FAPI}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=1500");
     let resp = ureq::get(&url)
         .set("User-Agent", "tui-bot-rust/backtest")
         .timeout(std::time::Duration::from_secs(15))
@@ -101,90 +100,141 @@ fn format_packed(rows: &[SimResult]) -> String {
     lines.join("\n")
 }
 
+fn dump_chart_json(rows: &[SimResult]) {
+    use serde_json::json;
+    let mut series = Vec::new();
+    for row in rows {
+        let mut eq = row.start_equity;
+        let mut curve = vec![json!({"i": 0, "equity": eq.to_string(), "pnl": "0"})];
+        for (i, t) in row.trades.iter().enumerate() {
+            eq += t.pnl;
+            curve.push(json!({
+                "i": i + 1,
+                "equity": eq.to_string(),
+                "pnl": t.pnl.to_string(),
+                "symbol": t.symbol,
+                "reason": t.reason,
+            }));
+        }
+        series.push(json!({
+            "name": row.name,
+            "strategy_id": row.strategy_id,
+            "trades": row.trades.len(),
+            "pnl": row.pnl().to_string(),
+            "max_dd": row.max_drawdown.to_string(),
+            "curve": curve,
+        }));
+    }
+    let payload = json!({ "series": series });
+    let _ = fs::create_dir_all(".state");
+    let _ = fs::write(".state/backtest-chart.json", payload.to_string());
+}
+
 pub fn run_cli() -> i32 {
+    use crate::config::TradeInterval;
+    use crate::sim::{simulate_bars_opts, SimOpts};
+
     eprintln!("fetching public klines (cached under .state/klines/)…");
-    let mut universe: Vec<(String, Vec<Bar>)> = Vec::new();
-    for symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {
-        if let Some(bars) = fetch_klines(symbol, "5m") {
-            universe.push((symbol.into(), bars));
+    // Majors for S1–S3; alts for S4/S5 (continuation skips BTC/ETH/SOL/BNB/XRP/BCH).
+    let majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    let alts = ["LINKUSDT", "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "NEARUSDT"];
+    for symbol in majors.iter().chain(alts.iter()) {
+        for iv in ["5m", "15m", "1h", "4h"] {
+            let _ = fs::remove_file(format!("{CACHE_DIR}/{symbol}_{iv}.json"));
         }
     }
-    if universe.is_empty() {
-        eprintln!("network/cache empty — walking in-process fixture klines (no orders)");
-        universe.push((
-            "BTCUSDT".into(),
-            fixture_bars(200, 100.0, 0.05, 300_000),
-        ));
+
+    let mut univ_5m: Vec<(String, Vec<Bar>)> = Vec::new();
+    let mut univ_15m: Vec<(String, Vec<Bar>)> = Vec::new();
+    let mut univ_1h: Vec<(String, Vec<Bar>)> = Vec::new();
+    let mut htf_4h: std::collections::HashMap<String, Vec<Bar>> = std::collections::HashMap::new();
+
+    for symbol in majors {
+        if let Some(bars) = fetch_klines(symbol, "5m") {
+            univ_5m.push((symbol.into(), bars));
+        }
     }
+    for symbol in alts {
+        if let Some(bars) = fetch_klines(symbol, "15m") {
+            univ_15m.push((symbol.into(), bars));
+        }
+        if let Some(bars) = fetch_klines(symbol, "1h") {
+            univ_1h.push((symbol.into(), bars));
+        }
+        if let Some(bars) = fetch_klines(symbol, "4h") {
+            htf_4h.insert(symbol.into(), bars);
+        }
+    }
+    let btc_htf = fetch_klines("BTCUSDT", "4h");
+
+    if univ_5m.is_empty() && univ_15m.is_empty() && univ_1h.is_empty() {
+        eprintln!("network/cache empty — walking in-process fixture klines (no orders)");
+        let fx = fixture_bars(200, 100.0, 0.05, 300_000);
+        univ_5m.push(("BTCUSDT".into(), fx.clone()));
+        univ_15m.push(("LINKUSDT".into(), fx.clone()));
+        univ_1h.push(("LINKUSDT".into(), fx));
+    }
+
     let mut rows = Vec::new();
     let mom = MomentumParams {
         always_enter: true,
         cooldown_sec: 0.0,
         ..MomentumParams::default()
     };
-    for (symbol, bars) in &universe {
+    let cont_mom = MomentumParams {
+        s4_always_enter: true,
+        s4_interval: TradeInterval::Minute15,
+        cooldown_sec: 0.0,
+        ..MomentumParams::default()
+    };
+
+    for (symbol, bars) in &univ_5m {
         rows.push(simulate_bars(
-            1,
-            bars,
-            symbol,
-            &format!("mom {symbol}"),
-            Decimal::from(20),
-            Decimal::new(4, 4),
-            Decimal::new(1, 4),
-            Some(40),
-            Decimal::from(1000),
-            Some(&mom),
-            None,
-            None,
+            1, bars, symbol, &format!("mom {symbol} 5m"),
+            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
+            Some(40), Decimal::from(1000), Some(&mom), None, None,
         ));
         rows.push(simulate_bars(
-            2,
-            bars,
-            symbol,
-            &format!("scalp {symbol}"),
-            Decimal::from(20),
-            Decimal::new(4, 4),
-            Decimal::new(1, 4),
-            Some(80),
-            Decimal::from(1000),
-            None,
-            Some(&ScalpParams::default()),
-            None,
+            2, bars, symbol, &format!("scalp {symbol} 5m"),
+            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
+            Some(80), Decimal::from(1000), None, Some(&ScalpParams::default()), None,
         ));
         rows.push(simulate_bars(
-            3,
-            bars,
-            symbol,
-            &format!("trend {symbol}"),
-            Decimal::from(20),
-            Decimal::new(4, 4),
-            Decimal::new(1, 4),
-            Some(70),
-            Decimal::from(1000),
-            None,
-            None,
-            Some(&TrendParams::default()),
-        ));
-        rows.push(simulate_bars(
-            4,
-            bars,
-            symbol,
-            &format!("cont {symbol}"),
-            Decimal::from(20),
-            Decimal::new(4, 4),
-            Decimal::new(1, 4),
-            Some(40),
-            Decimal::from(1000),
-            None,
-            None,
-            None,
+            3, bars, symbol, &format!("trend {symbol} 5m"),
+            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
+            Some(70), Decimal::from(1000), None, None, Some(&TrendParams::default()),
         ));
     }
+
+    for (symbol, bars) in &univ_15m {
+        let htf = htf_4h.get(symbol).map(|v| v.as_slice());
+        let opts = SimOpts {
+            htf,
+            btc_htf: btc_htf.as_deref(),
+        };
+        rows.push(simulate_bars_opts(
+            4, bars, symbol, &format!("S4 cont {symbol} 15m"),
+            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
+            Some(40), Decimal::from(1000), Some(&cont_mom), None, None, opts,
+        ));
+    }
+    for (symbol, bars) in &univ_1h {
+        let htf = htf_4h.get(symbol).map(|v| v.as_slice());
+        let opts = SimOpts {
+            htf,
+            btc_htf: btc_htf.as_deref(),
+        };
+        rows.push(simulate_bars_opts(
+            5, bars, symbol, &format!("S5 verify {symbol} 1h"),
+            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
+            Some(40), Decimal::from(1000), Some(&cont_mom), None, None, opts,
+        ));
+    }
+
     let text = format_packed(&rows);
     print!("{text}");
-    if let Some(parent) = Path::new(".state").to_str() {
-        let _ = fs::create_dir_all(parent);
-        let _ = fs::write(".state/backtest-report.txt", &text);
-    }
+    let _ = fs::create_dir_all(".state");
+    let _ = fs::write(".state/backtest-report.txt", &text);
+    dump_chart_json(&rows);
     0
 }

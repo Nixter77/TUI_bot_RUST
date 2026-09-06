@@ -2,7 +2,7 @@
 
 use crate::config::{default_risk_pct, TradeInterval, STRATEGY1_POLL_SECONDS};
 use crate::dayrisk::{default_daily_loss_r, default_daily_loss_usdt};
-use crate::models::{bar_is_red, near_24h_high, Bar, Decision, Position, Side, Ticker};
+use crate::models::{MarketSnapshot, bar_is_red, near_24h_high, Bar, Decision, Position, Side, Ticker};
 use crate::ranking::{momentum_min_change_percent, pick_momentum_book};
 use crate::sessions::{in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS};
 use crate::trail::{candidate_stop, long_stop_is_valid, take_profit_price_net, trail_stop_upward};
@@ -22,6 +22,7 @@ pub struct MomentumParams {
     pub s4_always_enter: bool,
     pub s4_interval: TradeInterval,
     pub s4_max_positions: i32,
+    pub s5_max_positions: i32,
     pub min_change_percent: Decimal,
     pub max_change_percent: Option<Decimal>,
     pub min_price: Decimal,
@@ -45,6 +46,7 @@ impl Default for MomentumParams {
             s4_always_enter: false,
             s4_interval: TradeInterval::Minute5,
             s4_max_positions: crate::config::DEFAULT_S4_MAX_POSITIONS,
+            s5_max_positions: crate::config::DEFAULT_S4_MAX_POSITIONS,
             min_change_percent: momentum_min_change_percent(),
             max_change_percent: Some(Decimal::from(12)),
             min_price: Decimal::ZERO,
@@ -102,7 +104,7 @@ fn manage_momentum_long(
             symbol: position.symbol.clone(),
         };
     }
-    if position.stop_loss.is_none() {
+    let Some(sl) = position.stop_loss else {
         let cand = match candidate_stop(mark, "LONG", p.trail_pct) {
             Ok(c) => c,
             Err(_) => return Decision::hold("cannot attach stop"),
@@ -115,8 +117,7 @@ fn manage_momentum_long(
             reason: "attach stop".into(),
             symbol: position.symbol.clone(),
         };
-    }
-    let sl = position.stop_loss.unwrap();
+    };
     if mark <= sl {
         return Decision::ExitPosition {
             reason: "momentum stop loss".into(),
@@ -171,7 +172,13 @@ pub fn s1_setup_skip(
     ticker: &Ticker,
     last_bars: &HashMap<String, Bar>,
     in_book: bool,
+    snapshot: Option<&MarketSnapshot>,
 ) -> Option<String> {
+    if let Some(snap) = snapshot {
+        if let Some(reason) = crate::regime::block_alt_entry(snap) {
+            return Some(reason);
+        }
+    }
     if !in_book {
         return Some("не в топе роста".into());
     }
@@ -200,6 +207,7 @@ pub fn momentum_decisions(
     last_bars: &HashMap<String, Bar>,
     allow_enter: bool,
     desk_until: f64,
+    snapshot: Option<&MarketSnapshot>,
 ) -> (Vec<Decision>, f64) {
     let owned = MomentumParams::default();
     let p = params.unwrap_or(&owned);
@@ -296,6 +304,14 @@ pub fn momentum_decisions(
     }
     let mut skipped_red = false;
     let mut skipped_no_bar = false;
+    if let Some(snap) = snapshot {
+        if let Some(reason) = crate::regime::block_alt_entry(snap) {
+            if out.is_empty() {
+                return (vec![Decision::hold(reason)], now);
+            }
+            return (out, last_scan_ts);
+        }
+    }
     for ticker in &book {
         if slots <= 0 {
             break;
@@ -381,6 +397,7 @@ pub fn momentum_decision(
         &empty_bars,
         true,
         0.0,
+        None,
     );
     (
         decisions.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),

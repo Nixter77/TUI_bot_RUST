@@ -1,10 +1,13 @@
-//! Strategy 4 (Continuation): long-only pullback on liquid names.
+//! Strategy 4 (Continuation) and Strategy 5 (Verify, locked 1h).
 //!
-//! Does **not** chase 24h % leaders. Signal bars come from `STRATEGY4_INTERVAL`
-//! (5m / 15m / 30m / 1h). SL/TP width follows that interval; TP is 2R after fees.
+//! Long-only pullback on liquid names. Does **not** chase 24h % leaders.
+//! S4 signal bars come from `STRATEGY4_INTERVAL` (5m / 15m / 30m / 1h).
+//! S5 is the 1h A/B arm: same core, Hour1 geometry (stop/pullback/hold), not the
+//! 15m 2–5% soak band. TP is 2R after fees. Post-BE trail is the signal-bar low;
+//! S5 does not ratchet a 0.8% mark trail (that sits inside a 1h candle).
 
 use crate::config::TradeInterval;
-use crate::indicators::{last_atr, last_ema, last_two_swing_lows, mean_volume, vwap};
+use crate::indicators::{last_atr, last_ema, mean_volume, vwap};
 use crate::money::round_trip_taker_pct;
 use crate::models::{
     bar_is_red, last_closed_bar, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side, Ticker,
@@ -19,6 +22,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
+/// Book kline fetch and new-entry scan share this cadence.
+pub const SCAN_SEC: f64 = 60.0;
+
+pub fn scan_due(last_scan_ts: f64, now: f64) -> bool {
+    last_scan_ts <= 0.0 || (now - last_scan_ts) >= SCAN_SEC
+}
 
 fn s4_skip_tally() -> &'static Mutex<HashMap<String, u64>> {
     static TALLY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
@@ -91,12 +100,12 @@ impl Default for ContinuationParams {
             min_change_percent: Decimal::new(5, 1),
             min_quote_volume: Decimal::from(50_000),
             min_price: Decimal::new(5, 1),
-            max_change_percent: Some(Decimal::from(12)),
-            liquid_frac: Decimal::new(2, 2),
+            max_change_percent: Some(Decimal::from(35)),
+            liquid_frac: Decimal::new(5, 3), // 0.5% of max vol — 2% zeroed book on outlier tape
             liquid_n: 20,
             week_leader_pct: Decimal::from(4),
             stretch_pct: Decimal::from(4),
-            near_high_frac: Decimal::new(2, 2),
+            near_high_frac: Decimal::new(5, 2), // 0.05 — widen near-high book
             reward_r: TradeInterval::Minute5.reward_r(),
             min_stop_pct: TradeInterval::Minute5.min_stop_pct(),
             max_stop_pct: TradeInterval::Minute5.max_stop_pct(),
@@ -106,7 +115,7 @@ impl Default for ContinuationParams {
             max_positions: 5,
             atr_period: 14,
             atr_k: Decimal::from(2),
-            volume_confirm_frac: Decimal::new(8, 1), // 0.8
+            volume_confirm_frac: Decimal::new(3, 1), // 0.3
             min_pullback_pct: TradeInterval::Minute5.min_pullback_pct(),
             stop_lookback: 3,
             interval: TradeInterval::Minute5,
@@ -291,10 +300,9 @@ pub fn manage_continuation_long(
             };
         }
     }
-    if pos.stop_loss.is_none() {
+    let Some(sl) = pos.stop_loss else {
         return attach_stop_from_entry(pos, mark, p);
-    }
-    let sl = pos.stop_loss.unwrap();
+    };
     if mark <= sl {
         return Decision::ExitPosition {
             reason: "continuation stop loss".into(),
@@ -380,10 +388,18 @@ pub fn manage_continuation_long(
                     symbol: pos.symbol.clone(),
                 };
             }
-            return Decision::ExitPosition {
-                reason: "1R был — фиксирую".into(),
-                symbol: pos.symbol.clone(),
-            };
+            // Flatten only when 1R is still in hand (mark or uPnL). A wick that
+            // already gave back is not "1R был" — S5 1h history used to trip this
+            // and market-close red slots (ZEC/ZEN 2026-09-06).
+            let in_hand = (risk > Decimal::ZERO && mark >= pos.entry_price + risk)
+                || (pos.qty > Decimal::ZERO && pos.unrealized_pnl >= pos.qty * risk);
+            if in_hand {
+                return Decision::ExitPosition {
+                    reason: "1R был — фиксирую".into(),
+                    symbol: pos.symbol.clone(),
+                };
+            }
+            return Decision::hold("continuation hold / 1R wick отдан");
         }
         return Decision::hold("continuation hold / жду 1R");
     }
@@ -424,7 +440,9 @@ pub fn manage_continuation_long(
         return Decision::hold("continuation hold / trail not raised");
     };
     let mut candidate = last.low;
-    if p.trail_pct > Decimal::ZERO {
+    // 0.8% mark trail is a 15m leftover. On 1h it sits inside the candle and
+    // ratchets every poll (live S5 DASH: 16 amends / 32 min).
+    if p.interval != TradeInterval::Hour1 && p.trail_pct > Decimal::ZERO {
         if let Ok(pct_sl) = candidate_stop(mark, "LONG", p.trail_pct) {
             if pct_sl > candidate {
                 candidate = pct_sl;
@@ -512,11 +530,23 @@ fn risk_from_take_profit(pos: &Position, reward_r: Decimal) -> Option<Decimal> {
     }
 }
 
+/// S4 soak keeps 4h. S5 1h would otherwise be only 4 signal bars — scale to 16h
+/// (same 16-bar hold as 15m × 4h).
+fn max_hold_sec(p: &ContinuationParams) -> f64 {
+    if p.interval == TradeInterval::Hour1 {
+        16.0 * 3600.0
+    } else {
+        4.0 * 3600.0
+    }
+}
+
 fn time_stop_reason(pos: &Position, now: f64, p: &ContinuationParams) -> Option<String> {
     if let Some(opened_ms) = pos.opened_bar_time {
         let opened = (opened_ms as f64) / 1000.0;
-        if opened > 0.0 && now - opened >= 4.0 * 3600.0 {
-            return Some("тайм-стоп 4ч".into());
+        let hold = max_hold_sec(p);
+        if opened > 0.0 && now - opened >= hold {
+            let hours = (hold / 3600.0).round() as i64;
+            return Some(format!("тайм-стоп {hours}ч"));
         }
     }
     if !p.always_enter
@@ -555,11 +585,12 @@ fn reached_one_r(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) -> bo
     }
     let bars = snapshot.bars_for(&pos.symbol);
     // Exchange restorations often have opened_bar_time None (exchange.rs).
-    // Any post-entry bar (or any high if entry time unknown) that traded 1R counts.
+    // Do not scan the whole 1h book — yesterday's high looks like a 1R wick
+    // and S5 then flattens a red slot. Last 8 signal bars ≈ 2h on 15m, 8h on 1h.
     let hit = if let Some(since) = pos.opened_bar_time {
         bars.iter().any(|b| b.open_time >= since && b.high >= target)
     } else {
-        bars.iter().any(|b| b.high >= target)
+        bars.iter().rev().take(8).any(|b| b.high >= target)
     };
     if hit {
         return true;
@@ -594,7 +625,9 @@ fn skip_no_pullback(
     if range > Decimal::ZERO && last.close < last.low + range / Decimal::TWO {
         return Some(format!("слабое закрытие {tf} — не вхожу"));
     }
-    if last.close > Decimal::ZERO && range / last.close > Decimal::new(6, 2) {
+    // 6% is the 15m soak cap. Hour1 allows a wider signal candle up to max_stop.
+    let max_range = p.max_stop_pct.max(Decimal::new(6, 2));
+    if last.close > Decimal::ZERO && range / last.close > max_range {
         return Some("свеча слишком широкая — не вхожу".into());
     }
     let hist = hist_bars(snapshot, symbol, last);
@@ -631,9 +664,7 @@ fn skip_no_pullback(
 }
 
 /// Skip unless last 4h close is above EMA20. Missing 4h history skips.
-/// When two 4h swing lows exist and the newer is not higher, skip.
-/// Missing swings do not skip (EMA remains the hard gate).
-/// Signal-TF higher-lows stay in `skip_no_uptrend`.
+/// 4h higher-low removed (was a choke); signal-TF also EMA20-only (no HL series).
 pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<String> {
     let bars = snapshot.htf_bars_for(symbol);
     if bars.len() < 21 {
@@ -649,14 +680,12 @@ pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<Stri
     if last.close <= ema {
         return Some("4ч ниже EMA20 — не вхожу".into());
     }
-    match last_two_swing_lows(bars) {
-        Some((prev, newer)) if newer <= prev => Some("4ч нет higher low — не вхожу".into()),
-        _ => None,
-    }
+    None
 }
 
-/// Skip unless last close is above EMA20 and the last two swing lows rise.
-fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &ContinuationParams) -> Option<String> {
+/// Skip unless last close is above EMA20 on the signal TF.
+/// Signal-TF higher-low series removed (was choking continuation entries); 4h HL already dropped.
+pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &ContinuationParams) -> Option<String> {
     let tf = p.interval.as_ru();
     let bars = snapshot.bars_for(symbol);
     if bars.len() < 21 {
@@ -670,11 +699,7 @@ fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &ContinuationPara
     if last.close <= ema {
         return Some("цена ниже EMA20 — не вхожу".into());
     }
-    match last_two_swing_lows(bars) {
-        Some((prev, newer)) if newer > prev => None,
-        Some(_) => Some("нет серии higher low — не вхожу".into()),
-        None => Some("нет серии higher low — не вхожу".into()),
-    }
+    None
 }
 
 /// Computes a structural stop loss combining N-bar low lookback and ATR-based widening.
@@ -728,7 +753,7 @@ fn structure_stop(
 
 fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &ContinuationParams) -> Decision {
     if is_major_symbol(&ticker.symbol) {
-        return Decision::hold("мажор — не беру в S4");
+        return Decision::hold("мажор — не беру");
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Decision::hold("мелочь — не гоняю");
@@ -758,7 +783,9 @@ fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &Continuatio
 
 fn skip_24h_tape(ticker: &Ticker, p: &ContinuationParams) -> Option<String> {
     let c = ticker.price_change_percent;
-    if c >= p.stretch_pct || c <= -p.stretch_pct {
+    // Dumps and dead tape stay out. A green day above `stretch_pct` is a
+    // pullback candidate — chase is `near_24h_high`, not "anyone +4%".
+    if c <= -p.stretch_pct {
         return Some("улетело за день — не догоняю".into());
     }
     if c < Decimal::ZERO || c < p.min_change_percent {
@@ -800,15 +827,13 @@ pub fn pick_strategy4_book(
     }
     let owned = ContinuationParams::default();
     let p = p.unwrap_or(&owned);
+    // Tape-only prefilter for UI/book. near_24h_high lives in skip_new_long /
+    // s4_setup_skip so monitor Ready ⟺ live enter gate.
     let mut rows: Vec<Ticker> = liquid_universe(tickers, exclude, p)
         .into_iter()
         .filter(|t| {
             if let Some(reason) = skip_24h_tape(t, p) {
                 note_s4_skip(&reason);
-                return false;
-            }
-            if near_24h_high(t, p.near_high_frac) {
-                note_s4_skip(NEAR_HIGH_SKIP);
                 return false;
             }
             true
@@ -899,8 +924,12 @@ fn skip_new_long(
     recent_leaders: &[String],
     liquid: &HashSet<String>,
 ) -> Option<String> {
+    // Phase-2 BTC regime: same path as monitor Ready (s4_setup_skip).
+    if let Some(reason) = crate::regime::block_alt_entry(snapshot) {
+        return Some(reason);
+    }
     if is_major_symbol(&ticker.symbol) {
-        return Some("мажор — не беру в S4".into());
+        return Some("мажор — не беру".into());
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Some("мелочь — не гоняю".into());
@@ -910,6 +939,10 @@ fn skip_new_long(
     }
     if let Some(reason) = skip_24h_tape(ticker, p) {
         return Some(reason);
+    }
+    // Same gate as monitor Ready: near-high must fail s4_setup_skip, not only the book.
+    if near_24h_high(ticker, p.near_high_frac) {
+        return Some(NEAR_HIGH_SKIP.into());
     }
     let Some(bar) = signal_bar(snapshot, &ticker.symbol) else {
         return Some(format!("нет {} бара — не вхожу", p.interval.as_ru()));
@@ -967,14 +1000,13 @@ fn maybe_enter(
     snapshot: &MarketSnapshot,
     positions: &[Position],
     now: f64,
-    last_scan_ts: f64,
     inflight: &[String],
     cooldowns: &HashMap<String, f64>,
     p: &ContinuationParams,
     exclude: &[String],
     recent_leaders: &[String],
     mut out: Vec<Decision>,
-) -> (Vec<Decision>, f64) {
+) -> Vec<Decision> {
     let held: HashSet<String> = positions
         .iter()
         .filter(|pos| pos.qty > Decimal::ZERO)
@@ -989,67 +1021,44 @@ fn maybe_enter(
             blocked.insert(sym.to_ascii_uppercase());
         }
     }
-    let mut slots = p.max_positions
+    // Allow fills up to max_positions even if open slots are flat/red (desk restore).
+    let slots = p.max_positions
         - held.len() as i32
         - inflight
             .iter()
             .filter(|s| !held.contains(&s.to_ascii_uppercase()))
             .count() as i32;
-    let not_green: Vec<&Position> = positions
-        .iter()
-        .filter(|pos| pos.qty > Decimal::ZERO && pos.unrealized_pnl <= Decimal::ZERO)
-        .collect();
-    if !not_green.is_empty() {
-        slots = 0;
-    }
     let liquid = liquid_keys(&snapshot.tickers, exclude, p);
     let mut last_skip: Option<String> = None;
-    let book = pick_strategy4_book(
-        &snapshot.tickers,
-        p.liquid_n.max(1),
-        exclude,
-        Some(p),
-    );
-    for ticker in book {
+    // Same desk as monitor candidate_tickers: liquid_universe by quote_volume
+    // (liquid_n soft cap). Ready ⟺ !skip_new_long; at most one EnterLong per scan.
+    for ticker in liquid_universe(&snapshot.tickers, exclude, p) {
         if slots <= 0 {
             break;
         }
         if blocked.contains(&ticker.symbol.to_ascii_uppercase()) {
             continue;
         }
-        if let Some(reason) = skip_new_long(snapshot, &ticker, p, recent_leaders, &liquid) {
+        if let Some(reason) = skip_new_long(snapshot, ticker, p, recent_leaders, &liquid) {
             note_s4_skip(&reason);
             last_skip = Some(reason);
             continue;
         }
-        let decision = enter_from_ticker(snapshot, &ticker, p);
+        let decision = enter_from_ticker(snapshot, ticker, p);
         if let Decision::EnterLong { .. } = &decision {
-            blocked.insert(ticker.symbol.to_ascii_uppercase());
-            slots = 0;
             out.push(decision);
+            break;
         }
     }
     if !out.is_empty() {
-        return (out, now);
-    }
-    if !not_green.is_empty() {
-        return (
-            vec![Decision::hold("слот не в плюсе — новый не открываю")],
-            last_scan_ts,
-        );
-    }
-    if held.len() as i32 >= p.max_positions {
-        return (
-            vec![Decision::hold("continuation book full")],
-            last_scan_ts,
-        );
-    }
-    (
+        out
+    } else if held.len() as i32 >= p.max_positions {
+        vec![Decision::hold("continuation book full")]
+    } else {
         vec![Decision::hold(
             last_skip.unwrap_or_else(|| "нет входа в топ роста".into()),
-        )],
-        last_scan_ts,
-    )
+        )]
+    }
 }
 
 /// Manage open longs, then at most one new enter per 60s scan.
@@ -1107,8 +1116,7 @@ pub fn continuation_decisions(
         }
         return (out, last_scan_ts, leaders);
     }
-    let due = last_scan_ts <= 0.0 || (now - last_scan_ts) >= 60.0;
-    if !due {
+    if !scan_due(last_scan_ts, now) {
         if out.is_empty() {
             return (
                 vec![Decision::hold("waiting for next scan")],
@@ -1118,11 +1126,10 @@ pub fn continuation_decisions(
         }
         return (out, last_scan_ts, leaders);
     }
-    let (out, scan_ts) = maybe_enter(
+    let out = maybe_enter(
         snapshot,
         positions,
         now,
-        last_scan_ts,
         inflight,
         cooldowns,
         p,
@@ -1130,5 +1137,5 @@ pub fn continuation_decisions(
         recent_leaders,
         out,
     );
-    (out, scan_ts, leaders)
+    (out, now, leaders)
 }

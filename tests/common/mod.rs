@@ -31,6 +31,7 @@ pub fn account() -> Account {
 pub fn scalp_loose() -> ScalpParams {
     ScalpParams {
         entry_windows: Vec::new(),
+        always_enter: true,
         rsi_min: Decimal::ZERO,
         rsi_max: Decimal::from(100),
         min_atr_pct: Decimal::ZERO,
@@ -177,6 +178,34 @@ fn bars_from_fracs(mark: f64, rows: &[(f64, f64, f64, f64)]) -> Vec<Bar> {
                 close: fmt(*c),
                 volume: d("20"),
             }
+        })
+        .collect()
+}
+
+/// ~27 1h bars, ~3% typical range so 2×ATR14 ≈ 5–6% (fits Hour1 8% stop, not 15m 5%).
+/// Ends on a green pullback-resume. Long enough for EMA20.
+pub fn pullback_1h_wide_atr_at(mark: f64) -> Vec<Bar> {
+    let t0 = 1_700_000_000_000i64;
+    let dt = 3_600_000i64;
+    let mut rows: Vec<(f64, f64, f64, f64)> = (0..24)
+        .map(|i| {
+            let o = 0.86 + i as f64 * 0.005;
+            (o, o + 0.030, o - 0.002, o + 0.018)
+        })
+        .collect();
+    rows.push((0.993, 0.996, 0.962, 0.968));
+    rows.push((0.968, 0.972, 0.948, 0.954));
+    rows.push((0.954, 1.000, 0.950, 0.992));
+    let fmt = |x: f64| Decimal::from_str_exact(&format!("{:.8}", mark * x)).unwrap();
+    rows.iter()
+        .enumerate()
+        .map(|(i, (o, h, l, c))| Bar {
+            open_time: t0 + i as i64 * dt,
+            open: fmt(*o),
+            high: fmt(*h),
+            low: fmt(*l),
+            close: fmt(*c),
+            volume: d("20"),
         })
         .collect()
 }

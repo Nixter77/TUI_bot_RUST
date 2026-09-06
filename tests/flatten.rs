@@ -213,3 +213,15 @@ fn paused_tick_does_not_enter() {
     assert!(decision.reason().contains("паузе"));
     let _ = MomentumParams::default();
 }
+
+#[test]
+fn paused_tick_resumes_after_cooldown() {
+    let mut snap = MarketSnapshot::empty(Decimal::ONE);
+    snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("8000"))];
+    snap.chart_symbol = "BTCUSDT".into();
+    let mut state = EngineState::new(1);
+    state.entries_paused = true;
+    state.cooldown_until = 50.0;
+    let (new_state, _) = tick(&state, &snap, 100.0, None, None, None);
+    assert!(!new_state.entries_paused);
+}

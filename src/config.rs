@@ -64,6 +64,15 @@ impl TradeInterval {
         }
     }
 
+    pub fn duration_ms(self) -> i64 {
+        match self {
+            Self::Minute5 => 5 * 60_000,
+            Self::Minute15 => 15 * 60_000,
+            Self::Minute30 => 30 * 60_000,
+            Self::Hour1 => 60 * 60_000,
+        }
+    }
+
     pub fn fetch_limit(self) -> usize {
         50
     }
@@ -95,7 +104,7 @@ impl TradeInterval {
     pub fn min_pullback_pct(self) -> Decimal {
         match self {
             Self::Minute5 => Decimal::new(10, 3),
-            Self::Minute15 => Decimal::new(12, 3),
+            Self::Minute15 => Decimal::new(10, 3), // soften vs 1.2% — empty-book killer on 15m
             Self::Minute30 => Decimal::new(15, 3),
             Self::Hour1 => Decimal::new(20, 3),
         }
@@ -147,6 +156,8 @@ pub const STRATEGY1_POLL_SECONDS: i32 = 60;
 pub const DEFAULT_MAX_POSITIONS: i32 = 1;
 /// Strategy 4 concurrent longs. Wider than S1 so the liquid book can fill.
 pub const DEFAULT_S4_MAX_POSITIONS: i32 = 5;
+/// Strategy 2 (scalp) max hold in signal bars (1m-class). Shorter than legacy 24.
+pub const DEFAULT_S2_MAX_HOLD_BARS: usize = 8;
 
 pub fn default_notional() -> Decimal {
     Decimal::from(20)
@@ -203,6 +214,13 @@ pub struct Config {
     pub s4_interval: TradeInterval,
     /// Strategy 4 basket size (STRATEGY4_MAX_POSITIONS). Independent of S1.
     pub s4_max_positions: i32,
+    /// Strategy 5 basket size (STRATEGY5_MAX_POSITIONS). Falls back to S4 when unset.
+    pub s5_max_positions: i32,
+    /// Strategy 2 (scalp) entry windows (STRATEGY2_ENTRY_HOURS).
+    pub s2_entry_windows: Vec<HourWindow>,
+    pub s2_always_enter: bool,
+    /// Strategy 2 max hold bars (STRATEGY2_MAX_HOLD_BARS).
+    pub s2_max_hold_bars: usize,
     pub leverage: Option<i32>,
     pub max_positions: i32,
     pub notional_from_exchange: bool,
@@ -404,6 +422,17 @@ pub fn load_config(
     if !(1..=10).contains(&s4_max_positions) {
         return Err(ConfigError("STRATEGY4_MAX_POSITIONS must be 1–10".into()));
     }
+    let s5_raw = get_opt("STRATEGY5_MAX_POSITIONS");
+    let s5_max_positions: i32 = if s5_raw.is_empty() {
+        s4_max_positions
+    } else {
+        s5_raw
+            .parse()
+            .map_err(|_| ConfigError("STRATEGY5_MAX_POSITIONS must be an integer".into()))?
+    };
+    if !(1..=10).contains(&s5_max_positions) {
+        return Err(ConfigError("STRATEGY5_MAX_POSITIONS must be 1–10".into()));
+    }
     if daily_loss_usdt < Decimal::ZERO {
         return Err(ConfigError("DAILY_LOSS_USDT cannot be negative".into()));
     }
@@ -469,6 +498,29 @@ pub fn load_config(
     let s4_interval = TradeInterval::parse(&get("STRATEGY4_INTERVAL", "5m"))
         .map_err(ConfigError)?;
 
+    let s2_always_enter = matches!(
+        get_opt("STRATEGY2_ALWAYS_ENTER").as_str(),
+        "1" | "true" | "TRUE" | "yes"
+    );
+    let s2_hours_raw = get("STRATEGY2_ENTRY_HOURS", DEFAULT_ENTRY_HOURS);
+    let mut s2_entry_windows = parse_entry_windows(&s2_hours_raw)
+        .map_err(|e| ConfigError(format!("STRATEGY2_ENTRY_HOURS: {e}")))?;
+    if s2_always_enter {
+        s2_entry_windows.clear();
+    }
+    let s2_hold_raw = get(
+        "STRATEGY2_MAX_HOLD_BARS",
+        &DEFAULT_S2_MAX_HOLD_BARS.to_string(),
+    );
+    let s2_max_hold_bars: usize = s2_hold_raw
+        .parse()
+        .map_err(|_| ConfigError("STRATEGY2_MAX_HOLD_BARS must be an integer".into()))?;
+    if !(1..=240).contains(&s2_max_hold_bars) {
+        return Err(ConfigError(
+            "STRATEGY2_MAX_HOLD_BARS must be 1–240".into(),
+        ));
+    }
+
     if live && creds.is_none() {
         return Err(ConfigError(
             "refusing --live without BINANCE_API_KEY and BINANCE_API_SECRET".into(),
@@ -495,6 +547,10 @@ pub fn load_config(
         s4_always_enter,
         s4_interval,
         s4_max_positions,
+        s5_max_positions,
+        s2_entry_windows,
+        s2_always_enter,
+        s2_max_hold_bars,
         leverage,
         max_positions,
         notional_from_exchange,

@@ -1,7 +1,7 @@
 //! Assemble the TUI ViewModel from config + engine + snapshot.
 
 use crate::config::Config;
-use crate::continuation::ContinuationParams;
+use crate::engine::{continuation_interval, continuation_trade_params, is_continuation};
 use crate::errorlog::guess_source;
 use crate::errors::is_retry_error;
 use crate::models::{coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side};
@@ -53,9 +53,13 @@ pub fn basket_symbols(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsh
         .into_iter()
         .map(|t| t.symbol)
         .collect()
-    } else if state.strategy_id == 4 {
-        let mut params = ContinuationParams::default().with_interval(cfg.s4_interval);
-        params.max_positions = cfg.s4_max_positions;
+    } else if is_continuation(state.strategy_id) {
+        let mut params = continuation_trade_params(state.strategy_id, cfg.s4_interval);
+        params.max_positions = crate::engine::continuation_slot_cap(
+            state.strategy_id,
+            cfg.s4_max_positions,
+            cfg.s5_max_positions,
+        );
         crate::continuation::pick_strategy4_book(
             &snapshot.tickers,
             params.liquid_n.max(1),
@@ -135,7 +139,14 @@ pub fn build_view(
         live: cfg.live,
         has_credentials: cfg.credentials.is_some(),
         poll_seconds: cfg.poll_seconds,
-        last_decision: last_decision.to_string(),
+        last_decision: {
+            let reg = crate::regime::classify_snapshot(snapshot).as_str();
+            if last_decision.is_empty() || last_decision == "—" {
+                format!("BTC {reg}")
+            } else {
+                format!("{last_decision}  |  BTC {reg}")
+            }
+        },
         mode_note: note,
         flatten_armed,
         entries_paused: state.entries_paused,
@@ -145,12 +156,12 @@ pub fn build_view(
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0),
         ),
-        entry_windows: if state.strategy_id == 4 {
+        entry_windows: if is_continuation(state.strategy_id) {
             cfg.s4_entry_windows.clone()
         } else {
             cfg.entry_windows.clone()
         },
-        always_enter: if state.strategy_id == 4 {
+        always_enter: if is_continuation(state.strategy_id) {
             cfg.s4_always_enter
         } else {
             cfg.always_enter
@@ -161,8 +172,12 @@ pub fn build_view(
         order_notional: cfg.order_notional,
         risk_pct: cfg.risk_pct,
         notional_from_exchange: cfg.notional_from_exchange,
-        max_positions: if state.strategy_id == 4 {
-            cfg.s4_max_positions
+        max_positions: if is_continuation(state.strategy_id) {
+            crate::engine::continuation_slot_cap(
+                state.strategy_id,
+                cfg.s4_max_positions,
+                cfg.s5_max_positions,
+            )
         } else {
             cfg.max_positions
         },
@@ -176,6 +191,6 @@ pub fn build_view(
         daily_loss_usdt: cfg.daily_loss_usdt,
         daily_loss_r: cfg.daily_loss_r,
         day_pnl,
-        s4_interval: cfg.s4_interval,
+        s4_interval: continuation_interval(state.strategy_id, cfg.s4_interval),
     }
 }

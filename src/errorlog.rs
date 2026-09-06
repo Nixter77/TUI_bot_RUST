@@ -151,11 +151,10 @@ impl ErrorLog {
         };
         let _io = lock_poison(&ERROR_IO);
         if let Some(parent) = self.path.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                return;
-            }
+            crate::errors::ensure_private_dir(parent);
         }
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+            crate::errors::restrict_private_file(&self.path);
             let line = format!("{json}\n");
             let _ = f.write_all(line.as_bytes()).and_then(|_| f.flush());
         }

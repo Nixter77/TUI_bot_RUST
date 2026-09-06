@@ -24,6 +24,7 @@ fn tape() -> Vec<Ticker> {
     vec![
         Ticker::new("BTCUSDT", d("50000"), d("1.0"), d("10000000")),
         Ticker::new("LINKUSDT", d("15"), d("3.2"), d("5000000")),
+        Ticker::new("AAVEUSDT", d("200"), d("1.2"), d("4000000")),
         Ticker::new("APTUSDT", d("8"), d("20.0"), d("3000000")),
         Ticker::new("SKRUSDT", d("0.02"), d("82.1"), d("200000")),
         Ticker::new("DOGEUSDT", d("0.12"), d("-4.5"), d("800000")),
@@ -107,19 +108,34 @@ fn waiting_and_growth_and_pnl() {
         waiting.iter().all(|w| w.symbol != "LINKUSDT"),
         "held name leaked into wait: {waiting:?}"
     );
+    assert!(
+        waiting.iter().all(|w| w.symbol != "SKRUSDT"),
+        "24h leader must stay on tape, not in S4 book: {waiting:?}"
+    );
     let apt = waiting.iter().find(|w| w.symbol == "APTUSDT").expect("APT in wait");
     assert_eq!(apt.kind, WaitKind::Setup, "{apt:?}");
-    assert!(apt.reason.contains("улетело") || apt.reason.contains("не догоняю"), "{}", apt.reason);
-    let skr = waiting.iter().find(|w| w.symbol == "SKRUSDT").expect("SKR in wait");
+    // +20% is inside max_change 35% — stretch_pct only dumps; wait is bars/HTF, not «улетело».
     assert!(
-        skr.reason.contains("мелочь") || skr.reason.contains("тонкий") || skr.reason.contains("не"),
+        apt.reason.contains("бара")
+            || apt.reason.contains("истории")
+            || apt.reason.contains("EMA")
+            || apt.reason.contains("откат")
+            || apt.reason.contains("объём"),
         "{}",
-        skr.reason
+        apt.reason
+    );
+    assert!(
+        waiting.iter().any(|w| w.symbol == "AAVEUSDT"),
+        "liquid mild-gain belongs in the book: {waiting:?}"
     );
 
     let view = build_monitor(&cfg, &state, &snap, &events, now);
+    let wait_syms: Vec<_> = view.waiting.iter().map(|w| w.symbol.as_str()).collect();
+    let rise_syms: Vec<_> = view.rising.iter().map(|t| t.symbol.as_str()).collect();
+    assert_ne!(wait_syms, rise_syms, "wait book must not clone the 24h tape");
     let frame = render_monitor(&view);
     assert!(frame.contains("Топ роста"), "{frame}");
+    assert!(frame.contains("не список покупок") || frame.contains("не топ 24h"), "{frame}");
     assert!(frame.contains("SKRUSDT"), "{frame}");
     assert!(frame.contains("+82.1%"), "{frame}");
     assert!(frame.contains("LINKUSDT"), "{frame}");
@@ -128,7 +144,18 @@ fn waiting_and_growth_and_pnl() {
     assert!(frame.contains("VVVUSDT"), "{frame}");
     assert!(frame.contains("нетто=-8.0500") || frame.contains("нетто=-8.05"), "{frame}");
     assert!(frame.contains("APTUSDT"), "{frame}");
-    assert!(frame.contains("[сетап]") || frame.contains("улетело"), "{frame}");
+    assert!(frame.contains("[сетап]"), "{frame}");
+    assert!(frame.contains("до входа:"), "{frame}");
+    assert!(
+        !apt.until.contains("надо < 4%") && !apt.until.contains("надо <4%"),
+        "green day above stretch_pct must NOT use stretch as upper cap: {}",
+        apt.until
+    );
+    assert!(
+        apt.until.contains("свечу") || apt.until.contains("ещё") || apt.until.contains("ждёт"),
+        "in-band setup must show bar/HTF until: {}",
+        apt.until
+    );
 }
 
 #[test]
@@ -140,7 +167,35 @@ fn s1_wait_lists_book_not_held() {
     let now = make_utc_ts(2026, 9, 2, 10, 0, 0);
     let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
     assert!(
-        waiting.iter().any(|w| w.symbol == "SKRUSDT" || w.symbol == "APTUSDT"),
-        "{waiting:?}"
+        waiting.iter().any(|w| w.symbol == "LINKUSDT" || w.symbol == "AAVEUSDT" || w.symbol == "BTCUSDT"),
+        "S1 book is eligible rising names, not the 24h blow-off: {waiting:?}"
     );
+    assert!(
+        waiting.iter().all(|w| w.symbol != "SKRUSDT"),
+        "S1 max-change filter must drop SKR from the wait book: {waiting:?}"
+    );
+}
+
+#[test]
+fn wait_until_entry_shows_cooldown() {
+    let cfg = cfg_always();
+    let mut state = EngineState::new(4);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = tape();
+    let now = make_utc_ts(2026, 9, 2, 10, 0, 0);
+    state.cooldowns.insert("AAVEUSDT".into(), now + 11.0 * 60.0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    let aave = waiting
+        .iter()
+        .find(|w| w.symbol == "AAVEUSDT")
+        .expect("AAVE in wait");
+    assert_eq!(aave.kind, WaitKind::Pause, "{aave:?}");
+    assert!(
+        aave.until.contains("11 мин") && aave.until.contains("UTC"),
+        "{}",
+        aave.until
+    );
+    let frame = render_monitor(&build_monitor(&cfg, &state, &snap, &[], now));
+    assert!(frame.contains("до входа:"), "{frame}");
+    assert!(frame.contains("11 мин"), "{frame}");
 }

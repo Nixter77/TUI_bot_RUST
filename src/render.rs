@@ -1,7 +1,7 @@
 //! Text frame for the TUI (also the --dump-frame / no-TTY path).
 
 use crate::config::TradeInterval;
-use crate::engine::strategy_title;
+use crate::engine::{continuation_stop_band, is_continuation, strategy_title};
 use crate::errorlog::format_ui_error;
 use crate::models::{Position, RecentAction, Side, Ticker};
 use crate::profit::{account_profit as calc_account_profit, current_equity};
@@ -134,7 +134,7 @@ fn pct_label(frac: Decimal) -> String {
 fn s4_risk_size(view: &ViewModel) -> String {
     let pct = pct_label(view.risk_pct);
     let equity = current_equity(view.wallet_balance, view.unrealized_pnl);
-    let min_stop = view.s4_interval.min_stop_pct();
+    let min_stop = continuation_stop_band(view.strategy_id, view.s4_interval).min_stop_pct();
     // Same helper as live: notional = (equity * risk_pct) * entry / (entry - sl).
     // Illustrate with the TF SL floor; any entry yields the same ratio.
     let entry = Decimal::from(100);
@@ -155,7 +155,7 @@ fn book_line(view: &ViewModel) -> String {
     } else {
         "плечо как на Binance".into()
     };
-    let size = if view.strategy_id == 4 && view.risk_pct > Decimal::ZERO {
+    let size = if is_continuation(view.strategy_id) && view.risk_pct > Decimal::ZERO {
         s4_risk_size(view)
     } else if view.notional_from_exchange {
         "сумма = minNotional биржи".into()
@@ -167,7 +167,7 @@ fn book_line(view: &ViewModel) -> String {
     } else {
         view.basket_symbols.join(", ")
     };
-    if view.strategy_id == 1 || view.strategy_id == 4 {
+    if view.strategy_id == 1 || is_continuation(view.strategy_id) {
         format!("{lev}  |  {size}  |  корзина до {}: {basket}", view.max_positions)
     } else {
         format!("{lev}  |  {size}  |  скан: {basket}")
@@ -229,20 +229,22 @@ pub fn cooldown_lines(now: f64, cooldown_until: f64, cooldowns: &HashMap<String,
 }
 
 fn session_line(view: &ViewModel) -> Option<String> {
-    if view.strategy_id != 1 && view.strategy_id != 4 {
+    if view.strategy_id != 1 && !is_continuation(view.strategy_id) {
         return None;
     }
     let sess = view.session();
-    let tag = if view.strategy_id == 4 {
+    let tag = if view.strategy_id == 5 {
+        "S5 Verify"
+    } else if is_continuation(view.strategy_id) {
         "Continuation"
     } else {
         "Momentum"
     };
-    let tf = if view.strategy_id == 4 {
+    let tf = if is_continuation(view.strategy_id) {
         format!(
             "  |  свечи {}  |  {}",
             view.s4_interval.as_ru(),
-            view.s4_interval.geometry_ru()
+            continuation_stop_band(view.strategy_id, view.s4_interval).geometry_ru()
         )
     } else {
         String::new()
@@ -429,6 +431,12 @@ pub fn line_tone(line: &str, account_profit: Decimal) -> Option<LineTone> {
     }
     if let Some(tone) = one_r_tone(line) {
         return Some(tone);
+    }
+    if line.contains("до входа:") {
+        if line.contains("сейчас") {
+            return Some(LineTone::Profit);
+        }
+        return Some(LineTone::Warn);
     }
     if line.contains("last=") && line.contains('%') {
         if let Some(v) = number_after(line, " ").or_else(|| {
@@ -682,13 +690,13 @@ pub fn render_frame(view: &ViewModel) -> String {
         (keys, Some(status))
     } else if banner == "paused" {
         (
-            "Клавиши: 1/2/3/4 выбор стратегии  |  x закрыть все (дважды)  |  q выход  |  r разрешить входы".into(),
+            "Клавиши: 1/2/3/4/5 выбор стратегии  |  x закрыть все (дважды)  |  q выход  |  r разрешить входы".into(),
             Some("Автопокупки выключены: только что закрывали все. r — снова разрешить стратегии покупать.".into()),
         )
     } else if banner == "daily" {
         let lost = view.day_pnl.map(fmt_money).unwrap_or_else(|| "—".into());
         (
-            "Клавиши: 1/2/3/4 выбор стратегии  |  x закрыть все (дважды)  |  q выход".into(),
+            "Клавиши: 1/2/3/4/5 выбор стратегии  |  x закрыть все (дважды)  |  q выход".into(),
             Some(format!(
                 "Стоп дня: прибыль дня {lost} USDT (лимиты −{} USDT / −{}R). Новых входов нет до 00:00 UTC. r это не снимает.",
                 view.daily_loss_usdt,
@@ -696,7 +704,7 @@ pub fn render_frame(view: &ViewModel) -> String {
             )),
         )
     } else {
-        let keys = "Клавиши: 1/2/3/4 выбор стратегии  |  x закрыть все (дважды)  |  q выход  |  r обновить".into();
+        let keys = "Клавиши: 1/2/3/4/5 выбор стратегии  |  x закрыть все (дважды)  |  q выход  |  r обновить".into();
         let status = if view.signals_on {
             Some("Звуки: покупка — два высоких; плюс — три вверх; минус — три вниз.".into())
         } else {
@@ -705,7 +713,7 @@ pub fn render_frame(view: &ViewModel) -> String {
         (keys, status)
     };
 
-    let mut footer = vec!["Стратегия (выбор 1/2/3/4):".to_string()];
+    let mut footer = vec!["Стратегия (выбор 1/2/3/4/5):".to_string()];
     for part in choice_parts {
         footer.push(format!("  {part}"));
     }

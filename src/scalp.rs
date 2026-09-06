@@ -1,8 +1,10 @@
-//! 1m VWAP + EMA9 pullback scalp.
+//! 1m-class VWAP + EMA9 pullback scalp.
 
+use crate::config::{Config, DEFAULT_S2_MAX_HOLD_BARS};
 use crate::indicators::{ema_series, last_atr, last_ema, last_rsi, mean_volume, vwap};
 use crate::models::{Decision, Position, Side};
 use crate::models::Bar;
+use crate::money::round_trip_taker_pct;
 use crate::sessions::{in_entry_window, HourWindow};
 use crate::trail::{long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
@@ -28,6 +30,7 @@ pub struct ScalpParams {
     pub max_hold_bars: usize,
     pub cooldown_sec: f64,
     pub entry_windows: Vec<HourWindow>,
+    pub always_enter: bool,
 }
 
 impl Default for ScalpParams {
@@ -49,9 +52,23 @@ impl Default for ScalpParams {
             min_atr_pct: Decimal::new(4, 4),
             max_atr_pct: Decimal::new(8, 3),
             min_volume_frac: Decimal::new(8, 1),
-            max_hold_bars: 24,
+            max_hold_bars: DEFAULT_S2_MAX_HOLD_BARS,
             cooldown_sec: 1200.0,
+            // Empty = open (hour_in_windows). Live uses `from_config` + STRATEGY2_ENTRY_HOURS.
             entry_windows: Vec::new(),
+            always_enter: false,
+        }
+    }
+}
+
+impl ScalpParams {
+    /// Live/TUI knobs from env-backed `Config` (windows + max hold).
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            entry_windows: cfg.s2_entry_windows.clone(),
+            always_enter: cfg.s2_always_enter,
+            max_hold_bars: cfg.s2_max_hold_bars,
+            ..Self::default()
         }
     }
 }
@@ -80,12 +97,12 @@ pub fn scalp_decision(
             if pos.side != Side::Long {
                 return Decision::hold("scalp is buy-only; short not managed");
             }
-            return manage_long(bars, pos, mark, p);
+            return manage_long(bars, pos, mark, p, now);
         }
     }
 
     let ts = now.unwrap_or(last.open_time as f64 / 1000.0);
-    if !in_entry_window(ts, Some(&p.entry_windows), false) {
+    if !in_entry_window(ts, Some(&p.entry_windows), p.always_enter) {
         return Decision::hold("вне сессии скальпа (Лондон/Нью-Йорк)");
     }
 
@@ -95,7 +112,8 @@ pub fn scalp_decision(
     let atr = last_atr(bars, p.atr_period);
     let rsi = last_rsi(&closes, p.rsi_period);
     let session = vwap(bars);
-    let (Some(ema_f), Some(ema_s), Some(atr), Some(rsi), Some(session)) = (ema_f, ema_s, atr, rsi, session)
+    let (Some(ema_f), Some(ema_s), Some(atr), Some(rsi), Some(session)) =
+        (ema_f, ema_s, atr, rsi, session)
     else {
         return Decision::hold("scalp indicators unavailable");
     };
@@ -153,7 +171,7 @@ pub fn scalp_decision(
     if risk <= Decimal::ZERO {
         return Decision::hold("risk is zero");
     }
-    let tp = mark + p.reward_r * risk;
+    let tp = (mark + p.reward_r * risk) * (Decimal::ONE + round_trip_taker_pct());
     Decision::EnterLong {
         symbol: symbol.to_string(),
         reason: "скальп: откат к VWAP/EMA9".into(),
@@ -217,7 +235,33 @@ fn at_least_min_stop(mark: Decimal, sl: Decimal, min_pct: Decimal) -> Decimal {
     }
 }
 
-fn manage_long(bars: &[Bar], position: &Position, mark: Decimal, p: &ScalpParams) -> Decision {
+fn peak_since_entry(bars: &[Bar], pos: &Position, mark: Decimal) -> Decimal {
+    let mut peak = mark;
+    if pos.qty > Decimal::ZERO && pos.unrealized_pnl > Decimal::ZERO {
+        let implied = pos.entry_price + pos.unrealized_pnl / pos.qty;
+        if implied > peak {
+            peak = implied;
+        }
+    }
+    for b in bars {
+        let after = match pos.opened_bar_time {
+            Some(since) => b.open_time >= since,
+            None => true,
+        };
+        if after && b.high > peak {
+            peak = b.high;
+        }
+    }
+    peak
+}
+
+fn manage_long(
+    bars: &[Bar],
+    position: &Position,
+    mark: Decimal,
+    p: &ScalpParams,
+    now: Option<f64>,
+) -> Decision {
     let entry = position.entry_price;
     let sl = position.stop_loss;
     let tp = position.take_profit;
@@ -236,6 +280,21 @@ fn manage_long(bars: &[Bar], position: &Position, mark: Decimal, p: &ScalpParams
                 symbol: String::new(),
             };
         }
+    }
+    // End of scalp session: flatten open long (mirror S4 «конец окна входа»).
+    let ts = now.unwrap_or_else(|| {
+        bars.last()
+            .map(|b| b.open_time as f64 / 1000.0)
+            .unwrap_or(0.0)
+    });
+    if !p.always_enter
+        && !p.entry_windows.is_empty()
+        && !in_entry_window(ts, Some(&p.entry_windows), false)
+    {
+        return Decision::ExitPosition {
+            reason: "конец сессии".into(),
+            symbol: String::new(),
+        };
     }
     if let Some(opened) = position.opened_bar_time {
         let held = bars.iter().filter(|b| b.open_time > opened).count();
@@ -276,9 +335,48 @@ fn manage_long(bars: &[Bar], position: &Position, mark: Decimal, p: &ScalpParams
     } else {
         p.sl_atr * atr
     };
-    let in_profit = mark >= entry + risk;
+
+    // Pre-full-BE peak giveback: peak≥0.8R, mark < entry+0.25R.
+    if let Some(cur_sl) = sl {
+        if cur_sl < entry && risk > Decimal::ZERO {
+            let peak = peak_since_entry(bars, position, mark);
+            let peak_08 = entry + Decimal::new(8, 1) * risk;
+            let near_025 = entry + Decimal::new(25, 2) * risk;
+            if peak >= peak_08 && mark < near_025 {
+                let lock_025 = near_025;
+                if lock_025 > cur_sl && lock_025 < mark && long_stop_is_valid(lock_025, mark) {
+                    return Decision::AmendStop {
+                        stop_loss: lock_025,
+                        reason: "откат с пика — замок 0.25R".into(),
+                        symbol: String::new(),
+                    };
+                }
+                return Decision::ExitPosition {
+                    reason: "откат с пика".into(),
+                    symbol: String::new(),
+                };
+            }
+        }
+    }
+
+    // Bank 1.5R (S4 latch) — do not wait for full 2R TP on a scalp.
+    if risk > Decimal::ZERO {
+        let target_15 = entry + Decimal::new(15, 1) * risk;
+        let peak = peak_since_entry(bars, position, mark);
+        if mark >= target_15 || (peak >= target_15 && mark >= entry + risk) {
+            return Decision::ExitPosition {
+                reason: "scalp 1.5R — фиксирую".into(),
+                symbol: String::new(),
+            };
+        }
+    }
+
+    // 1R BE + trail; fee-aware BE floor so "breakeven" is not a net loser.
+    let in_profit = risk > Decimal::ZERO && mark >= entry + risk;
     if in_profit {
-        let breakeven = entry + atr * Decimal::new(5, 2);
+        let fee_be = entry * (Decimal::ONE + round_trip_taker_pct());
+        let atr_be = entry + atr * Decimal::new(5, 2);
+        let breakeven = if fee_be > atr_be { fee_be } else { atr_be };
         let trail = mark - p.trail_atr * atr;
         let candidate = if trail > breakeven { trail } else { breakeven };
         if let Ok(new_sl) = trail_stop_upward(sl, candidate, "LONG") {

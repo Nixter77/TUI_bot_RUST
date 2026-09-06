@@ -36,6 +36,9 @@ pub struct TradeEvent {
     pub pnl: Option<String>,
     #[serde(default)]
     pub fee: Option<String>,
+    /// Funding paid/received over the hold (USDT). Optional — soak cost, not WR.
+    #[serde(default)]
+    pub funding: Option<String>,
     #[serde(default)]
     pub stop_loss: Option<String>,
     #[serde(default)]
@@ -48,6 +51,50 @@ pub struct TradeEvent {
     pub notional: Option<String>,
     #[serde(default)]
     pub code: Option<String>,
+    // Phase 1 analytics (optional — old JSONL lines still parse).
+    #[serde(default)]
+    pub initial_risk_usdt: Option<String>,
+    #[serde(default)]
+    pub initial_r: Option<String>,
+    #[serde(default)]
+    pub final_r: Option<String>,
+    #[serde(default)]
+    pub mfe_r: Option<String>,
+    #[serde(default)]
+    pub mae_r: Option<String>,
+    #[serde(default)]
+    pub mfe_usdt: Option<String>,
+    #[serde(default)]
+    pub mae_usdt: Option<String>,
+    #[serde(default)]
+    pub hold_sec: Option<i64>,
+    #[serde(default)]
+    pub time_to_mfe_sec: Option<i64>,
+    #[serde(default)]
+    pub time_to_1r_sec: Option<i64>,
+    #[serde(default)]
+    pub scaled_at_1r: Option<bool>,
+    // Entry snapshot (on open / entry_snapshot).
+    #[serde(default)]
+    pub ret_24h: Option<String>,
+    #[serde(default)]
+    pub ret_1h: Option<String>,
+    #[serde(default)]
+    pub ret_4h: Option<String>,
+    #[serde(default)]
+    pub quote_volume: Option<String>,
+    #[serde(default)]
+    pub near_high_frac: Option<String>,
+    #[serde(default)]
+    pub pullback_pct: Option<String>,
+    #[serde(default)]
+    pub stop_distance: Option<String>,
+    #[serde(default)]
+    pub risk_pct: Option<String>,
+    #[serde(default)]
+    pub btc_ret_1h: Option<String>,
+    #[serde(default)]
+    pub btc_regime: Option<String>,
 }
 
 fn journal_long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal) -> (Decimal, Decimal) {
@@ -88,26 +135,19 @@ impl TradeJournal {
         let io_err = {
             let _io = lock_poison(&JOURNAL_IO);
             if let Some(parent) = self.path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    Some(format!("journal mkdir: {e}"))
-                } else {
-                    None
-                }
-            } else {
-                None
+                crate::errors::ensure_private_dir(parent);
             }
-            .or_else(|| {
-                match OpenOptions::new().create(true).append(true).open(&self.path) {
-                    Ok(mut f) => {
-                        let line = format!("{json}\n");
-                        f.write_all(line.as_bytes())
-                            .and_then(|_| f.flush())
-                            .err()
-                            .map(|e| format!("journal write: {e}"))
-                    }
-                    Err(e) => Some(format!("journal open: {e}")),
+            match OpenOptions::new().create(true).append(true).open(&self.path) {
+                Ok(mut f) => {
+                    crate::errors::restrict_private_file(&self.path);
+                    let line = format!("{json}\n");
+                    f.write_all(line.as_bytes())
+                        .and_then(|_| f.flush())
+                        .err()
+                        .map(|e| format!("journal write: {e}"))
                 }
-            })
+                Err(e) => Some(format!("journal open: {e}")),
+            }
         };
         if let Some(e) = io_err {
             set_last_error(e);
@@ -151,7 +191,11 @@ fn lock_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 pub fn set_active(path: Option<PathBuf>) {
-    *lock_poison(&ACTIVE) = path;
+    *lock_poison(&ACTIVE) = path.clone();
+    let meta_path = path.as_ref().and_then(|p| {
+        p.parent().map(|dir| dir.join("open_meta.json"))
+    });
+    crate::openmeta::set_active_path(meta_path);
 }
 
 fn set_last_error(msg: String) {
@@ -185,8 +229,11 @@ impl TradeJournal {
         live: bool,
         stop_loss: Option<Decimal>,
         take_profit: Option<Decimal>,
+        partial: bool,
     ) {
         let (pnl, fee) = journal_long_pnl(entry, exit_price, qty);
+        let now = crate::sessions::unix_now();
+        let m = crate::openmeta::metrics_for_close(symbol, Some(pnl), now, partial);
         self.append(&TradeEvent {
             ts: iso_now(),
             event: "close".into(),
@@ -203,6 +250,19 @@ impl TradeJournal {
             leverage: None,
             notional: None,
             code: None,
+            initial_risk_usdt: m.initial_risk_usdt,
+            initial_r: m.initial_r,
+            final_r: m.final_r,
+            mfe_r: m.mfe_r,
+            mae_r: m.mae_r,
+            mfe_usdt: m.mfe_usdt,
+            mae_usdt: m.mae_usdt,
+            hold_sec: m.hold_sec,
+            time_to_mfe_sec: m.time_to_mfe_sec,
+            time_to_1r_sec: m.time_to_1r_sec,
+            scaled_at_1r: m.scaled_at_1r,
+            btc_regime: m.btc_regime,
+            ..TradeEvent::default()
         });
     }
 
@@ -216,8 +276,10 @@ impl TradeJournal {
         live: bool,
         stop_loss: Option<Decimal>,
         take_profit: Option<Decimal>,
+        entry_snap: Option<&crate::openmeta::EntrySnapshot>,
     ) {
-        self.append(&TradeEvent {
+        let snap = entry_snap.cloned().unwrap_or_default();
+        let mut ev = TradeEvent {
             ts: iso_now(),
             event: "open".into(),
             strategy_id,
@@ -233,7 +295,25 @@ impl TradeJournal {
             leverage: None,
             notional: None,
             code: None,
-        });
+            ret_24h: snap.ret_24h,
+            ret_1h: snap.ret_1h,
+            ret_4h: snap.ret_4h,
+            quote_volume: snap.quote_volume,
+            near_high_frac: snap.near_high_frac,
+            pullback_pct: snap.pullback_pct,
+            stop_distance: snap.stop_distance,
+            risk_pct: snap.risk_pct,
+            btc_ret_1h: snap.btc_ret_1h,
+            btc_regime: snap.btc_regime,
+            ..TradeEvent::default()
+        };
+        if let Some(sl) = stop_loss {
+            if let Some(risk) = crate::openmeta::initial_risk_usdt(price, sl, qty) {
+                ev.initial_risk_usdt = Some(format!("{risk}"));
+                ev.initial_r = Some("1".into());
+            }
+        }
+        self.append(&ev);
     }
 
     pub fn record_flatten(&self, strategy_id: i32, closed: &[String], live: bool, reason: &str) {
@@ -255,6 +335,7 @@ impl TradeJournal {
                 leverage: None,
                 notional: None,
                 code: None,
+                ..TradeEvent::default()
             });
         }
     }
@@ -270,6 +351,7 @@ pub fn record_close(
     live: bool,
     stop_loss: Option<Decimal>,
     take_profit: Option<Decimal>,
+    partial: bool,
 ) {
     with_active(|j| {
         j.record_close(
@@ -282,6 +364,7 @@ pub fn record_close(
             live,
             stop_loss,
             take_profit,
+            partial,
         )
     });
 }
@@ -295,6 +378,7 @@ pub fn record_open(
     live: bool,
     stop_loss: Option<Decimal>,
     take_profit: Option<Decimal>,
+    entry_snap: Option<&crate::openmeta::EntrySnapshot>,
 ) {
     with_active(|j| {
         j.record_open(
@@ -306,6 +390,7 @@ pub fn record_open(
             live,
             stop_loss,
             take_profit,
+            entry_snap,
         )
     });
 }
@@ -339,6 +424,7 @@ pub fn record_amend(
             leverage: None,
             notional: None,
             code: None,
+            ..TradeEvent::default()
         })
     });
 }
@@ -380,6 +466,16 @@ pub fn symbol_cooldown_until(now: f64, won: bool, pause_sec: f64) -> f64 {
 /// After a close/flatten, keep the name off the buy list.
 /// Restarts otherwise re-buy the same SL tape (SUPERUSDT three times in 15m).
 pub fn cooldowns_from_events(events: &[TradeEvent], now: f64, pause_sec: f64) -> HashMap<String, f64> {
+    cooldowns_from_events_for(events, now, pause_sec, None)
+}
+
+/// When `strategy_id` is set, only that strategy's closes seed cooldowns (S4 must not block S5).
+pub fn cooldowns_from_events_for(
+    events: &[TradeEvent],
+    now: f64,
+    pause_sec: f64,
+    strategy_id: Option<i32>,
+) -> HashMap<String, f64> {
     let mut out = HashMap::new();
     if pause_sec <= 0.0 {
         return out;
@@ -387,6 +483,11 @@ pub fn cooldowns_from_events(events: &[TradeEvent], now: f64, pause_sec: f64) ->
     for ev in events {
         if ev.event != "close" && ev.event != "flatten" {
             continue;
+        }
+        if let Some(sid) = strategy_id {
+            if ev.strategy_id != sid {
+                continue;
+            }
         }
         let Some(ts) = event_unix(&ev.ts) else {
             continue;
@@ -421,6 +522,16 @@ pub fn desk_cooldown_from_events_windows(
     pause_sec: f64,
     windows: &[HourWindow],
 ) -> f64 {
+    desk_cooldown_from_events_windows_for(events, now, pause_sec, windows, None)
+}
+
+pub fn desk_cooldown_from_events_windows_for(
+    events: &[TradeEvent],
+    now: f64,
+    pause_sec: f64,
+    windows: &[HourWindow],
+    strategy_id: Option<i32>,
+) -> f64 {
     if pause_sec <= 0.0 {
         return 0.0;
     }
@@ -428,6 +539,11 @@ pub fn desk_cooldown_from_events_windows(
     for ev in events {
         if ev.event != "close" {
             continue;
+        }
+        if let Some(sid) = strategy_id {
+            if ev.strategy_id != sid {
+                continue;
+            }
         }
         let pnl = parse_pnl(ev.pnl.as_deref()).unwrap_or(Decimal::ZERO);
         if pnl > Decimal::ZERO {
@@ -519,22 +635,49 @@ pub fn unmatched_open_positions_from(events: &[TradeEvent]) -> Vec<Position> {
 }
 
 pub fn unmatched_open_positions() -> Vec<Position> {
+    unmatched_open_positions_for(None)
+}
+
+/// Unmatched opens for one strategy lens (S4 journal must not seed S5 overlays).
+pub fn unmatched_open_positions_for(strategy_id: Option<i32>) -> Vec<Position> {
     let path = lock_poison(&ACTIVE).clone();
     let Some(path) = path else {
         return Vec::new();
     };
     let events = TradeJournal::new(Some(&path)).read_events();
-    unmatched_open_positions_from(&events)
+    unmatched_open_positions_from_for(&events, strategy_id)
+}
+
+pub fn unmatched_open_positions_from_for(
+    events: &[TradeEvent],
+    strategy_id: Option<i32>,
+) -> Vec<Position> {
+    let scoped: Vec<TradeEvent> = match strategy_id {
+        Some(sid) => events
+            .iter()
+            .filter(|e| e.strategy_id == sid)
+            .cloned()
+            .collect(),
+        None => events.to_vec(),
+    };
+    unmatched_open_positions_from(&scoped)
 }
 
 pub fn seed_cooldowns(state: &mut EngineState, now: f64, pause_sec: f64) {
     let pause = if pause_sec > 0.0 { pause_sec } else { COOLDOWN_SEC };
     let events = TradeJournal::new(Some(Path::new(DEFAULT_JOURNAL_PATH))).read_events();
-    for (sym, until) in cooldowns_from_events(&events, now, pause) {
+    let sid = Some(state.strategy_id);
+    for (sym, until) in cooldowns_from_events_for(&events, now, pause, sid) {
         let cur = state.cooldowns.get(&sym).copied().unwrap_or(0.0);
         state.cooldowns.insert(sym, cur.max(until));
     }
-    let desk = desk_cooldown_from_events(&events, now, pause);
+    let desk = desk_cooldown_from_events_windows_for(
+        &events,
+        now,
+        pause,
+        &DEFAULT_ENTRY_WINDOWS,
+        sid,
+    );
     if desk > state.cooldown_until {
         state.cooldown_until = desk;
     }

@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tui-bot — как работает код</title>
+<style>
+:root {
+  --bg: #07090d;
+  --panel: #10151c;
+  --panel2: #161d27;
+  --line: #243040;
+  --ink: #e8eef6;
+  --muted: #8b9bb0;
+  --dim: #5c6d82;
+  --amber: #f0b429;
+  --amber-dim: #8a6418;
+  --green: #3dd68c;
+  --green-dim: #1a4a34;
+  --red: #ff6b6b;
+  --red-dim: #4a1f27;
+  --cyan: #4cc9f0;
+  --violet: #9b7dff;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
+  background-image:
+    radial-gradient(1200px 500px at 10% -10%, #1a2a18 0%, transparent 55%),
+    radial-gradient(900px 400px at 100% 0%, #1a2238 0%, transparent 50%),
+    linear-gradient(#07090d, #07090d);
+}
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 28px 22px 80px; }
+
+/* nav */
+nav.toc {
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(7,9,13,.92);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+  margin: -28px -22px 28px;
+  padding: 10px 22px;
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+}
+nav.toc .brand { color: var(--amber); font-weight: 700; margin-right: 12px; letter-spacing: .04em; }
+nav.toc a { color: var(--muted); font-size: 12px; padding: 4px 8px; border-radius: 999px; }
+nav.toc a:hover { background: var(--panel2); color: var(--ink); text-decoration: none; }
+
+.hero {
+  display: grid;
+  grid-template-columns: 1.4fr .9fr;
+  gap: 22px;
+  margin-bottom: 36px;
+}
+.hero h1 {
+  font-size: 42px; line-height: 1.05; margin: 0 0 12px;
+  letter-spacing: -.03em;
+}
+.hero h1 span { color: var(--amber); }
+.lede { color: var(--muted); font-size: 17px; max-width: 62ch; }
+.lede code, .hero code { white-space: nowrap; }
+.badge-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.badge {
+  font: 12px var(--mono);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 4px 10px; border-radius: 999px;
+  color: var(--muted);
+}
+.badge.g { border-color: #245c44; color: var(--green); }
+.badge.r { border-color: #5c2a32; color: var(--red); }
+.badge.a { border-color: var(--amber-dim); color: var(--amber); }
+.badge.c { border-color: #2a5a6a; color: var(--cyan); }
+
+.statgrid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.stat b { display: block; font-size: 22px; color: var(--amber); font-family: var(--mono); }
+.stat small { color: var(--dim); }
+
+h2 {
+  font-size: 22px; margin: 48px 0 14px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  letter-spacing: -.02em;
+  scroll-margin-top: 56px;
+}
+h2 .n { color: var(--amber); font-family: var(--mono); font-size: 14px; margin-right: 8px; }
+h3 { font-size: 16px; margin: 22px 0 8px; color: var(--cyan); }
+p { color: #c5d0dc; }
+.muted { color: var(--muted); }
+.dim { color: var(--dim); }
+code, .k {
+  font-family: var(--mono); font-size: 12.5px;
+  background: #0c1118; border: 1px solid var(--line);
+  padding: 1px 6px; border-radius: 4px; color: #d7e3f0;
+}
+
+/* layers */
+.layers { display: grid; gap: 8px; }
+.layer {
+  display: grid; grid-template-columns: 140px 1fr;
+  border: 1px solid var(--line);
+  border-radius: 12px; overflow: hidden;
+  background: var(--panel);
+}
+.layer .tag {
+  display: flex; align-items: center; justify-content: center;
+  font: 700 12px var(--mono); letter-spacing: .08em;
+  padding: 12px; text-align: center;
+}
+.layer .body { padding: 12px 16px; font-size: 14px; }
+.l0 .tag { background: #2a2110; color: var(--amber); }
+.l1 .tag { background: #10202a; color: var(--cyan); }
+.l2 .tag { background: #102418; color: var(--green); }
+.l3 .tag { background: #1c1428; color: var(--violet); }
+.l4 .tag { background: #281018; color: var(--red); }
+.mods { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.mod {
+  font: 11px var(--mono); color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--line);
+  padding: 3px 7px; border-radius: 6px;
+}
+
+/* flow */
+.flow {
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  gap: 8px; align-items: stretch;
+}
+.flow .box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px;
+  min-height: 92px;
+}
+.flow .box strong { display: block; font-size: 13px; margin-bottom: 4px; }
+.flow .box span { color: var(--muted); font-size: 12px; }
+.arrow-row { text-align: center; color: var(--amber); font-size: 18px; margin: 4px 0; letter-spacing: 8px; }
+
+/* cards */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 16px;
+}
+.card h4 { margin: 0 0 8px; font-size: 14px; }
+.card ol, .card ul { margin: 0; padding-left: 18px; color: #c5d0dc; }
+.card li { margin: 4px 0; }
+
+/* pipeline */
+.steps { counter-reset: st; display: grid; gap: 6px; }
+.step {
+  counter-increment: st;
+  display: grid; grid-template-columns: 42px 1fr auto;
+  gap: 12px; align-items: start;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px;
+}
+.step::before {
+  content: counter(st);
+  font: 700 14px var(--mono); color: var(--amber);
+  width: 28px; height: 28px; border-radius: 8px;
+  background: #2a2110; display: flex; align-items: center; justify-content: center;
+}
+.step .t { font-weight: 650; }
+.step .d { color: var(--muted); font-size: 13px; }
+.step .src { font: 11px var(--mono); color: var(--dim); white-space: nowrap; }
+
+/* decision chips */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  border-radius: 10px; padding: 10px 12px; min-width: 180px; flex: 1;
+  border: 1px solid var(--line); background: var(--panel);
+}
+.chip b { display: block; font-family: var(--mono); font-size: 13px; margin-bottom: 4px; }
+.chip.hold b { color: var(--muted); }
+.chip.buy b { color: var(--green); }
+.chip.exit b { color: var(--red); }
+.chip.amend b { color: var(--amber); }
+.chip.reduce b { color: var(--violet); }
+
+/* s4 funnel */
+.funnel { display: grid; gap: 4px; }
+.funnel .row {
+  display: grid; grid-template-columns: 220px 1fr 160px;
+  gap: 10px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; font-size: 13px;
+}
+.funnel .row .w { font-family: var(--mono); color: var(--amber); font-size: 12px; }
+.funnel .row .fail { color: var(--red); font-size: 12px; }
+.funnel .row:nth-child(odd) { background: var(--panel2); }
+
+/* state machine */
+.sm {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
+.sm .st {
+  border-radius: 12px; padding: 14px; border: 1px solid var(--line); background: var(--panel);
+}
+.sm .st.pre { border-color: #3a4a20; }
+.sm .st.one { border-color: var(--amber-dim); }
+.sm .st.be { border-color: #245c44; }
+.sm h4 { margin: 0 0 6px; }
+.sm .st.pre h4 { color: #c8e08a; }
+.sm .st.one h4 { color: var(--amber); }
+.sm .st.be h4 { color: var(--green); }
+
+table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--panel); border-radius: 12px; overflow: hidden;
+}
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--dim); font-weight: 600; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+td code { font-size: 11px; }
+.tiny { font-size: 12px; color: var(--muted); }
+
+.callout {
+  border-left: 3px solid var(--amber);
+  background: #16120a;
+  padding: 10px 14px; border-radius: 0 10px 10px 0;
+  margin: 12px 0; color: #e6d7a8;
+}
+.callout.red { border-color: var(--red); background: #180c10; color: #f0c4c8; }
+.callout.green { border-color: var(--green); background: #0c1812; color: #c6ead6; }
+
+.loop {
+  display: grid; grid-template-columns: 80px 1fr;
+  gap: 0;
+}
+.loop .t {
+  font: 700 11px var(--mono); color: var(--amber);
+  padding: 10px 8px 10px 0;
+}
+.loop .b {
+  border-left: 2px solid var(--amber-dim);
+  padding: 10px 0 16px 16px;
+}
+.kbd {
+  display: inline-block; min-width: 1.4em; text-align: center;
+  font: 12px var(--mono); border: 1px solid var(--line);
+  background: #0c1118; border-bottom-width: 3px; border-radius: 5px;
+  padding: 1px 6px;
+}
+
+footer {
+  margin-top: 56px; color: var(--dim); font-size: 12px;
+  border-top: 1px solid var(--line); padding-top: 16px;
+}
+@media (max-width: 980px) {
+  .hero, .grid2, .grid3, .grid4, .flow, .sm, .funnel .row, .layer, .step, .loop { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: 1fr 1fr; }
+  .statgrid { grid-template-columns: 1fr 1fr; }
+  .step .src { display: none; }
+  .funnel .row { grid-template-columns: 1fr; gap: 2px; }
+  nav.toc { row-gap: 2px; }
+}
+@media print {
+  nav.toc { position: static; }
+  body { background: #fff; color: #111; }
+  .card, .layer, .step, .stat, table { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc">
+  <span class="brand">tui-bot</span>
+  <a href="#layers">Слои</a>
+  <a href="#boot">Старт</a>
+  <a href="#loop">Цикл TUI</a>
+  <a href="#snap">Снимок</a>
+  <a href="#engine">Движок</a>
+  <a href="#s1">S1</a>
+  <a href="#s2">S2</a>
+  <a href="#s3">S3</a>
+  <a href="#s4">S4 воронка</a>
+  <a href="#manage">Ведение</a>
+  <a href="#live">Live</a>
+  <a href="#recon">Reconcile</a>
+  <a href="#risk">Риск</a>
+  <a href="#fail">3AM</a>
+  <a href="#files">Файлы</a>
+</nav>
+
+<section class="hero">
+  <div>
+    <div class="badge-row" style="margin-top:0">
+      <span class="badge a">crate tui-bot</span>
+      <span class="badge">Binance USDT-M Futures</span>
+      <span class="badge">TestNet по умолчанию</span>
+      <span class="badge g">только LONG</span>
+    </div>
+    <h1>Как работает<br><span>этот код</span></h1>
+    <p class="lede">
+      Терминальный long-only трейдер. Чистая стратегия считает <code>Decision</code> без HTTP.
+      Отдельный поток тянет рынок раз в 5 с. Live-слой шлёт ордера только при <code>--live</code>.
+      Стратегия 4 — не догон 24h %, а откат ликвидных альтов.
+    </p>
+    <div class="badge-row">
+      <span class="badge g">engine.rs — решения</span>
+      <span class="badge a">live.rs — сторона</span>
+      <span class="badge c">poll.rs — снимок</span>
+      <span class="badge r">flatten.rs — x x</span>
+    </div>
+  </div>
+  <div class="statgrid">
+    <div class="stat"><b>4</b><small>стратегии · клавиши 1–4</small></div>
+    <div class="stat"><b>5</b><small>типов Decision</small></div>
+    <div class="stat"><b>5 с</b><small>poll ленты / позиций</small></div>
+    <div class="stat"><b>60 с</b><small>S4 scan новых входов</small></div>
+    <div class="stat"><b>0.04%</b><small>taker / сторона · круг 0.08%</small></div>
+    <div class="stat"><b>0700/0600</b><small>.state и journal как секреты</small></div>
+  </div>
+</section>
+
+<h2 id="layers"><span class="n">01</span> Слои. Кто кому что должен</h2>
+<p>Зависимости идут сверху вниз. <code>engine</code> не знает про ureq. <code>continuation</code> не знает про HMAC. HTTP живёт в <code>exchange</code>.</p>
+<div class="layers">
+  <div class="layer l0">
+    <div class="tag">CLI</div>
+    <div class="body">
+      <code>main.rs</code> → <code>app::run</code>. clap: <code>--live --strategy --monitor --dump-frame --offline --backtest --report</code>.
+      <code>--monitor</code> глушит live: <code>want_live = live && !monitor</code>. Без TTY — dump-frame и выход 0.
+      <div class="mods"><span class="mod">app.rs</span><span class="mod">config.rs</span><span class="mod">keys.rs</span></div>
+    </div>
+  </div>
+  <div class="layer l1">
+    <div class="tag">TUI / RADAR</div>
+    <div class="body">
+      <code>run_tui</code> — торговый экран, exclusive <code>.state/live.lock</code> если live.
+      <code>run_monitor</code> — радар, ордеров нет, lock не берёт, можно держать рядом с live.
+      Клавиши 200 мс poll. Paint до REST. <code>TerminalGuard</code> всегда возвращает терминал.
+      <div class="mods"><span class="mod">tui.rs</span><span class="mod">render.rs</span><span class="mod">view.rs</span><span class="mod">monitor.rs</span><span class="mod">signals.rs</span></div>
+    </div>
+  </div>
+  <div class="layer l2">
+    <div class="tag">ENGINE</div>
+    <div class="body">
+      <code>tick_decisions(state, snapshot, now, …) → (EngineState, Vec&lt;Decision&gt;)</code>.
+      Сливает live-книгу с remembered SL/TP из RAM+journal. Гейты: daily_halt, retry_until, entries_paused, inflight, unmanaged shorts.
+      <div class="mods"><span class="mod">engine.rs</span><span class="mod">momentum.rs</span><span class="mod">scalp.rs</span><span class="mod">trend.rs</span><span class="mod">continuation.rs</span><span class="mod">dayrisk.rs</span><span class="mod">sessions.rs</span></div>
+    </div>
+  </div>
+  <div class="layer l3">
+    <div class="tag">LIVE APPLY</div>
+    <div class="body">
+      <code>apply_decision</code> → <code>enter_live / amend_live / exit_live / reduce_live</code>.
+      Перед apply — <code>reconcile_live</code>: vanished longs, orphan TP/SL, rogue shorts, rearm sized protectives.
+      Paper: <code>apply_paper_decision</code> без HTTP.
+      <div class="mods"><span class="mod">live.rs</span><span class="mod">flatten.rs</span><span class="mod">journal.rs</span><span class="mod">pidlock.rs</span></div>
+    </div>
+  </div>
+  <div class="layer l4">
+    <div class="tag">EXCHANGE</div>
+    <div class="body">
+      ureq, HMAC SHA256, recvWindow, timeout ≥ 1 с. GET/DELETE — 1 retry. POST timeout <strong>не</strong> ретраится (идемпотентность).
+      Символ на signed запросе — только <code>^[A-Z0-9]{2,20}USDT$</code>. Ошибки redact X-MBX-APIKEY.
+      Default REST: <code>https://testnet.binancefuture.com</code>. <code>fapi.binance.com</code> — отказ, пока <code>BINANCE_ALLOW_MAINNET=1</code>.
+      <div class="mods"><span class="mod">exchange.rs</span><span class="mod">signing.rs</span><span class="mod">errors.rs</span><span class="mod">snapshot.rs</span><span class="mod">poll.rs</span></div>
+    </div>
+  </div>
+</div>
+
+<h2 id="boot"><span class="n">02</span> Старт процесса. Что выбирает CLI</h2>
+<div class="flow">
+  <div class="box"><strong>argv</strong><span>main → parse_args</span></div>
+  <div class="box"><strong>strategy 1–4</strong><span>иначе exit 2</span></div>
+  <div class="box"><strong>load_config</strong><span>env + gitignored .env</span></div>
+  <div class="box"><strong>--report?</strong><span>trades.jsonl → stdout</span></div>
+  <div class="box"><strong>--backtest?</strong><span>public klines, 0 ордеров</span></div>
+  <div class="box"><strong>--monitor?</strong><span>radar, live игнор</span></div>
+  <div class="box"><strong>TUI</strong><span>dump / interactive</span></div>
+</div>
+<div class="callout">
+  <code>--live</code> без ключей: <code>load_config(true)</code> падает, процесс exit 2. Исключение: <code>--monitor --live</code> — live отключается, ключи не нужны.
+  Ключи только из env / <code>.env</code>, никогда из docs. <code>.env</code> chmod 600.
+</div>
+<table>
+  <tr><th>Режим</th><th>Сеть</th><th>Ордера</th><th>live.lock</th><th>Код</th></tr>
+  <tr><td>без флагов (TTY)</td><td>да, снимок</td><td>нет</td><td>нет</td><td><code>tui::run_tui</code> paper</td></tr>
+  <tr><td><code>--live</code></td><td>да</td><td>да</td><td>да, exclusive</td><td>тот же TUI, <code>cfg.live</code></td></tr>
+  <tr><td><code>--monitor</code></td><td>да</td><td>нет</td><td>нет</td><td><code>tui::run_monitor</code></td></tr>
+  <tr><td><code>--dump-frame</code> / не TTY</td><td>опц.</td><td>нет</td><td>нет</td><td>один кадр, exit 0</td></tr>
+  <tr><td><code>--offline</code></td><td>нет</td><td>нет</td><td>нет</td><td>пустой snapshot</td></tr>
+  <tr><td><code>--backtest</code></td><td>klines cache</td><td>нет</td><td>нет</td><td><code>backtest::run_cli</code></td></tr>
+  <tr><td><code>--report</code></td><td>нет</td><td>нет</td><td>нет</td><td><code>report::run_cli</code></td></tr>
+</table>
+
+<h2 id="loop"><span class="n">03</span> Главный цикл TUI — что происходит каждые 200 мс</h2>
+<p>Ключи не ждут REST. Снимок живёт в потоке <code>snapshot-poll</code>. Live HTTP — <code>try_lock</code> на клиенте: если поллер уже держит mutex, тик пропускает apply и идёт дальше.</p>
+<div class="loop">
+  <div class="t">BOOT</div>
+  <div class="b">
+    Если live — <code>acquire_live_lock(.state/live.lock)</code>. Чужой живой pid → exit 2 (AlreadyExists). Свой pid тоже не ворует замок.
+    Journal + errorlog. <code>seed_cooldowns</code> из <code>trades.jsonl</code>. Первый REST <strong>до</strong> raw-mode, чтобы Ctrl+C ещё был SIGINT.
+    Live: сразу <code>reconcile_live</code>, при грязи — второй pull.
+  </div>
+  <div class="t">SPAWN</div>
+  <div class="b">
+    <code>SnapshotPoller</code> каждые 5 с (или <code>bump()</code> по <span class="kbd">r</span> / flatten):
+    <code>tradfi_symbols</code> → <code>fetch_snapshot</code> → слот <code>latest</code>.
+    <code>catch_unwind</code>: паника потока не убивает процесс, счётчик <code>take_panics()</code> → футер «сеть: поток снимка упал».
+  </div>
+  <div class="t">TICK</div>
+  <div class="b">
+    <code>poller.take()</code> есть? Тогда <code>tick_once</code> (чистый CPU) → paint кадра → <code>apply_live_once</code>
+    (reconcile + apply каждого Decision). Если снимка нет 30 с — stale warning, не «всё хорошо».
+  </div>
+  <div class="t">KEYS</div>
+  <div class="b">
+    <span class="kbd">1</span><span class="kbd">2</span><span class="kbd">3</span><span class="kbd">4</span> стратегия (без HTTP).
+    <span class="kbd">r</span> снять <code>entries_paused</code>, очистить last_error, bump poller.
+    <span class="kbd">x</span> затем <span class="kbd">x</span> flatten всех (и unmanaged shorts). Любая другая клавиша снимает arm.
+    <span class="kbd">q</span> / Esc / Ctrl+C — restore terminal, stop poller, drop lock.
+  </div>
+  <div class="t">PAINT</div>
+  <div class="b">
+    <code>terminal::size().unwrap_or((80,24))</code> — ioctl в SSH/tmux не валит процесс.
+    Цвета: зелёный PnL / красный убыток / жёлтый warn. <code>line_tone</code> смотрит «нетто=», «день:», «до входа:».
+  </div>
+</div>
+
+<h2 id="snap"><span class="n">04</span> Снимок рынка. Что лежит в MarketSnapshot</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>Публичное (без ключей)</h4>
+    <ul>
+      <li><code>tickers</code> — 24h tape, парсится только <code>^[A-Z0-9]{2,20}USDT$</code>, junk/1000x выкинут</li>
+      <li><code>bars</code> / <code>universe_bars</code> — рабочие klines выбранного TF</li>
+      <li><code>htf_bars</code> — 4h для S4 EMA20</li>
+      <li><code>last_bars</code> — последний закрытый бар книги (S1: 5м; S4: STRATEGY4_INTERVAL)</li>
+      <li><code>chart_symbol</code> — что рисует панель графика</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Приватное (ключи)</h4>
+    <ul>
+      <li><code>account</code> wallet / uPnL / available. Equity = wallet + uPnL, не available</li>
+      <li><code>account_ok</code> / <code>account_fresh</code> — 502 не обнуляет книгу: берётся prior</li>
+      <li><code>live_book</code> + <code>open_positions</code> из <code>positionRisk</code></li>
+      <li>overlay SL/TP: RAM state ⊕ journal unmatched opens (partial close не возвращает старый стоп)</li>
+      <li>ticker 24h упал → вернуть prior tickers, не пустую ленту</li>
+    </ul>
+  </div>
+</div>
+<p class="tiny">S4 klines книги фетчатся с каденсом <code>SCAN_SEC=60</code>. Между сканами monitor/watch переиспользует prior, чтобы не молотить REST каждые 5 с. Live <strong>не</strong> двигает <code>last_scan_ts</code> в snapshot — это делает <code>continuation_decisions</code> после <code>maybe_enter</code>.</p>
+
+<h2 id="engine"><span class="n">05</span> Движок. tick_decisions — единственная точка решений</h2>
+<div class="steps">
+  <div class="step"><div><div class="t">Слить книгу</div><div class="d">Live longs ⊕ remembered SL/TP. Inflight, которых нет на бирже, <strong>не</strong> дропаются, пока <code>now &lt; retry_until</code> (таймаут BUY + 502 positionRisk = не купить дважды).</div></div><div class="src">engine.rs</div></div>
+  <div class="step"><div><div class="t">Закрытые слоты → кулдаун</div><div class="d">Символ исчез из книги: win → короткая пауза; loss → <code>LOSS_SYMBOL_COOLDOWN_SEC = 12 ч</code> + desk <code>pause_until_after_loss</code> до следующего окна.</div></div><div class="src">journal.rs</div></div>
+  <div class="step"><div><div class="t">Дневной стоп</div><div class="d"><code>apply_day_risk</code>: OR из −DAILY_LOSS_USDT и −N×R (1R = day_start_equity × RISK_PCT). Сброс в 00:00 UTC.</div></div><div class="src">dayrisk.rs</div></div>
+  <div class="step"><div><div class="t">Жёсткие гейты</div><div class="d"><code>entries_paused</code> (после flatten / OPERATOR) → hold «вход на паузе». Истекает по <code>cooldown_until</code> или <span class="kbd">r</span>. Inflight <code>*</code> на пустой книге → «entry in flight». Хвост SHORT на бирже → hold, стратегия шорты не ведёт, закроет <span class="kbd">x</span><span class="kbd">x</span>.</div></div><div class="src">engine.rs</div></div>
+  <div class="step"><div><div class="t">Стратегия</div><div class="d">sid 1 → <code>momentum_decisions</code> (много решений: trail + enter). sid 4 → <code>continuation_decisions</code>. sid 2/3 → по символам majors, первый EnterLong.</div></div><div class="src">S1–S4</div></div>
+  <div class="step"><div><div class="t">Фильтры после</div><div class="d">daily_halt выкидывает EnterLong. <code>now &lt; retry_until</code> тоже. EnterLong кладётся в <code>inflight_symbols</code> ещё до HTTP.</div></div><div class="src">engine.rs</div></div>
+</div>
+
+<h3>Пять решений — контракт стратегии с биржей</h3>
+<div class="chips">
+  <div class="chip hold"><b>Hold</b>причина в футере. Стороны нет. Звука нет.</div>
+  <div class="chip buy"><b>EnterLong</b>symbol + TP + SL. Live: MARKET BUY, затем algo TP/SL reduce-only.</div>
+  <div class="chip amend"><b>AmendStop</b>новый SL выше старого (только вверх). Place-first, потом prune stale.</div>
+  <div class="chip reduce"><b>ReduceLong</b>~50% qty + SL остатка в BE. Не делится лот → только BE-amend, latch <code>scaled_one_r</code>.</div>
+  <div class="chip exit"><b>ExitPosition</b>MARKET SELL reduce-only на весь лонг. Не naked closePosition.</div>
+</div>
+<div class="callout red">Шорта в Decision нет. Обнаруженный SHORT — <code>sweep_rogue_shorts</code> / flatten, не «стратегия открыла шорт».</div>
+
+<h2 id="s1"><span class="n">06</span> Стратегия 1 — Momentum rider</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>Книга входа</h4>
+    <ul>
+      <li>Ранг 24h % среди tradable USDT-M</li>
+      <li>Мин. рост <code>+0.4%</code>, потолок <code>+12%</code></li>
+      <li>Мин. quote volume 50k, junk/1000x/TradFi out</li>
+      <li>Слотов: <code>STRATEGY1_MAX_POSITIONS</code> (1–10)</li>
+      <li>Окна UTC 00–02 / 07–10 / 13–16, либо <code>STRATEGY1_ALWAYS_ENTER=1</code></li>
+      <li>Poll 60 или 120 с</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Сетап и выход</h4>
+    <ul>
+      <li><code>s1_setup_skip</code>: не в топе / у 24h high (2%) / нет 5м / 5м красная</li>
+      <li>TP net +2.5% (после комиссии), trail 2.0% только вверх</li>
+      <li>Выпал из топа → Exit «выпал из топа — закрываю до стопа»</li>
+      <li>Красная 5м на открытом → Exit до стопа</li>
+      <li>Любой открытый слот в минусе → новый EnterLong запрещён («слот в минусе»)</li>
+      <li>Mark ≥ TP / mark ≤ SL → Exit</li>
+    </ul>
+  </div>
+</div>
+<p class="tiny">Размер: <code>ORDER_NOTIONAL_USDT</code> (не RISK_PCT). Это не академический weekly momentum. Это 24h-gain book + фиксированные %.</p>
+
+<h2 id="s2"><span class="n">07</span> Стратегия 2 — Скальп VWAP/EMA9</h2>
+<div class="grid3">
+  <div class="card">
+    <h4>Вселенная</h4>
+    <p>Только majors: BTCUSDT ETHUSDT SOLUSDT. TF 5м-класс индикаторов на барах снимка. 24/7 по умолчанию (окна из <code>STRATEGY2_ENTRY_HOURS</code>, если заданы).</p>
+  </div>
+  <div class="card">
+    <h4>Вход</h4>
+    <p>EMA9 &gt; EMA21, цена &gt; VWAP, RSI в [40, 68], отскок к EMA9/VWAP, объём, ATR в коридоре. SL = k·ATR с полом %, TP = 2R после fees.</p>
+  </div>
+  <div class="card">
+    <h4>Выход</h4>
+    <p>Trail по ATR вверх, time-stop <code>max_hold_bars</code>, TP/SL. Cooldown 1200 с. Один символ за проход <code>decide</code>.</p>
+  </div>
+</div>
+
+<h2 id="s3"><span class="n">08</span> Стратегия 3 — Donchian 20/10 день</h2>
+<div class="grid3">
+  <div class="card">
+    <h4>Вселенная</h4>
+    <p>Снова BTC/ETH/SOL. Дневные свечи, лимит ~90. Turtle long-only.</p>
+  </div>
+  <div class="card">
+    <h4>Вход</h4>
+    <p>Закрытие выше Donchian High 20, цена &gt; EMA50, не красная свеча, ADX опционален. SL 2·ATR (пол 0.6%), TP 8R.</p>
+  </div>
+  <div class="card">
+    <h4>Выход</h4>
+    <p>Закрытие ниже Donchian Low 10, стоп, трейл ATR. Cooldown 3600 с.</p>
+  </div>
+</div>
+
+<h2 id="s4"><span class="n">09</span> Стратегия 4 — воронка входа. Предельно</h2>
+<p>
+  Continuation <strong>не</strong> покупает «кто сильнее за сутки». Книга — топ-<b>20 по quote volume</b> среди альтов.
+  Majors (BTC ETH BNB XRP SOL BCH) сознательно выкинуты. «Топ роста» на мониторе — другая лента.
+  Новый EnterLong — <strong>не чаще одного на 60 с</strong>, даже если слотов 5.
+</p>
+
+<div class="funnel">
+  <div class="row"><span class="w">ticker_24h</span><span>Все USDT-M last&gt;0, regex символа</span><span class="fail">мусор JSON</span></div>
+  <div class="row"><span class="w">junk / 1000x / meme</span><span>FARTCOIN DOGS PEPE SHIB … и 1000*</span><span class="fail">мелочь — не гоняю</span></div>
+  <div class="row"><span class="w">is_major_symbol</span><span>BTC ETH BNB XRP SOL BCH</span><span class="fail">мажор — не беру в S4</span></div>
+  <div class="row"><span class="w">min_price 0.5</span><span>дешёвые лотереи</span><span class="fail">мелочь — не гоняю</span></div>
+  <div class="row"><span class="w">volume floor</span><span>max(50 000, 0.5% от max volume ленты), топ liquid_n=20</span><span class="fail">тонкий стакан</span></div>
+  <div class="row"><span class="w">skip_24h_tape</span><span>нужен зелёный день: c ≥ +0.5% и c ≤ +35%. Дамп c ≤ −4% out. Зелёный выше stretch 4% <b>не</b> режется — догон это near_high</span><span class="fail">слабый рост / улетело</span></div>
+  <div class="row"><span class="w">near_24h_high 5%</span><span>цена у дневного хая — не догоняем</span><span class="fail">у 24h high — не догоняю</span></div>
+  <div class="row"><span class="w">signal bar TF</span><span>5m / 15m / 30m / 1h из STRATEGY4_INTERVAL</span><span class="fail">нет N бара</span></div>
+  <div class="row"><span class="w">HTF 4h EMA20</span><span>нужно ≥21 бар; close 4h <b>строго выше</b> EMA20</span><span class="fail">4ч ниже EMA20</span></div>
+  <div class="row"><span class="w">TF EMA20</span><span>close рабочего TF &gt; EMA20 (серия HL убрана — душила входы)</span><span class="fail">цена ниже EMA20</span></div>
+  <div class="row"><span class="w">pullback-resume</span><span>сигнал зелёный, close в верхней половине, не слишком широкая (&gt;6%), в последних 5 была красная, close &gt; prev.close, объём ≥ 0.3×mean, глубина отката ≥ min_pullback</span><span class="fail">нет отката / слабое закрытие</span></div>
+  <div class="row"><span class="w">VWAP</span><span>last ≥ VWAP рабочего TF</span><span class="fail">цена ниже VWAP</span></div>
+  <div class="row"><span class="w">reversing leader</span><span>был в топе % или week ≥ +4%, и выпал из топа или сигнал красный</span><span class="fail">разворот бывшего лидера</span></div>
+  <div class="row"><span class="w">structure_stop</span><span>min(low lookback 3, mark − 2·ATR14), clamp [min_stop, max_stop]</span><span class="fail">стоп слишком широкий</span></div>
+  <div class="row"><span class="w">гейты движка</span><span>окно часов / ALWAYS_ENTER / desk pause / daily halt / retry_until / inflight / cooldown символа / книга полна. Новый слот <b>разрешён</b> даже если открытые в минусе (desk restore)</span><span class="fail">пауза / стоп дня / waiting scan</span></div>
+  <div class="row"><span class="w">EnterLong</span><span>reason «откат ликвид N%», TP = entry + 2R, затем × (1 + 0.08% fees)</span><span class="fail">—</span></div>
+</div>
+
+<div class="callout">
+  Геометрия стопа от TF: 5м SL 1.5–3.5%; 15м 2.0–5.0%; 30м 2.5–6.0%; 1ч 3.0–8.0%. TP всегда 2R.
+  Размер: <code>risk_usdt = equity × RISK_PCT</code> (дефолт 0.25%), <code>qty</code> из (entry − SL).
+  Если округление к minNotional раздувает риск — символ skip, лот вверх не поднимаем.
+  <code>RISK_PCT=0</code> → запасной <code>ORDER_NOTIONAL_USDT</code>.
+  В движке <code>s4_max_positions.max(3)</code> — кап не сжимается ниже 3.
+</div>
+
+<table>
+  <tr><th>Интервал</th><th>SL пол–потолок</th><th>min pullback</th><th>TP</th></tr>
+  <tr><td>5m</td><td>1.5% – 3.5%</td><td>1.0%</td><td>2R</td></tr>
+  <tr><td>15m</td><td>2.0% – 5.0%</td><td>1.0%</td><td>2R</td></tr>
+  <tr><td>30m</td><td>2.5% – 6.0%</td><td>1.5%</td><td>2R</td></tr>
+  <tr><td>1h</td><td>3.0% – 8.0%</td><td>2.0%</td><td>2R</td></tr>
+</table>
+
+<h2 id="manage"><span class="n">10</span> S4 ведение позиции — машина состояний</h2>
+<p><code>manage_continuation_long</code> вызывается на каждый тик по каждому лонгу, независимо от SCAN_SEC. Входы ждут 60 с; стопы — нет.</p>
+<div class="sm">
+  <div class="st pre">
+    <h4>A. До 1R (SL &lt; entry)</h4>
+    <ul>
+      <li>Mark ≥ TP → Exit take profit</li>
+      <li>Mark ≤ SL → Exit stop</li>
+      <li>4h close ≤ EMA20 → «4ч сломал тренд»</li>
+      <li>Удержание ≥ 4 ч с <code>opened_bar_time</code> → «тайм-стоп 4ч»</li>
+      <li>Конец окна (если не ALWAYS_ENTER) → Exit «конец окна входа»</li>
+      <li>Пик ≥ 0.8R и откат &lt; 0.25R → замок 0.25R, иначе Exit «откат с пика»</li>
+      <li>Иначе hold «жду 1R»</li>
+    </ul>
+  </div>
+  <div class="st one">
+    <h4>B. Удар 1R</h4>
+    <ul>
+      <li>Если ещё не <code>scaled_one_r</code>: ReduceLong ≈ 50% qty, SL остатка = entry × (1+0.08%)</li>
+      <li>Лот неделим → только AmendStop BE, latch всё равно ставится</li>
+      <li>Дальше: mark/peak ≥ 1.5R → Exit «1.5R — фиксирую»</li>
+      <li>Иначе BE-amend; если BE невалиден → Exit «1R был — фиксирую»</li>
+    </ul>
+  </div>
+  <div class="st be">
+    <h4>C. После BE (SL ≥ entry)</h4>
+    <ul>
+      <li>Mark ≥ 1.5R → Exit</li>
+      <li>Peak был 1.5R, mark ещё жив → замок 0.5R</li>
+      <li>Trail: candidate = max(low сигнального бара, mark×(1−trail_pct 0.8%)), только вверх, <code>long_stop_is_valid</code></li>
+    </ul>
+  </div>
+</div>
+<p class="tiny">Latch <code>scaled_one_r</code> живёт в RAM. Рестарт: journal overlay хранит <strong>остаток</strong> после partial close, чтобы не вернуть до-1R стоп и не отдать 1R lock. ReduceLong без latch раньше крутил повторный scale на старой книге.</p>
+
+<h2 id="live"><span class="n">11</span> Live. Что уходит на биржу при EnterLong</h2>
+<div class="steps">
+  <div class="step"><div><div class="t">Отказы до ордера</div><div class="d">Символ в skip_symbols. daily_halt. Нет свежего positionRisk (502 → skip enter, не «книга пустая»). Уже в позиции. Книга ≥ cap. Нет mark. RISK_PCT раздут minNotional. Notional не влезает в leverage bracket (−2027).</div></div><div class="src">enter_live</div></div>
+  <div class="step"><div><div class="t">Размер</div><div class="d">S4+RISK_PCT: <code>size_risk_market_order(equity, risk_pct, mark, sl, filters)</code>. Иначе <code>size_market_order(notional)</code> с LOT_SIZE / MIN_NOTIONAL. qty ≤ 0 на close — отказ.</div></div><div class="src">exchange.rs</div></div>
+  <div class="step"><div><div class="t">Плечо</div><div class="d">Если <code>FUTURES_LEVERAGE</code> задан — <code>POST /fapi/v1/leverage</code> на символ. Иначе не трогаем аккаунт.</div></div><div class="src"></div></div>
+  <div class="step"><div><div class="t">MARKET BUY</div><div class="d"><code>newClientOrderId = tui{SYM}{bucket20s}</code>. Таймаут POST <strong>не</strong> ретраится. Если ошибка — перечитать книгу: вдруг fill всё же прошёл. Повтор с тем же id → duplicate rejected, не второй лонг.</div></div><div class="src">buy_client_order_id</div></div>
+  <div class="step"><div><div class="t">Анти-шорт</div><div class="d">Если вход перевернул в SHORT — сразу market_close, forget_symbol, journal flatten.</div></div><div class="src"></div></div>
+  <div class="step"><div><div class="t">Protectives</div><div class="d"><code>POST /fapi/v1/algoOrder</code> CONDITIONAL, reduce-only SELL, qty = размер лонга (не naked closePosition). TP и SL отдельно. −4130 «уже стоят» = успех. Иначе: cancel + market_close «flattened naked fill» — лонг без стопа ночевать не оставляем.</div></div><div class="src">place_fill_protectives</div></div>
+  <div class="step"><div><div class="t">Журнал и звук</div><div class="d"><code>trades.jsonl</code> open. WAV: 880→1175 Гц. State: adopt fill, sized_stops, inflight снят когда qty на книге.</div></div><div class="src">journal / signals</div></div>
+</div>
+
+<h3>Amend / Reduce / Exit</h3>
+<div class="grid3">
+  <div class="card">
+    <h4>AmendStop</h4>
+    <p><code>replace_stop_place_first</code>: новый SL ставится, потом prune старого. Если лонга на live_book уже нет — no-op (не открываем шорт стопом).</p>
+  </div>
+  <div class="card">
+    <h4>ReduceLong</h4>
+    <p>SELL reduce-only на half qty (<code>quantize</code> stepSize; remain&lt;minQty → BE-only), затем BE на остаток (retry×1, иначе flatten). Latch <code>scaled_one_r</code> на decision + после apply — без spam Reduce.</p>
+  </div>
+  <div class="card">
+    <h4>Exit / Flatten</h4>
+    <p>cancel_protectives (best-effort) → market_close qty лонга → cancel снова (сирота TP не должна открыть шорт). <span class="kbd">x</span><span class="kbd">x</span> закрывает и чужие SHORT.</p>
+  </div>
+</div>
+
+<h2 id="recon"><span class="n">12</span> Reconcile на каждом тике, до apply</h2>
+<div class="grid4">
+  <div class="card"><h4>1. vanished longs</h4><p>Были в RAM, нет на бирже: journal close (один раз, без double-count PnL), кулдаун, снять overlay.</p></div>
+  <div class="card"><h4>2. orphan TP/SL</h4><p>Algo/order без позиции — cancel. Иначе утренний стоп открывает SHORT.</p></div>
+  <div class="card"><h4>3. rogue shorts</h4><p>Любой SHORT qty&gt;0 — market_close. Стратегия long-only.</p></div>
+  <div class="card"><h4>4. rearm</h4><p>Лонг без sized TP/SL — поставить с overlay/journal. 3 фейла или 90 с → fail-closed flatten этого символа.</p></div>
+</div>
+<p class="tiny">Поле skip_tick удалено: после reconcile тик стратегии <strong>всегда</strong> идёт. Раньше зависший orphan-cancel замораживал входы на день.</p>
+
+<h2 id="risk"><span class="n">13</span> Риск, паузы, идемпотентность</h2>
+<table>
+  <tr><th>Механизм</th><th>Число</th><th>Эффект в 3AM</th></tr>
+  <tr><td>Дневной стоп USDT</td><td>DAILY_LOSS_USDT=20</td><td>нет новых EnterLong до 00:00 UTC, ведение открытых живёт</td></tr>
+  <tr><td>Дневной стоп R</td><td>3R при RISK_PCT&gt;0</td><td>OR с USDT, не max</td></tr>
+  <tr><td>Кулдаун символа после лосса</td><td>12 ч</td><td>не переоткрыть того же лузера в следующее окно</td></tr>
+  <tr><td>Desk pause после лосса</td><td>до след. окна / COOLDOWN_SEC 1800</td><td>слот не заполняется сразу</td></tr>
+  <tr><td>entries_paused</td><td>flatten / OPERATOR</td><td>держится до expiry или <span class="kbd">r</span></td></tr>
+  <tr><td>Retry backoff</td><td>20 → 40 → 60 с</td><td>EnterLong режется, footer 408/5xx <strong>не</strong> стирается</td></tr>
+  <tr><td>Inflight hold</td><td>пока retry_until</td><td>нет второго BUY после timeout</td></tr>
+  <tr><td>clientOrderId bucket</td><td>20 с</td><td>повтор = duplicate, не double-fill</td></tr>
+  <tr><td>HTTP timeout</td><td>max(cfg, 1.0) с</td><td>не 0.1 с retry storm</td></tr>
+  <tr><td>POST retry</td><td>0 на timeout</td><td>идемпотентность важнее «дожать»</td></tr>
+  <tr><td>GET/DELETE retry</td><td>1</td><td>снимок/отмена стопа</td></tr>
+  <tr><td>live.lock</td><td>один pid</td><td>два --live не молотят один счёт</td></tr>
+  <tr><td>Mainnet guard</td><td>fapi.binance.com</td><td>отказ без BINANCE_ALLOW_MAINNET=1</td></tr>
+</table>
+
+<h3>Классификация ошибок биржи</h3>
+<div class="grid2">
+  <div class="card">
+    <ul>
+      <li><code>retry</code> −1001/−1007/−1008/−1021… — backoff, футер живой</li>
+      <li><code>skip_symbol</code> −2027/−4411/−4164/−1013 — в skip_symbols, больше не берём</li>
+      <li><code>operator</code> −2015 ключ/IP — пауза входов, человек нужен</li>
+      <li><code>ignore</code> −4130 TP/SL уже есть, −2011 cancel unknown</li>
+      <li><code>keep</code> −2022 reduceOnly на плоской книге — не открывать шорт</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Что видит оператор, что нет</h4>
+    <p>Футер и <code>.state/errors.jsonl</code> — человеческие фразы + код. HMAC, X-MBX-APIKEY, query secret вырезаются <code>redact_secrets</code>. Stack trace в TUI не льётся. Panic poller → одна строка, поток жив.</p>
+  </div>
+</div>
+
+<h2 id="fail"><span class="n">14</span> Как это падает в 3AM — и что уже закрыто в коде</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>Раньше</h4>
+    <ul>
+      <li>408 во время backoff стирался из футера → казалось, что «висит»</li>
+      <li>Inflight дропался при «свежей» книге после 502 → второй BUY</li>
+      <li>Panic poller = 30 с «всё ок»</li>
+      <li><code>size()?</code> в tmux убивал TUI, ордера могли остаться</li>
+      <li><code>unwrap</code> на UTC/stop — процесс вниз</li>
+      <li>skip_tick после неудачного cancel — день без сделок</li>
+      <li>S4 skip зелёных ≥4% — пустая книга при ленте +7…+131%</li>
+      <li>Journal 644, ключ в ureq Display</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>Сейчас</h4>
+    <ul>
+      <li><code>persist_last_error(..., retry_until, now)</code> держит retry-текст</li>
+      <li><code>drop_stale_inflight</code> no-op пока backoff</li>
+      <li><code>take_panics()</code> сразу в last_error</li>
+      <li>size fallback 80×24</li>
+      <li><code>let Some(sl)</code>, UNIX_EPOCH fallback</li>
+      <li>reconcile никогда не глушит tick</li>
+      <li>stretch режет дампы и &gt;35%, не «любой +4%»</li>
+      <li>dir 0700, file 0600, redact, is_safe_order_symbol</li>
+    </ul>
+  </div>
+</div>
+<div class="callout red">
+  Не закрыто полностью (знать оператору): <code>cancel_protectives</code> остаётся best-effort Ok, чтобы flatten всё равно дошёл до market_close.
+  <code>scaled_one_r</code> RAM-only. Нет circuit breaker на всю сессию кроме retry_until.
+  Нет Strategy trait — S4 knobs едут зайцем в MomentumParams.
+</div>
+
+<h2>Монитор — две разные ленты</h2>
+<div class="grid2">
+  <div class="card">
+    <h4>В ожидании входа = книга стратегии</h4>
+    <p>S4: <code>liquid_universe</code> + <code>s4_setup_skip</code> (те же гейты, что live). Kind: готов / сетап / пауза / блок. Строка «до входа:» — время до окна, % до порога 24h, USDT до VWAP или до отхода от 24h high.</p>
+  </div>
+  <div class="card">
+    <h4>Топ роста / падения = tape</h4>
+    <p>Просто 24h %. Это не список покупок. Тег, только если имя уже в позиции или в wait-книге. Путать их — смотреть «почему не купил лидера дня»: лидер дня часто у high, major, или без отката.</p>
+  </div>
+</div>
+
+<h2>Звук и клавиши</h2>
+<table>
+  <tr><th>Событие</th><th>Сигнал</th></tr>
+  <tr><td>EnterLong fill</td><td>880 → 1175 Гц</td></tr>
+  <tr><td>TP / win close</td><td>784 → 988 → 1318</td></tr>
+  <tr><td>SL / flatten loss</td><td>392 → 311 → 246</td></tr>
+  <tr><td>Hold / trail</td><td>тишина</td></tr>
+</table>
+<p class="tiny"><code>TRADER_SIGNALS=0</code> выключает. macOS: afplay WAV из RAM.</p>
+
+<h2 id="files"><span class="n">15</span> Карта файлов и данных</h2>
+<table>
+  <tr><th>Путь</th><th>Роль</th></tr>
+  <tr><td><code>src/main.rs</code></td><td>exit(code) из app</td></tr>
+  <tr><td><code>src/app.rs</code></td><td>CLI маршрутизация, dump-frame, monitor startup</td></tr>
+  <tr><td><code>src/engine.rs</code></td><td>оркестрация, гейты, inflight, persist_last_error</td></tr>
+  <tr><td><code>src/continuation.rs</code></td><td>S4 воронка + manage + SCAN_SEC</td></tr>
+  <tr><td><code>src/momentum.rs</code></td><td>S1 книга 24h + trail % + MomentumParams (в т.ч. S4 knobs)</td></tr>
+  <tr><td><code>src/scalp.rs</code> / <code>trend.rs</code></td><td>S2 / S3 на majors</td></tr>
+  <tr><td><code>src/live.rs</code></td><td>сторона TestNet, reconcile, apply_decision</td></tr>
+  <tr><td><code>src/exchange.rs</code></td><td>REST, sizing, algoOrder, retry policy</td></tr>
+  <tr><td><code>src/snapshot.rs</code> / <code>poll.rs</code></td><td>сбор снимка / фон-поток</td></tr>
+  <tr><td><code>src/tui.rs</code> / <code>monitor.rs</code> / <code>render.rs</code></td><td>экран</td></tr>
+  <tr><td><code>src/journal.rs</code> / <code>errorlog.rs</code></td><td>jsonl append, overlay opens, cooldowns</td></tr>
+  <tr><td><code>src/dayrisk.rs</code> / <code>profit.rs</code></td><td>стоп дня, equity pin «прибыль счёта»</td></tr>
+  <tr><td><code>src/ranking.rs</code></td><td>tape, junk, majors, momentum book</td></tr>
+  <tr><td><code>src/pidlock.rs</code></td><td>.state/live.lock</td></tr>
+  <tr><td><code>src/flatten.rs</code></td><td>fail-closed close всех целей</td></tr>
+  <tr><td><code>.state/trades.jsonl</code></td><td>open/close/amend/flatten, нетто, комиссии</td></tr>
+  <tr><td><code>.state/errors.jsonl</code></td><td>кадр ошибки, код, source</td></tr>
+  <tr><td><code>.env</code> gitignored 0600</td><td>ключи и knobs</td></tr>
+</table>
+
+<h3>Один кадр — вся система</h3>
+<pre style="background:#0c1118;border:1px solid var(--line);border-radius:12px;padding:16px;overflow:auto;font:12px/1.45 var(--mono);color:#c5d0dc">
+.env 0600 ──► config ──► CLI
+                    ├─ --report / --backtest          (без ордеров)
+                    ├─ --monitor ──► poll 5s ──► s4_setup_skip / s1_setup_skip
+                    │                              wait-книга ≠ 24h tape
+                    └─ TUI
+                         ├─ thread snapshot-poll (catch_unwind)
+                         │     ticker24h + klines + positionRisk + overlay
+                         ├─ tick_decisions  (pure)
+                         │     halt / pause / inflight / S1|S2|S3|S4
+                         │     → Hold | EnterLong | AmendStop | ReduceLong | Exit
+                         ├─ paint  (size fallback)
+                         └─ if --live && live.lock
+                               reconcile (vanish/orphan/short/rearm)
+                               apply_decision → HMAC REST
+                               journal.jsonl 0600  +  errors.jsonl  +  WAV
+</pre>
+
+<footer>
+  Собрано по текущему коду crate <b>tui-bot</b> (не по устаревшим абзацам README, где они расходятся: S1 порог в коде +0.4%, S4 stretch не режет зелёных лидеров).
+  Открой этот файл в браузере. Печать → PDF. Ордера сам не запускает.
+</footer>
+</div>
+</body>
+</html>

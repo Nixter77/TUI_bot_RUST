@@ -49,6 +49,7 @@ struct FakeSnap {
     klines: HashMap<String, Vec<Bar>>,
     ticker_err: Option<String>,
     risk_err: Option<String>,
+    kline_calls: Vec<(String, String, usize)>,
 }
 
 impl FakeSnap {
@@ -72,6 +73,7 @@ impl FakeSnap {
             .collect(),
             ticker_err: None,
             risk_err: None,
+            kline_calls: Vec::new(),
         }
     }
 }
@@ -83,12 +85,14 @@ impl SnapshotClient for FakeSnap {
         }
         Ok(self.tickers.clone())
     }
-    fn klines(&mut self, symbol: &str, _interval: &str, _limit: usize) -> Result<Vec<Bar>, ExchangeError> {
+    fn klines(&mut self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Bar>, ExchangeError> {
+        self.kline_calls
+            .push((symbol.to_string(), interval.to_string(), limit));
         Ok(self
             .klines
             .get(symbol)
             .cloned()
-            .unwrap_or_else(|| bars(3, 100.0)))
+            .unwrap_or_else(|| bars(limit.max(3), 100.0)))
     }
     fn account(&mut self) -> Result<Value, ExchangeError> {
         Ok(json!({
@@ -352,4 +356,95 @@ fn journal_overlay_does_not_lower_live_stop() {
     )];
     let merged = merge_overlay_with_journal(vec![live.clone()], journal);
     assert_eq!(merged[0].stop_loss, Some(d("17.068")));
+}
+
+#[test]
+fn s4_fetches_liquid_universe_not_only_entry_book() {
+    // Monitor desk = liquid_universe. Near-24h-high names are filtered from the
+    // entry book but must still get signal-TF + 4h history (else «нет 15м бара»).
+    let cfg = cfg_with_keys();
+    let mut client = FakeSnap::book("3000", "0", json!([]));
+    let mut tickers = Vec::new();
+    // Majors exist for volume floor reference.
+    tickers.push(Ticker::new("BTCUSDT", d("50000"), d("1"), d("100000000")));
+    for i in 0..20 {
+        let sym = format!("LIQ{i}USDT");
+        let mut t = Ticker::new(&sym, d("10"), d("3"), d("5000000") - Decimal::from(i * 1000));
+        t.high_price = d("12"); // last well off high
+        tickers.push(t);
+        client.klines.insert(sym, bars(50, 10.0));
+    }
+    // Near-high liquid name: skipped at s4_setup_skip / enter, but still needs history.
+    let mut near = Ticker::new("NEARHIUSDT", d("10"), d("4"), d("8000000"));
+    near.high_price = d("10.05"); // within near_high_frac
+    tickers.push(near);
+    client.klines.insert("NEARHIUSDT".into(), bars(50, 10.0));
+    client.tickers = tickers;
+
+    let mut state = EngineState::new(4);
+    let mut pin = EquityPin {
+        value: None,
+        persist: false,
+    };
+    let snap = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, None);
+
+    assert!(
+        snap.universe_bars.contains_key("NEARHIUSDT"),
+        "near-high liquid name must have signal bars: {:?}",
+        snap.universe_bars.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        snap.last_bars.contains_key("NEARHIUSDT"),
+        "near-high liquid name must have last bar"
+    );
+    assert!(
+        snap.htf_bars.get("NEARHIUSDT").map(|b| b.len()).unwrap_or(0) >= 21
+            || client
+                .kline_calls
+                .iter()
+                .any(|(s, iv, _)| s == "NEARHIUSDT" && iv == "4h"),
+        "near-high must be requested on 4h: {:?}",
+        client.kline_calls
+    );
+    let signal_calls: Vec<_> = client
+        .kline_calls
+        .iter()
+        .filter(|(s, iv, _)| s == "NEARHIUSDT" && iv != "4h")
+        .collect();
+    assert!(
+        !signal_calls.is_empty(),
+        "near-high must be requested on signal TF: {:?}",
+        client.kline_calls
+    );
+    assert!(
+        state.last_scan_ts > 0.0,
+        "pull must advance S4 book cadence for monitor reuse"
+    );
+}
+
+#[test]
+fn pull_snapshot_live_does_not_consume_scan_cadence() {
+    // Regression: live poller used to bump last_scan_ts on snapshot arrival, so
+    // continuation_decisions saw !scan_due → eternal «waiting for next scan»
+    // while monitor still showed [готов] (it never needs EnterLong).
+    let mut cfg = cfg_with_keys();
+    cfg.live = true;
+    let mut client = FakeSnap::book("3000", "0", json!([]));
+    client.tickers.push(Ticker::new("AAAUSDT", d("10"), d("3"), d("5000000")));
+    client.klines.insert("AAAUSDT".into(), bars(50, 10.0));
+    let mut state = EngineState::new(4);
+    assert!(
+        state.last_scan_ts <= 0.0,
+        "fresh S4 state is scan-due"
+    );
+    let mut pin = EquityPin {
+        value: None,
+        persist: false,
+    };
+    let _snap = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, None);
+    assert!(
+        state.last_scan_ts <= 0.0,
+        "live pull_snapshot must leave last_scan_ts for engine/maybe_enter, got {}",
+        state.last_scan_ts
+    );
 }

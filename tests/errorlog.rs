@@ -15,6 +15,25 @@ fn redact_strips_signature_from_transport_errors() {
 }
 
 #[test]
+fn redact_strips_api_key_header() {
+    let raw = "X-MBX-APIKEY: testkey_not_a_real_secret";
+    let clean = tui_bot::errors::redact_secrets(raw);
+    assert!(clean.contains("***"), "{clean}");
+    assert!(!clean.contains("testkey_not_a_real_secret"), "{clean}");
+}
+
+#[test]
+fn order_symbol_rejects_query_injection() {
+    use tui_bot::errors::is_safe_order_symbol;
+    assert!(is_safe_order_symbol("BTCUSDT"));
+    assert!(is_safe_order_symbol("1000PEPEUSDT"));
+    assert!(!is_safe_order_symbol("BTCUSDT&side=SELL"));
+    assert!(!is_safe_order_symbol("../etc"));
+    assert!(!is_safe_order_symbol(""));
+    assert!(!is_safe_order_symbol("btc usdt"));
+}
+
+#[test]
 fn describe_does_not_panic_on_multibyte_truncation() {
     let raw = "ж".repeat(200);
     let shown = describe_exchange_error(&raw);

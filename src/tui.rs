@@ -1,4 +1,4 @@
-//! Interactive TUI loop. Keys: 1/2/3/4 strategy, r refresh, q quit, x then x flatten.
+//! Interactive TUI loop. Keys: 1/2/3/4/5 strategy, r refresh, q quit, x then x flatten.
 //!
 //! Snapshot HTTP runs on a side thread (Python `SnapshotPoller`). Tick / live
 //! apply stay on this thread and serialize on the same client mutex as the pull.
@@ -6,6 +6,7 @@
 use crate::config::Config;
 use crate::dayrisk::apply_day_risk;
 use crate::engine::{tick_decisions, MomentumParams};
+use crate::scalp::ScalpParams;
 use crate::errorlog::{note_frame as note_error_frame, set_active as set_error_log, ErrorLog};
 use crate::errors::COOLDOWN_SEC;
 use crate::exchange::{BinanceFutures, LiveClient, SnapshotClient};
@@ -38,6 +39,7 @@ const SNAPSHOT_INTERVAL_SECS: f64 = 5.0;
 /// No successful pull for this long → footer warning (poller hung / panicking).
 pub const SNAPSHOT_STALE_SECS: f64 = 30.0;
 const SNAPSHOT_STALE_MSG: &str = "сеть: снимок рынка завис";
+const SNAPSHOT_PANIC_MSG: &str = "сеть: поток снимка упал, жду следующий pull";
 
 fn now() -> f64 {
     crate::sessions::unix_now()
@@ -93,6 +95,15 @@ fn with_live<R>(
     g.as_mut().map(|c| f(c as &mut dyn LiveClient))
 }
 
+/// Prefer not blocking the TUI paint/key loop when the snapshot poller holds the client.
+fn with_live_try<R>(
+    client: &Mutex<Option<BinanceFutures>>,
+    f: impl FnOnce(&mut dyn LiveClient) -> R,
+) -> Option<R> {
+    let mut g = client.try_lock().ok()?;
+    g.as_mut().map(|c| f(c as &mut dyn LiveClient))
+}
+
 /// True when the tape (tickers / «Топ роста») must be re-fetched.
 /// Independent of the 200ms key poll so resize/mouse/keys cannot freeze the board.
 pub fn snapshot_due(now: f64, last_at: f64) -> bool {
@@ -103,46 +114,69 @@ pub fn snapshot_stale(now: f64, last_at: f64) -> bool {
     now - last_at >= SNAPSHOT_STALE_SECS
 }
 
-fn scan_once(
-    cfg: &Config,
-    client: &Mutex<Option<BinanceFutures>>,
+/// Pure strategy tick + last_text. No exchange HTTP (keeps the key/paint loop moving).
+fn tick_once(
     state: &mut EngineState,
     snapshot: &MarketSnapshot,
     last_text: &mut String,
     momentum: &MomentumParams,
-) {
-    if cfg.live {
-        if let Some(rec) = with_live(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
-            if rec.skip_tick {
-                if !rec.last_text.is_empty() {
-                    *last_text = rec.last_text;
-                }
-                return;
-            }
-            if !rec.last_text.is_empty() {
-                *last_text = rec.last_text;
-            }
-        }
-    }
+    scalp: &ScalpParams,
+) -> Vec<Decision> {
     let (new_state, decisions) =
-        tick_decisions(state, snapshot, now(), Some(momentum), None, None);
+        tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None);
     *state = new_state;
     *last_text = decisions
         .first()
         .map(|d| d.reason().to_string())
         .unwrap_or_else(|| "—".into());
-    if cfg.live {
-        if let Some(()) = with_live(client, |c| {
-            for d in &decisions {
-                apply_decision(cfg, c, state, snapshot, d);
-            }
-        }) {
-            return;
-        }
-    } else {
-        for d in &decisions {
+    if crate::engine::is_continuation(state.strategy_id) {
+        crate::s4stats::flush_s4_skip_stats();
+    }
+    decisions
+}
+
+/// Live reconcile + apply. Uses try_lock so a long snapshot pull cannot freeze keys.
+fn apply_live_once(
+    cfg: &Config,
+    client: &Mutex<Option<BinanceFutures>>,
+    state: &mut EngineState,
+    snapshot: &MarketSnapshot,
+    last_text: &mut String,
+    decisions: &[Decision],
+) {
+    if !cfg.live {
+        for d in decisions {
             apply_paper_decision(state, snapshot, d);
         }
+        return;
+    }
+    if let Some(rec) = with_live_try(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
+        if !rec.last_text.is_empty() {
+            *last_text = rec.last_text;
+        }
+    }
+    // Reduce/Amend/Exit must not skip under try_lock — concurrent ticks double-fired ReduceLong
+    // (TRADOOR spam). Blocking lock; paint already finished.
+    let needs_block = decisions.iter().any(|d| {
+        matches!(
+            d,
+            Decision::ReduceLong { .. }
+                | Decision::AmendStop { .. }
+                | Decision::ExitPosition { .. }
+        )
+    });
+    if needs_block {
+        let _ = with_live(client, |c| {
+            for d in decisions {
+                apply_decision(cfg, c, state, snapshot, d);
+            }
+        });
+    } else {
+        let _ = with_live_try(client, |c| {
+            for d in decisions {
+                apply_decision(cfg, c, state, snapshot, d);
+            }
+        });
     }
     let has_pos = snapshot.position.is_some()
         || !state.positions.is_empty()
@@ -150,10 +184,7 @@ fn scan_once(
             .open_positions
             .iter()
             .any(|p| p.qty > rust_decimal::Decimal::ZERO);
-    if state.strategy_id == 4 {
-        crate::s4stats::flush_s4_skip_stats();
-    }
-    for d in &decisions {
+    for d in decisions {
         let won = if let Decision::ExitPosition { reason, symbol } = d {
             if reason_suggests_win(reason) {
                 Some(true)
@@ -174,6 +205,19 @@ fn scan_once(
         };
         emit_decision(d, &LiveApplyResult::default(), false, has_pos, won);
     }
+}
+
+fn scan_once(
+    cfg: &Config,
+    client: &Mutex<Option<BinanceFutures>>,
+    state: &mut EngineState,
+    snapshot: &MarketSnapshot,
+    last_text: &mut String,
+    momentum: &MomentumParams,
+    scalp: &ScalpParams,
+) {
+    let decisions = tick_once(state, snapshot, last_text, momentum, scalp);
+    apply_live_once(cfg, client, state, snapshot, last_text, &decisions);
 }
 
 /// Always leave the user's terminal usable, even on panic after raw mode.
@@ -219,8 +263,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+fn note_poller_panic<T>(poller: Option<&SnapshotPoller<T>>, state: &mut EngineState) {
+    if poller.is_some_and(|p| p.take_panics() > 0) {
+        state.last_error = Some(SNAPSHOT_PANIC_MSG.into());
+    }
+}
+
 fn paint_frame(stdout: &mut impl Write, frame: &str, profit: Decimal) -> io::Result<()> {
-    let (cols, rows) = crossterm::terminal::size()?;
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let width = (cols.saturating_sub(1) as usize).max(1);
     let lines = fit_lines(frame, width, rows as usize);
     execute!(stdout, Clear(ClearType::All))?;
@@ -304,6 +354,10 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     set_journal(Some(std::path::PathBuf::from(DEFAULT_JOURNAL_PATH)));
     set_error_log(Some(ErrorLog::new(None)));
     seed_cooldowns(state, now(), COOLDOWN_SEC);
+    {
+        let opens = crate::journal::unmatched_open_positions_for(Some(state.strategy_id));
+        crate::openmeta::seed_from_positions(state, &opens, now());
+    }
     let mut last_text = "—".to_string();
     let mut pin = EquityPin::from_config(cfg.starting_equity);
     let client = Arc::new(Mutex::new(if offline {
@@ -321,24 +375,27 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
         s4_always_enter: cfg.s4_always_enter,
         s4_interval: cfg.s4_interval,
         s4_max_positions: cfg.s4_max_positions,
+        s5_max_positions: cfg.s5_max_positions,
         max_positions: cfg.max_positions,
         daily_loss_usdt: cfg.daily_loss_usdt,
         daily_loss_r: cfg.daily_loss_r,
         risk_pct: cfg.risk_pct,
         ..MomentumParams::default()
     };
+    let scalp = ScalpParams::from_config(cfg);
     // First REST happens before raw mode so Ctrl+C is still SIGINT.
     let mut snapshot = pull_locked(cfg, &client, state, &mut pin, offline, None);
     if cfg.live {
-        let skip = with_live(&client, |c| {
+        let cleaned = with_live(&client, |c| {
             let rec = reconcile_live(cfg, c, state, &snapshot, Some(now()));
-            if rec.skip_tick || !rec.last_text.is_empty() {
+            let dirty = !rec.last_text.is_empty();
+            if dirty {
                 last_text = rec.last_text.clone();
             }
-            rec.skip_tick
+            dirty
         })
         .unwrap_or(false);
-        if skip {
+        if cleaned {
             snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
         }
     }
@@ -355,28 +412,40 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     if let Some(p) = poller.as_ref() {
         p.bump();
     }
-    scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+    scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
     publish_poll(&poll_in, state, &snapshot, &pin);
     let mut last_snap_at = now();
 
     let result = (|| -> io::Result<()> {
         loop {
+            note_poller_panic(poller.as_ref(), state);
+            let mut pending_live: Option<Vec<Decision>> = None;
             if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
                 apply_tradfi_skip(state, &pulled.tradfi);
                 snapshot = pulled.snapshot;
+                // Live must not consume scan on snapshot arrival; engine advances
+                // last_scan_ts after maybe_enter. Monitor cadence is in pull_snapshot.
                 if snapshot.live_book && snapshot.account_fresh {
                     pin.capture(snapshot.account.starting_equity);
                 }
-                if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
+                if matches!(
+                    state.last_error.as_deref(),
+                    Some(SNAPSHOT_STALE_MSG) | Some(SNAPSHOT_PANIC_MSG)
+                ) {
                     state.last_error = None;
                 }
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+                // CPU tick first so paint shows waiting criteria before any REST.
+                pending_live = Some(tick_once(
+                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
                 last_snap_at = now();
             } else if poller.is_none() && snapshot_due(now(), last_snap_at) {
                 last_snap_at = now();
                 snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
-                scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum);
+                pending_live = Some(tick_once(
+                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
             } else if poller.is_some() && snapshot_stale(now(), last_snap_at) && state.last_error.is_none() {
                 state.last_error = Some(SNAPSHOT_STALE_MSG.into());
@@ -392,6 +461,12 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
             );
             let frame = render_frame(&view);
             paint(&mut stdout, &view, &frame)?;
+
+            // Live REST after paint. try_lock skips if poller already grabbed the client.
+            if let Some(decisions) = pending_live.take() {
+                apply_live_once(cfg, &client, state, &snapshot, &mut last_text, &decisions);
+                publish_poll(&poll_in, state, &snapshot, &pin);
+            }
 
             if !event::poll(Duration::from_millis(200))? {
                 continue;
@@ -415,7 +490,8 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
             match handle_key(ch, flatten_armed) {
                 KeyAction::Quit => break,
                 KeyAction::Strategy(id) => {
-                    state.strategy_id = id;
+                    state.adopt_strategy(id);
+                    seed_cooldowns(state, now(), COOLDOWN_SEC);
                     flatten_armed = false;
                     publish_poll(&poll_in, state, &snapshot, &pin);
                 }
@@ -488,6 +564,10 @@ fn refresh_day_risk(cfg: &Config, state: &mut EngineState, snapshot: &MarketSnap
 pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Result<()> {
     set_journal(Some(std::path::PathBuf::from(DEFAULT_JOURNAL_PATH)));
     seed_cooldowns(state, now(), COOLDOWN_SEC);
+    {
+        let opens = crate::journal::unmatched_open_positions_for(Some(state.strategy_id));
+        crate::openmeta::seed_from_positions(state, &opens, now());
+    }
     let mut pin = EquityPin::from_config(cfg.starting_equity);
     let client = Arc::new(Mutex::new(if offline {
         None
@@ -513,13 +593,19 @@ pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::
 
     let result = (|| -> io::Result<()> {
         loop {
+            note_poller_panic(poller.as_ref(), state);
             if let Some(pulled) = poller.as_ref().and_then(|p| p.take()) {
                 apply_tradfi_skip(state, &pulled.tradfi);
                 snapshot = pulled.snapshot;
+                // Live must not consume scan on snapshot arrival; engine advances
+                // last_scan_ts after maybe_enter. Monitor cadence is in pull_snapshot.
                 if snapshot.live_book && snapshot.account_fresh {
                     pin.capture(snapshot.account.starting_equity);
                 }
-                if state.last_error.as_deref() == Some(SNAPSHOT_STALE_MSG) {
+                if matches!(
+                    state.last_error.as_deref(),
+                    Some(SNAPSHOT_STALE_MSG) | Some(SNAPSHOT_PANIC_MSG)
+                ) {
                     state.last_error = None;
                 }
                 refresh_day_risk(cfg, state, &snapshot, now());
@@ -564,7 +650,8 @@ pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::
             match handle_key(ch, false) {
                 KeyAction::Quit => break,
                 KeyAction::Strategy(id) => {
-                    state.strategy_id = id;
+                    state.adopt_strategy(id);
+                    seed_cooldowns(state, now(), COOLDOWN_SEC);
                     publish_poll(&poll_in, state, &snapshot, &pin);
                     if let Some(p) = poller.as_ref() {
                         p.bump();

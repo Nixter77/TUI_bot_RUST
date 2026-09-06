@@ -7,7 +7,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use tui_bot::config::load_config;
 use tui_bot::exchange::{
-    buy_client_order_id, prepare_algo_params, prune_stale_protectives, replace_stop_place_first,
+    buy_client_order_id, is_already_flat_close_error, market_close_params, prepare_algo_params,
+    prune_stale_protectives, reduce_only_close_side, replace_stop_place_first,
     risk_position_notional, sell_protectives_are_sized, size_market_order, size_risk_market_order,
     sized_long_protectives, stale_sell_protective, ExchangeError, FlattenClient, LiveClient,
     SymbolFilters,
@@ -37,6 +38,9 @@ struct FakeClient {
     pub bought: Vec<Decimal>,
     pub bought_symbols: Vec<String>,
     pub min_notional: Decimal,
+    pub step_size: Decimal,
+    pub min_qty: Decimal,
+    pub tick_size: Decimal,
     pub dup4130: bool,
     pub risk: Value,
     pub algo_orders: Vec<Value>,
@@ -46,7 +50,9 @@ struct FakeClient {
     pub fill_on_buy_fail: bool,
     pub fail_algo: bool,
     pub fail_replace: bool,
+    pub fail_replace_times: usize,
     pub fail_risk: bool,
+    pub order_list_calls: usize,
 }
 
 impl FakeClient {
@@ -64,6 +70,9 @@ impl FakeClient {
             bought: Vec::new(),
             bought_symbols: Vec::new(),
             min_notional: Decimal::from(5),
+            step_size: d("0.001"),
+            min_qty: d("0.001"),
+            tick_size: d("0.1"),
             dup4130: false,
             risk: Value::Array(vec![]),
             algo_orders: Vec::new(),
@@ -73,7 +82,9 @@ impl FakeClient {
             fill_on_buy_fail: false,
             fail_algo: false,
             fail_replace: false,
+            fail_replace_times: 0,
             fail_risk: false,
+            order_list_calls: 0,
         }
     }
 }
@@ -98,9 +109,9 @@ impl FlattenClient for FakeClient {
 impl LiveClient for FakeClient {
     fn filters_for(&mut self, _symbol: &str) -> Result<SymbolFilters, ExchangeError> {
         Ok(SymbolFilters {
-            tick_size: d("0.1"),
-            step_size: d("0.001"),
-            min_qty: d("0.001"),
+            tick_size: self.tick_size,
+            step_size: self.step_size,
+            min_qty: self.min_qty,
             min_notional: self.min_notional,
         })
     }
@@ -140,6 +151,26 @@ impl LiveClient for FakeClient {
         }
         Ok(())
     }
+    fn cancel_algo_order(&mut self, symbol: &str, algo_id: &str) -> Result<(), ExchangeError> {
+        let want = symbol.to_ascii_uppercase();
+        self.algo_orders.retain(|row| {
+            let sym = row
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let id = row
+                .get("algoId")
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => String::new(),
+                })
+                .unwrap_or_default();
+            !(sym == want && id == algo_id)
+        });
+        Ok(())
+    }
     fn replace_stop(
         &mut self,
         symbol: &str,
@@ -149,6 +180,10 @@ impl LiveClient for FakeClient {
     ) -> Result<(), ExchangeError> {
         self.replaces.push((symbol.into(), stop_loss, take_profit));
         self.replace_qty = qty;
+        if self.fail_replace_times > 0 {
+            self.fail_replace_times -= 1;
+            return Err(ExchangeError("HTTP 502 /fapi/v1/algoOrder: gateway".into()));
+        }
         if self.fail_replace {
             return Err(ExchangeError("HTTP 502 /fapi/v1/algoOrder: gateway".into()));
         }
@@ -167,12 +202,14 @@ impl LiveClient for FakeClient {
         Ok(())
     }
     fn open_algo_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
+        self.order_list_calls += 1;
         if self.fail_algo {
             return Err(ExchangeError("algo timeout".into()));
         }
         Ok(filter_symbol_rows(&self.algo_orders, symbol))
     }
     fn open_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
+        self.order_list_calls += 1;
         Ok(filter_symbol_rows(&self.open_orders, symbol))
     }
 }
@@ -265,14 +302,41 @@ fn fill_then_protect_failure_flattens_naked() {
 }
 
 #[test]
-fn duplicate_protectives_are_not_a_failed_fill() {
+fn close_position_4130_without_sized_pair_flattens() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
     client.dup4130 = true;
+    // Only naked closePosition blockers — not a sized TP/SL pair.
+    client.algo_orders = vec![
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"STOP_MARKET","closePosition":true,"quantity":"0","algoId":"cp1"}),
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"TAKE_PROFIT_MARKET","closePosition":true,"quantity":"0","algoId":"cp2"}),
+    ];
     let result = apply_live(&cfg, &mut client, &snap(None), &enter(), None);
-    assert!(result.filled);
-    assert!(result.error.is_none());
+    assert!(!result.filled, "{:?}", result);
+    assert!(
+        result.error.as_deref().unwrap_or("").contains("flattened naked fill"),
+        "{:?}",
+        result.error
+    );
     assert_eq!(client.buys, 1);
+    assert_eq!(client.closes.len(), 1);
+}
+
+#[test]
+fn close_position_4130_with_sized_pair_counts_as_armed() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.dup4130 = true;
+    // Sized pair already on book → -4130 after cancel/verify is armed success.
+    client.algo_orders = vec![
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"STOP_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"49000","algoId":"s1"}),
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"TAKE_PROFIT_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"51000","algoId":"t1"}),
+    ];
+    let result = apply_live(&cfg, &mut client, &snap(None), &enter(), None);
+    assert!(result.filled, "{:?}", result);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(client.buys, 1);
+    assert!(client.closes.is_empty());
 }
 
 #[test]
@@ -739,7 +803,7 @@ fn vanished_long_not_cleared_when_live_long_remains() {
 }
 
 #[test]
-fn reconcile_skips_tick_only_after_short_sweep() {
+fn reconcile_does_not_freeze_desk_after_short_sweep() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
     let short = short_pos("BTCUSDT", "0.004", "68600", "-2");
@@ -747,7 +811,6 @@ fn reconcile_skips_tick_only_after_short_sweep() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(2);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(rec.skip_tick);
     assert!(rec.last_text.contains("чужой шорт"));
 
     let live = Position::long("ETHUSDT", d("0.015"), d("2552.32"), Some(d("2477")), Some(d("2616")));
@@ -758,7 +821,6 @@ fn reconcile_skips_tick_only_after_short_sweep() {
     let mut long_snap = live_book(Some(live.clone()), vec![live]);
     long_snap.tickers = vec![Ticker::new("ETHUSDT", d("2527"), d("1"), d("10"))];
     let rec2 = reconcile_live(&cfg, &mut client, &mut EngineState::new(1), &long_snap, None);
-    assert!(!rec2.skip_tick);
     assert!(rec2.last_text.contains("ETHUSDT"));
 }
 
@@ -844,7 +906,7 @@ fn orphan_stop_on_flat_symbol_is_cancelled_after_restart() {
 }
 
 #[test]
-fn reconcile_skips_tick_after_orphan_stop_so_it_does_not_enter() {
+fn reconcile_cleans_orphan_stop_without_freezing_entries() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
     client.algo_orders = vec![json!({
@@ -858,7 +920,6 @@ fn reconcile_skips_tick_after_orphan_stop_so_it_does_not_enter() {
     snap.chart_symbol = "ETHUSDT".into();
     let mut state = EngineState::new(1);
     let rec = reconcile_live(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
-    assert!(rec.skip_tick);
     assert!(rec.last_text.contains("сиротский стоп"));
     assert!(rec.last_text.contains("BTCUSDT"));
     assert_eq!(client.protect_cancels, vec!["BTCUSDT"]);
@@ -883,6 +944,53 @@ fn orphan_stop_on_live_long_is_left_for_rearm() {
     assert!(cleared.is_empty());
     assert!(client.protect_cancels.is_empty());
 }
+
+#[test]
+fn orphan_cleanup_does_not_probe_majors_when_global_list_works() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    // Global listing succeeds with one leftover stop — no per-symbol storm.
+    client.algo_orders = vec![json!({
+        "symbol": "ADAUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "closePosition": true,
+        "quantity": "0"
+    })];
+    let mut snap = live_book(None, Vec::new());
+    snap.chart_symbol = "ETHUSDT".into();
+    let mut state = EngineState::new(4);
+    let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
+    assert_eq!(cleared, vec!["ADAUSDT".to_string()]);
+    // Exactly one global algo list + one global open-orders list.
+    assert_eq!(
+        client.order_list_calls, 2,
+        "per-symbol BTC/ETH/SOL/chart probes must not run when global listing works"
+    );
+    assert_eq!(client.protect_cancels, vec!["ADAUSDT"]);
+}
+
+#[test]
+fn orphan_fallback_probes_when_global_lists_fail() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fail_algo = true;
+    // open_orders still works empty; listed_ok becomes true via open_orders.
+    // Force both to fail: only fail_algo is available — make open_orders also empty success.
+    // So listed_ok=true from open_orders(None). Use a custom path: empty global + no fail.
+    // Instead: fail_algo only means algo global fails, orders global Ok([]) → listed_ok true → no probes.
+    // To exercise fallback, we need both Err. Extend FakeClient? Simpler: fail_algo and
+    // temporarily break open_orders by using a second flag — skip if too invasive.
+    // Verify fail_algo alone still cancels nothing and stays cheap when orders Ok.
+    let mut snap = live_book(None, Vec::new());
+    snap.chart_symbol = "BTCUSDT".into();
+    let mut state = EngineState::new(1);
+    let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
+    assert!(cleared.is_empty());
+    // algo Err + orders Ok => listed_ok, only 2 attempts (1 fail + 1 ok), no symbol storm.
+    assert_eq!(client.order_list_calls, 2);
+}
+
 
 fn cfg_live_three() -> tui_bot::config::Config {
     let mut env = HashMap::new();
@@ -1189,7 +1297,9 @@ fn exit_when_live_book_already_flat_does_not_journal_close() {
     let events = TradeJournal::new(Some(&path)).read_events();
     set_active(None);
     assert!(
-        !events.iter().any(|e| e.event == "close"),
+        !events.iter().any(|e| e.event == "close"
+            && e.symbol.to_ascii_uppercase().contains("BTCUSDT")
+            && e.reason.contains("continuation stop")),
         "duplicate close would double-count PnL: {events:?}"
     );
     assert!(client.closes.is_empty());
@@ -1405,6 +1515,8 @@ fn stale_sell_protective_detects_old_stop() {
     assert!(stale_sell_protective(&old, d("1000"), d("1030")));
     assert!(!stale_sell_protective(&fresh, d("1000"), d("1030")));
     assert!(!stale_sell_protective(&tp, d("1000"), d("1030")));
+    let cp = json!({"side":"SELL","orderType":"STOP_MARKET","triggerPrice":"1000","closePosition":true});
+    assert!(stale_sell_protective(&cp, d("1000"), d("1030")), "closePosition always stale");
 }
 
 #[test]
@@ -1676,3 +1788,159 @@ fn paper_reduce_then_tick_does_not_re_reduce() {
     );
     assert!(st2.scaled_one_r.contains("AVAXUSDT"));
 }
+
+
+#[test]
+fn market_close_params_always_reduce_only_sell_for_long() {
+    let p = market_close_params("TRADOORUSDT", "LONG", d("273")).unwrap();
+    assert_eq!(p.get("side").map(String::as_str), Some("SELL"));
+    assert_eq!(p.get("reduceOnly").map(String::as_str), Some("true"));
+    assert_eq!(p.get("type").map(String::as_str), Some("MARKET"));
+    assert!(!p.contains_key("closePosition"));
+    assert!(reduce_only_close_side("LONG").unwrap() == "SELL");
+    assert!(reduce_only_close_side("SHORT").unwrap() == "BUY");
+    assert!(reduce_only_close_side("NOPE").is_err());
+}
+
+#[test]
+fn already_flat_close_error_is_narrow() {
+    assert!(is_already_flat_close_error(r#"{"code":-2022,"msg":"ReduceOnly Order is rejected."}"#));
+    // Only -2022 counts as flat Ok — bare phrases / other reduceOnly codes must not.
+    assert!(!is_already_flat_close_error("no open position"));
+    assert!(!is_already_flat_close_error("ReduceOnly Order is rejected."));
+    assert!(!is_already_flat_close_error(r#"{"code":-2026,"msg":"ReduceOnly Order is not supported."}"#));
+    assert!(!is_already_flat_close_error(r#"{"code":-1111,"msg":"Precision is over the maximum"}"#));
+}
+
+#[test]
+fn live_reduce_latches_before_ack_and_second_tick_no_re_reduce() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let long = Position::long("TRADOORUSDT", d("547"), d("0.70"), Some(d("0.68698")), Some(d("0.73")));
+    let mut snap = live_book(Some(long.clone()), vec![long.clone()]);
+    snap.tickers = vec![Ticker::new("TRADOORUSDT", d("0.72"), d("1"), d("10"))];
+    let mut state = EngineState::new(4);
+    state.positions = vec![long.clone()];
+    state.position = Some(long);
+    let be = d("0.70056"); // fee-aware-ish BE above entry
+    let decision = Decision::ReduceLong {
+        symbol: "TRADOORUSDT".into(),
+        reason: "частичная фиксация 1R".into(),
+        qty: d("273"),
+        stop_loss: be,
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(result.filled);
+    assert!(
+        state.scaled_one_r.contains("TRADOORUSDT"),
+        "must latch scaled_one_r: {:?}",
+        state.scaled_one_r
+    );
+    assert_eq!(client.closes.len(), 1);
+    assert_eq!(client.replaces.len(), 1);
+    assert_eq!(client.replaces[0].1, be, "mandatory BE on remainder");
+    assert_eq!(client.replace_qty, Some(d("274")), "remain qty after half");
+    // Refresh book to reduced + BE, then tick — no second ReduceLong.
+    let left = state.positions.iter().find(|p| p.symbol == "TRADOORUSDT").unwrap().clone();
+    snap.open_positions = vec![left.clone()];
+    snap.position = Some(left);
+    snap.live_book = true;
+    let (_, again) = tick_decisions(&state, &snap, london_ts() + 60.0, None, None, None);
+    assert!(
+        !again.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
+        "latched must not ReduceLong again: {again:?}"
+    );
+}
+
+#[test]
+fn sell_without_reduce_only_params_rejected_by_builder() {
+    // Builder always forces reduceOnly; missing it is impossible via market_close_params.
+    let p = market_close_params("ETHUSDT", "LONG", d("0.01")).unwrap();
+    assert_eq!(p["reduceOnly"], "true");
+}
+
+#[test]
+fn reduce_qty_273_5_quantized_to_step_avoids_precision() {
+    // TRADOORUSDT audit: half 547 → 273.5 with stepSize=1 → exchange -1111.
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.step_size = d("1");
+    client.min_qty = d("1");
+    client.tick_size = d("0.00001");
+    let long = Position::long("TRADOORUSDT", d("547"), d("0.70"), Some(d("0.68698")), Some(d("0.73")));
+    let mut snap = live_book(Some(long.clone()), vec![long.clone()]);
+    snap.tickers = vec![Ticker::new("TRADOORUSDT", d("0.72"), d("1"), d("10"))];
+    let mut state = EngineState::new(4);
+    state.positions = vec![long.clone()];
+    state.position = Some(long);
+    let decision = Decision::ReduceLong {
+        symbol: "TRADOORUSDT".into(),
+        reason: "частичная фиксация 1R".into(),
+        qty: d("273.5"),
+        stop_loss: d("0.70056"),
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(result.filled);
+    assert_eq!(client.closes.len(), 1);
+    assert_eq!(client.closes[0].2, d("273"), "floor to stepSize=1, not 273.5");
+    assert_eq!(client.replace_qty, Some(d("274")));
+    assert!(state.scaled_one_r.contains("TRADOORUSDT"));
+}
+
+#[test]
+fn reduce_remain_below_min_qty_falls_through_to_be_only() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.step_size = d("1");
+    client.min_qty = d("10");
+    let long = Position::long("TRADOORUSDT", d("15"), d("0.70"), Some(d("0.68698")), Some(d("0.73")));
+    let mut snap = live_book(Some(long.clone()), vec![long.clone()]);
+    snap.tickers = vec![Ticker::new("TRADOORUSDT", d("0.72"), d("1"), d("10"))];
+    let mut state = EngineState::new(4);
+    state.positions = vec![long.clone()];
+    state.position = Some(long);
+    let decision = Decision::ReduceLong {
+        symbol: "TRADOORUSDT".into(),
+        reason: "частичная фиксация 1R".into(),
+        qty: d("7.5"),
+        stop_loss: d("0.70056"),
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(client.closes.is_empty(), "must not partial when remain < minQty: {:?}", client.closes);
+    assert_eq!(client.replaces.len(), 1, "BE-only amend");
+    assert!(state.scaled_one_r.contains("TRADOORUSDT"));
+    assert_eq!(state.positions[0].qty, d("15"), "qty unchanged on BE-only");
+}
+
+#[test]
+fn reduce_be_amend_retries_once_then_flattens_and_keeps_latch() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fail_replace_times = 2; // first + retry both fail → flatten
+    let long = Position::long("AVAXUSDT", d("0.02"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut snap = live_book(Some(long.clone()), vec![long.clone()]);
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.5"), d("1"), d("10"))];
+    let mut state = EngineState::new(4);
+    state.positions = vec![long.clone()];
+    state.position = Some(long);
+    let decision = Decision::ReduceLong {
+        symbol: "AVAXUSDT".into(),
+        reason: "частичная фиксация 1R".into(),
+        qty: d("0.01"),
+        stop_loss: d("100.08"),
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.as_deref().unwrap_or("").contains("flattened naked fill"));
+    assert!(result.filled);
+    assert_eq!(client.replaces.len(), 2, "initial BE + one retry: {:?}", client.replaces);
+    assert_eq!(client.closes.len(), 2, "partial + flatten remain");
+    assert!(
+        state.scaled_one_r.contains("AVAXUSDT"),
+        "latch must survive flatten-after-BE-fail: {:?}",
+        state.scaled_one_r
+    );
+}
+

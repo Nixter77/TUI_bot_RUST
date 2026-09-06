@@ -1,7 +1,7 @@
 //! Exchange helpers: sizing, protective-order shape, optional HTTP client.
 
 use crate::config::Config;
-use crate::errors::{is_retry_error, redact_secrets, RETRY_BACKOFF_SEC};
+use crate::errors::{is_retry_error, is_safe_order_symbol, redact_secrets, RETRY_BACKOFF_SEC};
 use crate::models::{bar_from_kline, Account, Bar, Position, Side, Ticker};
 use crate::money::{dec, quantize_to_step};
 use crate::profit::current_equity;
@@ -164,6 +164,85 @@ pub fn sized_long_protectives(qty: Decimal, stop_loss: Decimal, take_profit: Dec
     ])
 }
 
+
+/// Map position side to the reduce-only order side that closes it.
+/// LONG/BUY → SELL; SHORT/SELL → BUY. Unknown sides refuse (never naked SELL).
+pub fn reduce_only_close_side(position_side: &str) -> Result<&'static str, ExchangeError> {
+    match position_side.trim().to_ascii_uppercase().as_str() {
+        "LONG" | "BUY" => Ok("SELL"),
+        "SHORT" | "SELL" => Ok("BUY"),
+        other => Err(ExchangeError(format!(
+            "unknown position side for reduce-only close: {other}"
+        ))),
+    }
+}
+
+/// Build MARKET close params: always `reduceOnly=true`, never `closePosition`.
+pub fn market_close_params(
+    symbol: &str,
+    position_side: &str,
+    qty: Decimal,
+) -> Result<BTreeMap<String, String>, ExchangeError> {
+    if qty <= Decimal::ZERO {
+        return Err(ExchangeError("refusing non-positive close qty".into()));
+    }
+    let close_side = reduce_only_close_side(position_side)?;
+    let mut p = BTreeMap::new();
+    p.insert("symbol".into(), symbol.into());
+    p.insert("side".into(), close_side.into());
+    p.insert("type".into(), "MARKET".into());
+    p.insert("quantity".into(), qty.normalize().to_string());
+    p.insert("reduceOnly".into(), "true".into());
+    p.insert("newOrderRespType".into(), "RESULT".into());
+    Ok(p)
+}
+
+/// True when exchange rejected a reduce-only close because the book is already flat.
+pub fn is_already_flat_close_error(msg: &str) -> bool {
+    // Only -2022 (already flat). Do not swallow other reduceOnly / precision errors.
+    msg.to_ascii_lowercase().contains("-2022")
+}
+
+/// Drop naked `closePosition` SELL protectives (they open leftover shorts when flat).
+pub fn cancel_close_position_sells(client: &mut dyn LiveClient, symbol: &str) {
+    if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
+        for row in rows {
+            let side = row
+                .get("side")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if side != "SELL" {
+                continue;
+            }
+            if !flag_true(row.get("closePosition").unwrap_or(&Value::Null)) {
+                continue;
+            }
+            if let Some(id) = algo_id_of(&row) {
+                let _ = client.cancel_algo_order(symbol, &id);
+            }
+        }
+    }
+    if let Ok(rows) = client.open_orders(Some(symbol)) {
+        for row in rows {
+            let side = row
+                .get("side")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if side != "SELL" {
+                continue;
+            }
+            if !flag_true(row.get("closePosition").unwrap_or(&Value::Null)) {
+                continue;
+            }
+            if let Some(id) = order_id_of(&row) {
+                let _ = client.cancel_plain_order(symbol, id);
+            }
+        }
+    }
+}
+
 fn flag_true(value: &Value) -> bool {
     match value {
         Value::Bool(true) => true,
@@ -285,6 +364,10 @@ pub fn sell_protective_kind(row: &Value) -> Option<ProtectiveKind> {
 
 /// True when this open SELL stop/TP is not the live pair (old trail left behind).
 pub fn stale_sell_protective(row: &Value, stop_loss: Decimal, take_profit: Decimal) -> bool {
+    // Always drop naked closePosition SELLs — they open leftover shorts when flat.
+    if flag_true(row.get("closePosition").unwrap_or(&Value::Null)) {
+        return true;
+    }
     match sell_protective_kind(row) {
         Some(ProtectiveKind::Stop) => protective_trigger_price(row) != Some(stop_loss),
         Some(ProtectiveKind::TakeProfit) => protective_trigger_price(row) != Some(take_profit),
@@ -515,8 +598,14 @@ pub fn replace_stop_place_first(
     take_profit: Decimal,
     qty: Option<Decimal>,
 ) -> Result<(), ExchangeError> {
-    client.place_tp_sl(symbol, take_profit, stop_loss, qty)?;
-    prune_stale_protectives(client, symbol, stop_loss, take_profit);
+    // Prune must compare against the same quantized triggers place_tp_sl sends.
+    let filters = client.filters_for(symbol)?;
+    let tp = quantize_to_step(take_profit, filters.tick_size, true)
+        .map_err(|e| ExchangeError(e.to_string()))?;
+    let sl = quantize_to_step(stop_loss, filters.tick_size, false)
+        .map_err(|e| ExchangeError(e.to_string()))?;
+    client.place_tp_sl(symbol, tp, sl, qty)?;
+    prune_stale_protectives(client, symbol, sl, tp);
     Ok(())
 }
 
@@ -696,7 +785,7 @@ impl BinanceFutures {
             info_cache: RefCell::new(None),
             filter_cache: RefCell::new(HashMap::new()),
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs_f64(cfg.http_timeout.max(0.1)))
+                .timeout(Duration::from_secs_f64(cfg.http_timeout.max(1.0)))
                 .build(),
         }
     }
@@ -754,6 +843,12 @@ impl BinanceFutures {
     }
 
     fn signed(&self, params: &BTreeMap<String, String>) -> Result<String, ExchangeError> {
+        if let Some(symbol) = params.get("symbol") {
+            let upper = symbol.trim().to_ascii_uppercase();
+            if !is_safe_order_symbol(&upper) {
+                return Err(ExchangeError("refusing malformed symbol".into()));
+            }
+        }
         let secret = self
             .api_secret
             .as_deref()
@@ -835,7 +930,10 @@ impl BinanceFutures {
             .set("User-Agent", "tui-bot-rust")
             .call()
             .map_err(|e| Self::map_ureq(e, path))
-            .and_then(|resp| resp.into_json().map_err(|e| ExchangeError(e.to_string())));
+            .and_then(|resp| {
+                resp.into_json()
+                    .map_err(|e| ExchangeError(redact_secrets(&e.to_string())))
+            });
         match result {
             // −1021 is rejected before matching. Retry after clock sync.
             // Timeouts after a POST fill are NOT retried; enter_live re-reads positionRisk.
@@ -871,24 +969,22 @@ impl FlattenClient for BinanceFutures {
     }
 
     fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal) -> Result<(), ExchangeError> {
-        let close_side = if side.eq_ignore_ascii_case("LONG") {
-            "SELL"
-        } else {
-            "BUY"
-        };
-        let mut p = BTreeMap::new();
-        p.insert("symbol".into(), symbol.into());
-        p.insert("side".into(), close_side.into());
-        p.insert("type".into(), "MARKET".into());
-        p.insert("quantity".into(), qty.normalize().to_string());
-        p.insert("reduceOnly".into(), "true".into());
-        p.insert("newOrderRespType".into(), "RESULT".into());
+        if qty <= Decimal::ZERO {
+            return Err(ExchangeError("refusing non-positive close qty".into()));
+        }
+        // TRADOORUSDT 2026-09-06: half-lot with coarse step → -1111 Precision spam.
+        let filters = self.filters_for(symbol)?;
+        let qty = quantize_to_step(qty, filters.step_size, false)
+            .map_err(|e| ExchangeError(e.to_string()))?;
+        if qty <= Decimal::ZERO {
+            return Err(ExchangeError("close qty invalid after step quantize".into()));
+        }
+        let p = market_close_params(symbol, side, qty)?;
         match self.signed_request("POST", "/fapi/v1/order", &p) {
             Ok(_) => Ok(()),
             Err(exc) => {
-                let t = exc.0.to_ascii_lowercase();
-                // Already flat: success. Never retry as a naked order (opens a leftover short).
-                if t.contains("-2022") || t.contains("reduceonly") {
+                // Already flat only. Never swallow other reduceOnly / precision errors.
+                if is_already_flat_close_error(&exc.0) {
                     Ok(())
                 } else {
                     Err(exc)
@@ -993,7 +1089,23 @@ impl LiveClient for BinanceFutures {
                 Ok(_) => {}
                 Err(exc) => {
                     let t = exc.0.to_ascii_lowercase();
+                    // -4130 often means a closePosition SELL is blocking. Drop it and retry once.
+                    // Never treat -4130 as armed success.
                     if t.contains("-4130") || t.contains("closeposition in the direction") {
+                        cancel_close_position_sells(self, symbol);
+                        match self.signed_request("POST", "/fapi/v1/algoOrder", &p) {
+                            Ok(_) => {}
+                            Err(retry) => {
+                                let rt = retry.0.to_ascii_lowercase();
+                                if rt.contains("-4130") || rt.contains("closeposition in the direction") {
+                                    return Err(ExchangeError(format!(
+                                        "protective blocked by existing closePosition (-4130): {}",
+                                        retry.0
+                                    )));
+                                }
+                                return Err(retry);
+                            }
+                        }
                         continue;
                     }
                     if t.contains("-2026") || t.contains("reduceonly order type") {
@@ -1010,9 +1122,14 @@ impl LiveClient for BinanceFutures {
                             Err(e2) => {
                                 let t2 = e2.0.to_ascii_lowercase();
                                 if t2.contains("-4130") || t2.contains("closeposition in the direction") {
-                                    continue;
+                                    cancel_close_position_sells(self, symbol);
+                                    match self.signed_request("POST", "/fapi/v1/order", &q) {
+                                        Ok(_) => {}
+                                        Err(e3) => return Err(e3),
+                                    }
+                                } else {
+                                    return Err(e2);
                                 }
-                                return Err(e2);
                             }
                         }
                     } else {

@@ -1,6 +1,7 @@
 //! Round-trip taker fee is deducted from PnL; TP is placed net of both sides.
 
 use rust_decimal::Decimal;
+use std::fs;
 use std::thread;
 use tui_bot::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC};
 use tui_bot::journal::{
@@ -13,6 +14,9 @@ use tui_bot::trail::{take_profit_price, take_profit_price_net};
 fn d(s: &str) -> Decimal {
     s.parse().unwrap()
 }
+
+/// Process-global journal ACTIVE path is shared across tests in this binary.
+static JOURNAL_ACTIVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn long_pnl_subtracts_taker_both_sides() {
@@ -309,12 +313,14 @@ fn parallel_appends_do_not_tear_jsonl_lines() {
 
 #[test]
 fn unmatched_without_active_journal_is_empty() {
+    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     set_active(None);
     assert!(unmatched_open_positions().is_empty());
 }
 
 #[test]
 fn unmatched_reads_active_path_not_default() {
+    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trades.jsonl");
     let j = TradeJournal::new(Some(&path));
@@ -327,6 +333,7 @@ fn unmatched_reads_active_path_not_default() {
         false,
         Some(d("16.7139")),
         Some(d("17.751")),
+        None,
     );
     set_active(Some(path));
     let open = unmatched_open_positions();
@@ -334,4 +341,80 @@ fn unmatched_reads_active_path_not_default() {
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].symbol, "VVVUSDT");
     assert_eq!(open[0].stop_loss, Some(d("16.7139")));
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trades.jsonl");
+    let j = TradeJournal::new(Some(&path));
+    j.append(&TradeEvent {
+        event: "open".into(),
+        symbol: "BTCUSDT".into(),
+        ..TradeEvent::default()
+    });
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "journal mode {mode:#o}");
+}
+
+#[test]
+fn trade_event_parses_phase1_r_fields() {
+    let line = r#"{"ts":"2026-09-06T01:00:00Z","event":"close","strategy_id":4,"symbol":"AAAUSDT","qty":"1","price":"102","reason":"test","pnl":"1.5","fee":"0.08","stop_loss":"98","take_profit":"104","live":true,"initial_risk_usdt":"2","final_r":"0.75","mfe_r":"1.2","mae_r":"0.3","mfe_usdt":"2.4","mae_usdt":"0.6","hold_sec":120,"time_to_mfe_sec":40,"time_to_1r_sec":55,"scaled_at_1r":true,"ret_24h":"5.2"}"#;
+    let ev: TradeEvent = serde_json::from_str(line).unwrap();
+    assert_eq!(ev.final_r.as_deref(), Some("0.75"));
+    assert_eq!(ev.mfe_r.as_deref(), Some("1.2"));
+    assert_eq!(ev.mae_usdt.as_deref(), Some("0.6"));
+    assert_eq!(ev.hold_sec, Some(120));
+    assert_eq!(ev.scaled_at_1r, Some(true));
+    assert_eq!(ev.ret_24h.as_deref(), Some("5.2"));
+}
+
+#[test]
+fn trade_event_old_line_still_parses() {
+    let line = r#"{"ts":"2026-08-24T00:24:19Z","event":"close","strategy_id":1,"symbol":"MORPHOUSDT","qty":"13.8","price":"2.844","reason":"биржа закрыла лонг","pnl":"-0.74","fee":"0.03","stop_loss":null,"take_profit":null,"live":true,"leverage":null,"notional":null,"code":null}"#;
+    let ev: TradeEvent = serde_json::from_str(line).unwrap();
+    assert!(ev.final_r.is_none());
+    assert!(ev.mfe_r.is_none());
+    assert_eq!(ev.symbol, "MORPHOUSDT");
+}
+
+#[test]
+fn open_meta_r_math_and_persist_roundtrip() {
+    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    use tui_bot::openmeta::{
+        apply_mark_excursion, initial_risk_usdt, metrics_for_close, on_open, r_multiple, set_active_path,
+        update_mark,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let meta_path = dir.path().join("open_meta.json");
+    set_active_path(Some(meta_path.clone()));
+    let risk = initial_risk_usdt(d("100"), d("98"), d("2")).unwrap();
+    assert_eq!(risk, d("4"));
+    assert_eq!(r_multiple(d("6"), risk).unwrap(), d("1.5"));
+    on_open(4, "TESTUSDT", d("100"), d("98"), d("2"), 1_000.0, Some("bull".into()));
+    update_mark("TESTUSDT", d("103"), 1_010.0);
+    let m = metrics_for_close("TESTUSDT", Some(d("5")), 1_100.0, false);
+    assert_eq!(m.initial_risk_usdt.as_deref(), Some("4"));
+    assert_eq!(m.final_r.as_deref(), Some("1.25"));
+    assert!(m.mfe_usdt.is_some());
+    assert_eq!(m.hold_sec, Some(100));
+    assert_eq!(m.btc_regime.as_deref(), Some("bull"));
+    // full close removed meta
+    assert!(tui_bot::openmeta::get("TESTUSDT").is_none());
+    let (mfe, mae, _, _) = apply_mark_excursion(
+        d("0"),
+        d("0"),
+        None,
+        None,
+        d("100"),
+        d("99"),
+        d("2"),
+        d("4"),
+        5.0,
+    );
+    assert_eq!(mfe, d("0"));
+    assert_eq!(mae, d("2")); // (100-99)*2
+    set_active_path(None);
 }

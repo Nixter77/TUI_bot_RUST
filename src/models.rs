@@ -393,6 +393,26 @@ impl EngineState {
     pub fn push_action(&mut self, at: f64, text: impl Into<String>) {
         push_recent(&mut self.recent_actions, at, text);
     }
+
+    /// Switch strategy lens without sharing S4↔S5 scan/cooldown/latch state.
+    /// Exchange positions stay (account-level); strategy-local cadence resets.
+    pub fn adopt_strategy(&mut self, strategy_id: i32) {
+        if self.strategy_id == strategy_id {
+            return;
+        }
+        self.strategy_id = strategy_id;
+        self.last_scan_ts = 0.0;
+        self.cooldowns.clear();
+        self.cooldown_until = 0.0;
+        self.recent_leaders.clear();
+        self.scaled_one_r.clear();
+        self.inflight_symbols.clear();
+        self.entry_inflight = false;
+        self.sized_stops.clear();
+        self.rearm_miss_since.clear();
+        self.rearm_fail_count.clear();
+        // Keep day risk / skip_symbols / live positions — those are account-scoped.
+    }
 }
 
 
