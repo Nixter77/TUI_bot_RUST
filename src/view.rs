@@ -1,7 +1,9 @@
 //! Assemble the TUI ViewModel from config + engine + snapshot.
 
 use crate::config::Config;
-use crate::engine::{continuation_interval, continuation_trade_params, is_continuation};
+use crate::engine::{
+    continuation_interval, continuation_session_knobs, continuation_trade_params, is_continuation,
+};
 use crate::errorlog::guess_source;
 use crate::errors::is_retry_error;
 use crate::models::{coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side};
@@ -123,6 +125,11 @@ pub fn build_view(
     let shown = view_positions_with(snapshot, &state.positions);
     let tail = unmanaged_positions(&shown, &state.positions);
     let day_pnl = state.day_start_equity.map(|start| acc.wallet_balance + acc.unrealized_pnl - start);
+    let (cont_always, cont_windows) = continuation_session_knobs(
+        state.strategy_id,
+        cfg.s4_always_enter,
+        &cfg.s4_entry_windows,
+    );
     ViewModel {
         strategy_id: state.strategy_id,
         wallet_balance: acc.wallet_balance,
@@ -157,12 +164,12 @@ pub fn build_view(
                 .unwrap_or(0.0),
         ),
         entry_windows: if is_continuation(state.strategy_id) {
-            cfg.s4_entry_windows.clone()
+            cont_windows
         } else {
             cfg.entry_windows.clone()
         },
         always_enter: if is_continuation(state.strategy_id) {
-            cfg.s4_always_enter
+            cont_always
         } else {
             cfg.always_enter
         },

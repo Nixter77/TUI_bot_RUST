@@ -12,6 +12,7 @@ use crate::momentum::mark_for;
 use crate::profit::current_equity;
 use crate::ranking::iter_liquid_majors;
 use crate::scalp::{scalp_decision, ScalpParams};
+use crate::sessions::{HourWindow, DEFAULT_ENTRY_WINDOWS};
 use crate::trend::{trend_decision, TrendParams};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -61,6 +62,25 @@ pub fn continuation_slot_cap(strategy_id: i32, s4: i32, s5: i32) -> i32 {
         s5
     } else {
         s4
+    }
+}
+
+/// S5 keeps UTC session hours even when S4 soaks 24/7 (`STRATEGY4_ALWAYS_ENTER`).
+/// Empty S4 windows (cleared on 24/7) restore the default Asia/London/NY bands.
+pub fn continuation_session_knobs(
+    strategy_id: i32,
+    s4_always_enter: bool,
+    s4_entry_windows: &[HourWindow],
+) -> (bool, Vec<HourWindow>) {
+    if strategy_id == 5 {
+        let windows = if s4_entry_windows.is_empty() {
+            DEFAULT_ENTRY_WINDOWS.to_vec()
+        } else {
+            s4_entry_windows.to_vec()
+        };
+        (false, windows)
+    } else {
+        (s4_always_enter, s4_entry_windows.to_vec())
     }
 }
 
@@ -353,8 +373,10 @@ fn continuation_params(strategy_id: i32, momentum: Option<&MomentumParams>) -> C
     if let Some(m) = momentum {
         // Never shrink below 3; STRATEGY4/5_MAX_POSITIONS (default 5) sets the working cap.
         p.max_positions = continuation_slot_cap(strategy_id, m.s4_max_positions, m.s5_max_positions).max(3);
-        p.always_enter = m.s4_always_enter;
-        p.entry_windows = m.s4_entry_windows.clone();
+        let (always, windows) =
+            continuation_session_knobs(strategy_id, m.s4_always_enter, &m.s4_entry_windows);
+        p.always_enter = always;
+        p.entry_windows = windows;
     }
     p
 }
@@ -479,7 +501,7 @@ pub fn tick_decisions(
             set_cooldown(
                 &mut cooldowns,
                 symbol,
-                crate::journal::symbol_cooldown_until(now, won, pause_sec),
+                crate::journal::symbol_cooldown_until_for(state.strategy_id, now, won, pause_sec),
             );
             if !won {
                 let until = crate::sessions::pause_until_after_loss(now, &loss_windows, pause_sec);

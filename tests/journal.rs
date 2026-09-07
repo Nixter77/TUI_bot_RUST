@@ -3,11 +3,11 @@
 use rust_decimal::Decimal;
 use std::fs;
 use std::thread;
-use tui_bot::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC};
+use tui_bot::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC, S5_LOSS_SYMBOL_COOLDOWN_SEC};
 use tui_bot::journal::{
-    cooldowns_from_events, desk_cooldown_from_events, journal_symbol, long_pnl, set_active,
-    symbol_pause_sec, taker_fee, unmatched_open_positions, unmatched_open_positions_from, TradeEvent,
-    TradeJournal,
+    cooldowns_from_events, cooldowns_from_events_for, desk_cooldown_from_events, journal_symbol,
+    long_close_was_win, long_pnl, set_active, symbol_pause_sec, symbol_pause_sec_for, taker_fee,
+    unmatched_open_positions, unmatched_open_positions_from, TradeEvent, TradeJournal,
 };
 use tui_bot::trail::{take_profit_price, take_profit_price_net};
 
@@ -263,6 +263,43 @@ fn losing_close_keeps_symbol_off_book_for_twelve_hours() {
     assert_eq!(LOSS_SYMBOL_COOLDOWN_SEC, 43_200.0);
     assert_eq!(symbol_pause_sec(false, COOLDOWN_SEC), LOSS_SYMBOL_COOLDOWN_SEC);
     assert_eq!(symbol_pause_sec(true, COOLDOWN_SEC), COOLDOWN_SEC);
+}
+
+#[test]
+fn scratch_above_entry_is_not_a_win_after_fees() {
+    assert!(!long_close_was_win(d("100"), d("100.05"), None));
+    assert!(long_close_was_win(d("100"), d("100.20"), None));
+    assert!(long_close_was_win(d("100"), d("99"), Some(d("99"))));
+}
+
+#[test]
+fn s5_losing_close_cools_twenty_four_hours() {
+    let events = vec![TradeEvent {
+        ts: "2026-09-06T21:00:33Z".into(),
+        event: "close".into(),
+        strategy_id: 5,
+        symbol: "ZECUSDT".into(),
+        pnl: Some("-0.207".into()),
+        ..Default::default()
+    }];
+    assert_eq!(S5_LOSS_SYMBOL_COOLDOWN_SEC, 86_400.0);
+    assert_eq!(
+        symbol_pause_sec_for(5, false, COOLDOWN_SEC),
+        S5_LOSS_SYMBOL_COOLDOWN_SEC
+    );
+    assert_eq!(symbol_pause_sec_for(4, false, COOLDOWN_SEC), LOSS_SYMBOL_COOLDOWN_SEC);
+    let t0 = tui_bot::sessions::make_utc_ts(2026, 9, 6, 21, 0, 33);
+    let plus_13h = t0 + 13.0 * 3600.0;
+    let s5 = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(5));
+    assert!(
+        s5.get("ZECUSDT").copied().unwrap_or(0.0) > plus_13h,
+        "S5 loser still cooling 13h later: {s5:?}"
+    );
+    let s4 = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(4));
+    assert!(s4.is_empty(), "S4 must not inherit S5 cooldown: {s4:?}");
+    let plus_25h = t0 + 25.0 * 3600.0;
+    let later = cooldowns_from_events_for(&events, plus_25h, COOLDOWN_SEC, Some(5));
+    assert!(!later.contains_key("ZECUSDT"), "S5 loser free after 24h+: {later:?}");
 }
 
 #[test]

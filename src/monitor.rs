@@ -2,7 +2,10 @@
 
 use crate::config::{Config, TradeInterval};
 use crate::continuation::{liquid_universe, s4_setup_skip, ContinuationParams};
-use crate::engine::{continuation_interval, continuation_stop_band, continuation_trade_params, is_continuation};
+use crate::engine::{
+    continuation_interval, continuation_session_knobs, continuation_stop_band, continuation_trade_params,
+    is_continuation,
+};
 use crate::dayrisk::utc_day_key;
 use crate::engine::strategy_title;
 use crate::indicators::{last_ema, vwap};
@@ -176,7 +179,9 @@ pub fn build_monitor(
 
 fn session_knobs(cfg: &Config, strategy_id: i32) -> (Vec<HourWindow>, bool) {
     if is_continuation(strategy_id) {
-        (cfg.s4_entry_windows.clone(), cfg.s4_always_enter)
+        let (always, windows) =
+            continuation_session_knobs(strategy_id, cfg.s4_always_enter, &cfg.s4_entry_windows);
+        (windows, always)
     } else if strategy_id == 1 {
         (cfg.entry_windows.clone(), cfg.always_enter)
     } else if strategy_id == 2 {
@@ -248,8 +253,10 @@ fn s4_params(cfg: &Config, strategy_id: i32) -> ContinuationParams {
         cfg.s4_max_positions,
         cfg.s5_max_positions,
     );
-    p.always_enter = cfg.s4_always_enter;
-    p.entry_windows = cfg.s4_entry_windows.clone();
+    let (always, windows) =
+        continuation_session_knobs(strategy_id, cfg.s4_always_enter, &cfg.s4_entry_windows);
+    p.always_enter = always;
+    p.entry_windows = windows;
     p
 }
 

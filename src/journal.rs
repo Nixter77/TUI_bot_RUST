@@ -1,6 +1,6 @@
 //! Append-only trade journal. JSONL under .state/; never raises into the TUI.
 
-use crate::errors::{COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC};
+use crate::errors::{loss_symbol_cooldown_sec, COOLDOWN_SEC};
 use crate::models::{EngineState, Position};
 use crate::money::{dec, fmt_fixed, long_pnl as money_long_pnl, taker_fee as money_taker_fee};
 
@@ -101,14 +101,19 @@ fn journal_long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal) -> (Decim
     money_long_pnl(entry, exit_price, qty, money_taker_fee())
 }
 
-/// TP fill or price above entry. Equal-to-entry / missing mark = not a win (fail-closed).
+/// TP fill or net-green after round-trip taker. Scratch above entry that fees
+/// flip red is a loss (live S5 1R flatten then same-symbol reprint).
 pub fn long_close_was_win(entry: Decimal, exit_px: Decimal, take_profit: Option<Decimal>) -> bool {
     if let Some(tp) = take_profit {
         if exit_px >= tp {
             return true;
         }
     }
-    entry > Decimal::ZERO && exit_px > entry
+    if entry <= Decimal::ZERO || exit_px <= entry {
+        return false;
+    }
+    let (pnl, _) = journal_long_pnl(entry, exit_px, Decimal::ONE);
+    pnl > Decimal::ZERO
 }
 
 pub struct TradeJournal {
@@ -447,20 +452,28 @@ pub fn event_unix(ts: &str) -> Option<f64> {
 }
 
 /// Pause for this symbol after a close. Losses sit out 12h so a loser
-/// skips the next UTC session window; wins keep the base pause.
+/// skips the next UTC session window; wins keep the base pause. S5 is 24h.
 pub fn symbol_pause_sec(won: bool, pause_sec: f64) -> f64 {
+    symbol_pause_sec_for(0, won, pause_sec)
+}
+
+pub fn symbol_pause_sec_for(strategy_id: i32, won: bool, pause_sec: f64) -> f64 {
     if pause_sec <= 0.0 {
         return 0.0;
     }
     if won {
         pause_sec
     } else {
-        pause_sec.max(LOSS_SYMBOL_COOLDOWN_SEC)
+        pause_sec.max(loss_symbol_cooldown_sec(strategy_id))
     }
 }
 
 pub fn symbol_cooldown_until(now: f64, won: bool, pause_sec: f64) -> f64 {
-    now + symbol_pause_sec(won, pause_sec)
+    symbol_cooldown_until_for(0, now, won, pause_sec)
+}
+
+pub fn symbol_cooldown_until_for(strategy_id: i32, now: f64, won: bool, pause_sec: f64) -> f64 {
+    now + symbol_pause_sec_for(strategy_id, won, pause_sec)
 }
 
 /// After a close/flatten, keep the name off the buy list.
@@ -496,7 +509,7 @@ pub fn cooldowns_from_events_for(
         let wait = if ev.event == "flatten" {
             pause_sec
         } else {
-            symbol_pause_sec(won, pause_sec)
+            symbol_pause_sec_for(strategy_id.unwrap_or(0), won, pause_sec)
         };
         let until = ts + wait;
         if until <= now {

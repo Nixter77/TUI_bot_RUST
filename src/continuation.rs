@@ -22,6 +22,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
+const S5_PRIVACY_SKIP: &str = "кластер privacy — не беру";
+
+/// Live S5 2026-09-06: ZEC+DASH+ZEN dumped as one book. Hour1 only — S4 soak unchanged.
+fn s5_skip_symbol(symbol: &str) -> bool {
+    let s = symbol.trim().to_ascii_uppercase();
+    let base = s.strip_suffix("USDT").unwrap_or(&s);
+    matches!(base, "ZEC" | "DASH" | "ZEN" | "XMR")
+}
 /// Book kline fetch and new-entry scan share this cadence.
 pub const SCAN_SEC: f64 = 60.0;
 
@@ -354,8 +362,11 @@ pub fn manage_continuation_long(
         }
         if hit_one_r {
             let be = pos.entry_price * (Decimal::ONE + round_trip_taker_pct());
-            // Prefer scale-out half + BE first; next tick banks 1.5R on remainder.
-            if !already_scaled {
+            // Scale-out / BE / flatten only while mark is still ≥1R. A 1h wick,
+            // stale uPnL, or restore high is not "1R был" — live S5 ZEC/ZEN
+            // flattened red and DASH scaled at MFE 0.72R (2026-09-06).
+            let in_hand = one_r_in_hand(pos, mark);
+            if in_hand && !already_scaled {
                 let reduce_qty = (pos.qty / Decimal::TWO).normalize();
                 if reduce_qty > Decimal::ZERO
                     && reduce_qty < pos.qty
@@ -371,7 +382,7 @@ pub fn manage_continuation_long(
                     };
                 }
             }
-            if risk > Decimal::ZERO {
+            if in_hand && risk > Decimal::ZERO {
                 let target_15 = pos.entry_price + Decimal::new(15, 1) * risk;
                 let one_r = pos.entry_price + risk;
                 if mark >= target_15 || (peak >= target_15 && mark >= one_r) {
@@ -381,18 +392,13 @@ pub fn manage_continuation_long(
                     };
                 }
             }
-            if be > sl && be < mark && long_stop_is_valid(be, mark) {
+            if in_hand && be > sl && be < mark && long_stop_is_valid(be, mark) {
                 return Decision::AmendStop {
                     stop_loss: be,
                     reason: "безубыток на 1R".into(),
                     symbol: pos.symbol.clone(),
                 };
             }
-            // Flatten only when 1R is still in hand (mark or uPnL). A wick that
-            // already gave back is not "1R был" — S5 1h history used to trip this
-            // and market-close red slots (ZEC/ZEN 2026-09-06).
-            let in_hand = (risk > Decimal::ZERO && mark >= pos.entry_price + risk)
-                || (pos.qty > Decimal::ZERO && pos.unrealized_pnl >= pos.qty * risk);
             if in_hand {
                 return Decision::ExitPosition {
                     reason: "1R был — фиксирую".into(),
@@ -400,6 +406,18 @@ pub fn manage_continuation_long(
                 };
             }
             return Decision::hold("continuation hold / 1R wick отдан");
+        }
+        // Hour1/S5: BE at 0.5R in-hand so a 0.5–0.8R peak does not dump 1R
+        // (live DASH MFE 0.72R → «откат с пика»). S4 soak stays 1R BE.
+        if p.interval == TradeInterval::Hour1 && half_r_in_hand(pos, mark) {
+            let be = pos.entry_price * (Decimal::ONE + round_trip_taker_pct());
+            if be > sl && be < mark && long_stop_is_valid(be, mark) {
+                return Decision::AmendStop {
+                    stop_loss: be,
+                    reason: "безубыток на 0.5R".into(),
+                    symbol: pos.symbol.clone(),
+                };
+            }
         }
         return Decision::hold("continuation hold / жду 1R");
     }
@@ -436,12 +454,16 @@ pub fn manage_continuation_long(
         }
     }
 
-    let Some(last) = signal_bar(snapshot, &pos.symbol) else {
+    // Hour1: last *closed* 1h low only. last_bars is the forming candle and
+    // ratchets every poll (live S5 DASH: 16× trail mark 0.8% / 32 min).
+    let Some(last) = (if p.interval == TradeInterval::Hour1 {
+        last_closed_bar(snapshot.bars_for(&pos.symbol))
+    } else {
+        signal_bar(snapshot, &pos.symbol)
+    }) else {
         return Decision::hold("continuation hold / trail not raised");
     };
     let mut candidate = last.low;
-    // 0.8% mark trail is a 15m leftover. On 1h it sits inside the candle and
-    // ratchets every poll (live S5 DASH: 16 amends / 32 min).
     if p.interval != TradeInterval::Hour1 && p.trail_pct > Decimal::ZERO {
         if let Ok(pct_sl) = candidate_stop(mark, "LONG", p.trail_pct) {
             if pct_sl > candidate {
@@ -547,6 +569,10 @@ fn time_stop_reason(pos: &Position, now: f64, p: &ContinuationParams) -> Option<
             return Some(format!("тайм-стоп {hours}ч"));
         }
     }
+    // Hour1 hold is 16h; flattening at session end would cut S5 after 2–3h.
+    if p.interval == TradeInterval::Hour1 {
+        return None;
+    }
     if !p.always_enter
         && !p.entry_windows.is_empty()
         && !in_entry_window(now, Some(&p.entry_windows), false)
@@ -568,6 +594,28 @@ fn one_r_price(pos: &Position) -> Option<Decimal> {
     } else {
         Some(pos.entry_price + risk)
     }
+}
+
+/// 1R is in hand only on the current mark — not a wick, not stale uPnL.
+fn one_r_in_hand(pos: &Position, mark: Decimal) -> bool {
+    one_r_price(pos).is_some_and(|target| mark >= target)
+}
+
+fn half_r_price(pos: &Position) -> Option<Decimal> {
+    let sl = pos.stop_loss?;
+    if sl >= pos.entry_price || pos.entry_price <= Decimal::ZERO {
+        return None;
+    }
+    let risk = pos.entry_price - sl;
+    if risk <= Decimal::ZERO {
+        None
+    } else {
+        Some(pos.entry_price + Decimal::new(5, 1) * risk)
+    }
+}
+
+fn half_r_in_hand(pos: &Position, mark: Decimal) -> bool {
+    half_r_price(pos).is_some_and(|target| mark >= target)
 }
 
 fn reached_one_r(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) -> bool {
@@ -753,6 +801,9 @@ fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &Continuatio
     if is_major_symbol(&ticker.symbol) {
         return Decision::hold("мажор — не беру");
     }
+    if p.interval == TradeInterval::Hour1 && s5_skip_symbol(&ticker.symbol) {
+        return Decision::hold(S5_PRIVACY_SKIP);
+    }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Decision::hold("мелочь — не гоняю");
     }
@@ -928,6 +979,9 @@ fn skip_new_long(
     }
     if is_major_symbol(&ticker.symbol) {
         return Some("мажор — не беру".into());
+    }
+    if p.interval == TradeInterval::Hour1 && s5_skip_symbol(&ticker.symbol) {
+        return Some(S5_PRIVACY_SKIP.into());
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Some("мелочь — не гоняю".into());

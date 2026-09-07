@@ -182,7 +182,7 @@ fn desk_pause_after_loss(cfg: &Config, state: &mut EngineState, now: f64) {
 }
 
 fn cool_symbol(state: &mut EngineState, symbol: &str, now: f64, won: bool) {
-    let until = journal::symbol_cooldown_until(now, won, COOLDOWN_SEC);
+    let until = journal::symbol_cooldown_until_for(state.strategy_id, now, won, COOLDOWN_SEC);
     if until <= now {
         return;
     }
