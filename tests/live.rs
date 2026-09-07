@@ -352,6 +352,18 @@ fn daily_halt_refuses_buy() {
 }
 
 #[test]
+fn s5_daily_halt_refuses_buy() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let mut state = EngineState::new(5);
+    state.daily_halt = true;
+    let result = apply_live(&cfg, &mut client, &snap(None), &enter(), Some(&state));
+    assert!(!result.filled);
+    assert!(result.error.is_none());
+    assert_eq!(client.buys, 0);
+}
+
+#[test]
 fn skip_enter_when_already_in_position() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
@@ -943,6 +955,39 @@ fn orphan_stop_on_live_long_is_left_for_rearm() {
     let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
     assert!(cleared.is_empty());
     assert!(client.protect_cancels.is_empty());
+}
+
+#[test]
+fn hour1_flatten_does_not_leave_orphan_sell() {
+    // Bulk cancel_protectives does not clear FakeClient algos — leftover SELL must still go.
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.algo_orders = vec![json!({
+        "symbol": "AVAXUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "quantity": "0.02",
+        "closePosition": false,
+        "algoId": "orphan1"
+    })];
+    let long = Position::long("AVAXUSDT", d("0.02"), d("100"), Some(d("97")), Some(d("106")));
+    let mut snap = live_book(Some(long.clone()), vec![long.clone()]);
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("101"), d("1"), d("10"))];
+    let mut state = EngineState::new(5);
+    state.positions = vec![long.clone()];
+    state.position = Some(long);
+    let decision = Decision::ExitPosition {
+        symbol: "AVAXUSDT".into(),
+        reason: "тайм-стоп 12ч".into(),
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(result.filled);
+    assert!(
+        client.algo_orders.is_empty(),
+        "Hour1 flatten must not leave orphan SELL: {:?}",
+        client.algo_orders
+    );
 }
 
 #[test]
@@ -1615,6 +1660,35 @@ fn reduce_long_full_qty_falls_through_to_be_amend_and_latches() {
     assert_eq!(client.replaces.len(), 1);
     assert_eq!(client.replaces[0].1, d("100.08"));
     assert_eq!(state.positions[0].qty, d("0.02"), "qty unchanged on BE-only path");
+    assert!(state.scaled_one_r.contains("AVAXUSDT"));
+}
+
+#[test]
+fn reduce_live_sizes_to_live_long_not_stale_state() {
+    // Stale state 0.16 vs live 0.06: reduce 0.08 must not sell more than the live long.
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let live_long = Position::long("AVAXUSDT", d("0.06"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let stale = Position::long("AVAXUSDT", d("0.16"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut snap = live_book(Some(live_long.clone()), vec![live_long]);
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.5"), d("1"), d("10"))];
+    let mut state = EngineState::new(5);
+    state.positions = vec![stale.clone()];
+    state.position = Some(stale);
+    let decision = Decision::ReduceLong {
+        symbol: "AVAXUSDT".into(),
+        reason: "частичная фиксация 1R".into(),
+        qty: d("0.08"),
+        stop_loss: d("100.08"),
+    };
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap, &decision);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(
+        client.closes.is_empty(),
+        "must not oversell the live 0.06 long: {:?}",
+        client.closes
+    );
+    assert_eq!(client.replaces.len(), 1, "full-size vs live qty falls through to BE");
     assert_eq!(state.positions[0].stop_loss, Some(d("100.08")));
     assert!(
         state.scaled_one_r.contains("AVAXUSDT"),
@@ -1695,6 +1769,78 @@ fn rearm_flattens_after_three_failed_attempts() {
     let _ = REARM_FAIL_BUDGET_SEC; // keep import live when only count path used
 }
 
+fn s5_2r_tp(entry: Decimal, stop: Decimal, cfg: &tui_bot::config::Config) -> Decimal {
+    let p = tui_bot::engine::continuation_trade_params(5, cfg.s4_interval);
+    (entry + p.reward_r * (entry - stop)) * (Decimal::ONE + tui_bot::money::round_trip_taker_pct())
+}
+
+#[test]
+fn s5_amend_without_stored_tp_uses_2r_not_cfg_tp_pct() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let pos = Position::long("BTCUSDT", d("0.02"), d("1000"), None, None);
+    let mut state = EngineState::new(5);
+    state.positions = vec![pos.clone()];
+    state.position = Some(pos.clone());
+    let p = tui_bot::engine::continuation_trade_params(5, cfg.s4_interval);
+    let sl = tui_bot::trail::candidate_stop(d("1000"), "LONG", p.min_stop_pct).unwrap();
+    let result = apply_decision(
+        &cfg,
+        &mut client,
+        &mut state,
+        &snap(Some(pos)),
+        &Decision::AmendStop {
+            stop_loss: sl,
+            reason: "attach stop from entry".into(),
+            symbol: "BTCUSDT".into(),
+        },
+    );
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(client.replaces.len(), 1);
+    let (symbol, got_sl, tp) = &client.replaces[0];
+    assert_eq!(symbol, "BTCUSDT");
+    assert_eq!(*got_sl, sl);
+    let want_tp = s5_2r_tp(d("1000"), sl, &cfg);
+    assert_eq!(*tp, Some(want_tp));
+    assert_ne!(want_tp, take_profit_price_net(d("1000"), "LONG", cfg.tp_pct).unwrap());
+}
+
+#[test]
+fn s5_rearm_without_stored_protectives_uses_2r_not_cfg_tp_pct() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let live = Position::long("BTCUSDT", d("0.02"), d("1000"), None, None);
+    let snap = live_book(Some(live.clone()), vec![live.clone()]);
+    let mut state = EngineState::new(5);
+    state.positions = vec![live];
+    let done = rearm_live_protectives(&cfg, &mut client, &mut state, &snap);
+    assert_eq!(done, vec!["BTCUSDT".to_string()]);
+    assert_eq!(client.replaces.len(), 1);
+    let p = tui_bot::engine::continuation_trade_params(5, cfg.s4_interval);
+    let sl = tui_bot::trail::candidate_stop(d("1000"), "LONG", p.min_stop_pct).unwrap();
+    let (_, got_sl, tp) = &client.replaces[0];
+    assert_eq!(*got_sl, sl);
+    assert_eq!(*tp, Some(s5_2r_tp(d("1000"), sl, &cfg)));
+    assert_ne!(
+        s5_2r_tp(d("1000"), sl, &cfg),
+        take_profit_price_net(d("1000"), "LONG", cfg.tp_pct).unwrap()
+    );
+}
+
+#[test]
+fn s5_rearm_keeps_remembered_stop_and_fills_2r_tp() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let live = Position::long("BTCUSDT", d("0.02"), d("1000"), None, None);
+    let remembered = Position::long("BTCUSDT", d("0.02"), d("1000"), Some(d("940")), None);
+    let snap = live_book(Some(live.clone()), vec![live]);
+    let mut state = EngineState::new(5);
+    state.positions = vec![remembered];
+    let done = rearm_live_protectives(&cfg, &mut client, &mut state, &snap);
+    assert_eq!(done, vec!["BTCUSDT".to_string()]);
+    assert_eq!(client.replaces[0].1, d("940"));
+    assert_eq!(client.replaces[0].2, Some(s5_2r_tp(d("1000"), d("940"), &cfg)));
+}
 
 #[test]
 fn paper_reduce_long_halves_qty_sets_be_and_latch() {

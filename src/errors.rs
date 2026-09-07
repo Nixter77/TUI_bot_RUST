@@ -24,10 +24,9 @@ pub fn retry_backoff_sec(strikes: u8) -> f64 {
 }
 /// After a losing close, keep that symbol off the buy list for 12 hours.
 /// 12h so a loser skips the next UTC session window; 4h reprinted BCH same day;
-/// 24h emptied the S4 liquid book.
+/// 24h emptied the S4 liquid book. S5 24h cooldown had the worst bt_netR — back to 12h.
 pub const LOSS_SYMBOL_COOLDOWN_SEC: f64 = 43_200.0;
-/// S5 one step up: live ZEC/ZEN reprinted ~45m after a net-loss 1R flatten.
-pub const S5_LOSS_SYMBOL_COOLDOWN_SEC: f64 = 86_400.0;
+pub const S5_LOSS_SYMBOL_COOLDOWN_SEC: f64 = LOSS_SYMBOL_COOLDOWN_SEC;
 
 pub fn loss_symbol_cooldown_sec(strategy_id: i32) -> f64 {
     if strategy_id == 5 {

@@ -266,7 +266,10 @@ fn strategy4_interval_from_env() {
     assert_eq!(TradeInterval::Minute15.min_stop_pct().to_string(), "0.020");
     assert_eq!(TradeInterval::Minute15.max_stop_pct().to_string(), "0.050");
     assert_eq!(TradeInterval::Hour1.min_stop_pct().to_string(), "0.030");
+    assert_eq!(TradeInterval::Hour1.max_stop_pct().to_string(), "0.080");
+    assert_eq!(TradeInterval::Hour1.min_pullback_pct().to_string(), "0.020");
     assert_eq!(TradeInterval::Minute15.geometry_ru(), "SL 2–5%  TP 2R");
+    assert_eq!(TradeInterval::Hour1.geometry_ru(), "SL 3–8%  TP 2R");
 
     let mut env = HashMap::new();
     env.insert("STRATEGY4_INTERVAL".into(), "15m".into());

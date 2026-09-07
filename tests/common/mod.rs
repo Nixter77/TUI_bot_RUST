@@ -294,7 +294,8 @@ fn htf_drift_4h_at(mark: f64, up: bool) -> Vec<Bar> {
 }
 
 pub fn london_ts() -> f64 {
-    make_utc_ts(2026, 8, 17, 7, 1, 0)
+    // 7:04 — past Hour1's first-3-min skip; still inside the 7:00 5m/15m bars.
+    make_utc_ts(2026, 8, 17, 7, 4, 0)
 }
 
 pub fn dead_ts() -> f64 {

@@ -359,6 +359,10 @@ pub struct EngineState {
     pub rearm_fail_count: HashMap<String, u8>,
     /// Symbols that already scaled out ~50% at +1R (S4).
     pub scaled_one_r: HashSet<String>,
+    /// Hour1/S5: last closed 1h bar `open_time` we already trailed SL on.
+    pub hour1_trail_bar: HashMap<String, i64>,
+    /// Symbols opened under S4 and still held after 4→5 adopt. Manage with S4 soak, not Hour1 trail.
+    pub s4_inherited: HashSet<String>,
 }
 
 impl EngineState {
@@ -387,6 +391,8 @@ impl EngineState {
             rearm_miss_since: HashMap::new(),
             rearm_fail_count: HashMap::new(),
             scaled_one_r: HashSet::new(),
+            hour1_trail_bar: HashMap::new(),
+            s4_inherited: HashSet::new(),
         }
     }
 
@@ -400,12 +406,22 @@ impl EngineState {
         if self.strategy_id == strategy_id {
             return;
         }
+        if self.strategy_id == 4 && strategy_id == 5 {
+            for p in self.positions.iter().chain(self.position.iter()) {
+                if p.side == Side::Long && p.qty > Decimal::ZERO {
+                    self.s4_inherited.insert(p.symbol.to_ascii_uppercase());
+                }
+            }
+        } else {
+            self.s4_inherited.clear();
+        }
         self.strategy_id = strategy_id;
         self.last_scan_ts = 0.0;
         self.cooldowns.clear();
         self.cooldown_until = 0.0;
         self.recent_leaders.clear();
         self.scaled_one_r.clear();
+        self.hour1_trail_bar.clear();
         self.inflight_symbols.clear();
         self.entry_inflight = false;
         self.sized_stops.clear();

@@ -236,6 +236,7 @@ impl TradeJournal {
         take_profit: Option<Decimal>,
         partial: bool,
     ) {
+        let strategy_id = self.opener_strategy_id(symbol, strategy_id);
         let (pnl, fee) = journal_long_pnl(entry, exit_price, qty);
         let now = crate::sessions::unix_now();
         let m = crate::openmeta::metrics_for_close(symbol, Some(pnl), now, partial);
@@ -324,6 +325,7 @@ impl TradeJournal {
     pub fn record_flatten(&self, strategy_id: i32, closed: &[String], live: bool, reason: &str) {
         let stamp = iso_now();
         for item in closed {
+            let strategy_id = self.opener_strategy_id(item, strategy_id);
             self.append(&TradeEvent {
                 ts: stamp.clone(),
                 event: "flatten".into(),
@@ -344,6 +346,64 @@ impl TradeJournal {
             });
         }
     }
+
+    /// Strategy that opened this symbol, not the lens running at close.
+    fn opener_strategy_id(&self, symbol: &str, fallback: i32) -> i32 {
+        opener_strategy_id_from(&self.read_events(), symbol, fallback)
+    }
+}
+
+/// Prefer unmatched journal open, then open_meta, then the running lens.
+pub fn opener_strategy_id_from(events: &[TradeEvent], symbol: &str, fallback: i32) -> i32 {
+    let want = journal_symbol(symbol);
+    if want.is_empty() {
+        return fallback;
+    }
+    if let Some(sid) = unmatched_open_strategy_from(events, &want) {
+        return sid;
+    }
+    if let Some(m) = crate::openmeta::get(&want) {
+        if (1..=5).contains(&m.strategy_id) {
+            return m.strategy_id;
+        }
+    }
+    fallback
+}
+
+fn unmatched_open_strategy_from(events: &[TradeEvent], want: &str) -> Option<i32> {
+    let mut sid: HashMap<String, (i32, Decimal)> = HashMap::new();
+    for ev in events {
+        let symbol = journal_symbol(&ev.symbol);
+        if symbol.is_empty() {
+            continue;
+        }
+        match ev.event.as_str() {
+            "open" => {
+                let qty = dec(&ev.qty).unwrap_or(Decimal::ZERO);
+                if qty > Decimal::ZERO && (1..=5).contains(&ev.strategy_id) {
+                    sid.insert(symbol, (ev.strategy_id, qty));
+                }
+            }
+            "close" => {
+                let close_qty = dec(&ev.qty).unwrap_or(Decimal::ZERO);
+                let keep_partial = sid
+                    .get(&symbol)
+                    .is_some_and(|(_, q)| close_qty > Decimal::ZERO && close_qty < *q);
+                if keep_partial {
+                    if let Some((_, q)) = sid.get_mut(&symbol) {
+                        *q -= close_qty;
+                    }
+                } else {
+                    sid.remove(&symbol);
+                }
+            }
+            "flatten" => {
+                sid.remove(&symbol);
+            }
+            _ => {}
+        }
+    }
+    sid.get(want).map(|(s, _)| *s)
 }
 
 pub fn record_close(

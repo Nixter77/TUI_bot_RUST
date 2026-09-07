@@ -6,7 +6,8 @@ use crate::errors::{
     ACTION_SKIP, COOLDOWN_SEC,
 };
 use crate::exchange::{
-    size_risk_market_order, sell_protectives_are_sized, size_market_order, ExchangeError, LiveClient,
+    cancel_leftover_sells, size_risk_market_order, sell_protectives_are_sized, size_market_order,
+    ExchangeError, LiveClient,
 };
 use crate::flatten::{close_targets, flatten_open_book, FlattenResult};
 use crate::journal;
@@ -624,15 +625,16 @@ fn amend_live(
             ..Default::default()
         };
     }
+    let strategy_id = state.map(|s| s.strategy_id).unwrap_or(0);
     let tp = if let Some(tp) = pos.take_profit {
         tp
     } else {
         if pos.entry_price <= Decimal::ZERO {
             return err("skip amend: missing take profit and entry");
         }
-        match take_profit_price_net(pos.entry_price, "LONG", cfg.tp_pct) {
-            Ok(v) => v,
-            Err(e) => return err(e),
+        match protective_tp_for_rearm(cfg, strategy_id, pos.entry_price, stop_loss) {
+            Some(v) => v,
+            None => return err("skip amend: missing take profit and entry"),
         }
     };
     if let Err(e) = client.replace_stop(&pos.symbol, stop_loss, Some(tp), Some(pos.qty)) {
@@ -701,6 +703,8 @@ fn exit_live(
         return err(e.0);
     }
     let _ = client.cancel_protectives(&pos.symbol);
+    // Bulk DELETE can miss a conditional SELL; sweep leftovers so flatten cannot open a short.
+    cancel_leftover_sells(client, &pos.symbol);
     let exit_px = mark_for_symbol(snapshot, &pos.symbol).unwrap_or(pos.entry_price);
     LiveApplyResult {
         filled: true,
@@ -722,7 +726,21 @@ fn reduce_live(
     stop_loss: Decimal,
     reason: &str,
 ) -> LiveApplyResult {
-    let Some(pos) = position_for(snapshot, state, symbol).cloned() else {
+    let mut pos = position_for(snapshot, state, symbol).cloned();
+    // Size to the exchange long, not a stale state qty (oversell would be a naked SELL).
+    if snapshot.live_book {
+        let hint = pos
+            .as_ref()
+            .map(|p| p.symbol.clone())
+            .unwrap_or_else(|| symbol.to_string());
+        match snapshot_row(snapshot, &hint) {
+            Some(live) if live.side == Side::Long && live.qty > Decimal::ZERO => {
+                pos = Some(live.clone());
+            }
+            _ => return err("skip reduce: нет живого лонга"),
+        }
+    }
+    let Some(pos) = pos else {
         return err("skip reduce: no position");
     };
     if pos.side != Side::Long || pos.qty <= Decimal::ZERO {
@@ -753,12 +771,9 @@ fn reduce_live(
     if let Err(e) = client.market_close(&pos.symbol, "LONG", close_qty) {
         return err(e.0);
     }
+    let strategy_id = state.map(|s| s.strategy_id).unwrap_or(0);
     let tp = pos.take_profit.or_else(|| {
-        if pos.entry_price <= Decimal::ZERO {
-            None
-        } else {
-            take_profit_price_net(pos.entry_price, "LONG", cfg.tp_pct).ok()
-        }
+        protective_tp_for_rearm(cfg, strategy_id, pos.entry_price, stop_loss)
     });
     // BE amend: retry once; if still fail → flatten remain AND keep scaled latch (no reduce spam).
     let be_err = match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
@@ -1424,27 +1439,27 @@ pub fn rearm_live_protectives(
         .collect();
     for live in longs {
         let key = live.symbol.to_ascii_uppercase();
-        let (sl, tp) = match (live.stop_loss, live.take_profit) {
+        let (rsl, rtp) = remembered_sl_tp(state, &key);
+        let sl = live.stop_loss.or(rsl);
+        let tp = live.take_profit.or(rtp);
+        let (sl, tp) = match (sl, tp) {
             (Some(sl), Some(tp)) => (sl, tp),
             (sl, tp) => {
-                let (rsl, rtp) = remembered_sl_tp(state, &key);
-                match (sl.or(rsl), tp.or(rtp)) {
-                    (Some(sl), Some(tp)) => (sl, tp),
-                    _ => {
-                        // Try attach-from-entry once; still naked after budget → flatten.
-                        let derived = derive_protectives_from_entry(cfg, state.strategy_id, &live);
-                        match derived {
-                            Some(pair) => pair,
-                            None => {
-                                if note_rearm_failure(state, &key, now) {
-                                    flatten_missing_protectives(
-                                        cfg, client, state, &live, "нет SL/TP для rearm",
-                                    );
-                                    done.push(live.symbol.clone());
-                                }
-                                continue;
-                            }
+                // Keep a known SL (or TP) and fill the missing side; do not
+                // overwrite a remembered stop with the TF floor.
+                let mut seed = live.clone();
+                seed.stop_loss = sl;
+                seed.take_profit = tp;
+                match derive_protectives_from_entry(cfg, state.strategy_id, &seed) {
+                    Some(pair) => pair,
+                    None => {
+                        if note_rearm_failure(state, &key, now) {
+                            flatten_missing_protectives(
+                                cfg, client, state, &live, "нет SL/TP для rearm",
+                            );
+                            done.push(live.symbol.clone());
                         }
+                        continue;
                     }
                 }
             }
@@ -1510,21 +1525,44 @@ fn note_rearm_failure(state: &mut EngineState, key: &str, now: f64) -> bool {
     *count >= REARM_FAIL_MAX || (now - since) >= REARM_FAIL_BUDGET_SEC
 }
 
+/// Continuation (S4/S5) TP is 2R of stop distance after fees — same as entry.
+/// S1–S3 keep `cfg.tp_pct`. Used when rearm/amend must place TP without a stored one.
+fn protective_tp_for_rearm(
+    cfg: &Config,
+    strategy_id: i32,
+    entry: Decimal,
+    stop_loss: Decimal,
+) -> Option<Decimal> {
+    if entry <= Decimal::ZERO {
+        return None;
+    }
+    if crate::engine::is_continuation(strategy_id) {
+        let risk = entry - stop_loss;
+        if risk > Decimal::ZERO {
+            let p = crate::engine::continuation_trade_params(strategy_id, cfg.s4_interval);
+            let tp = (entry + p.reward_r * risk)
+                * (Decimal::ONE + crate::money::round_trip_taker_pct());
+            if tp > entry && tp > stop_loss {
+                return Some(tp);
+            }
+        }
+    }
+    take_profit_price_net(entry, "LONG", cfg.tp_pct).ok()
+}
+
 fn derive_protectives_from_entry(cfg: &Config, strategy_id: i32, live: &Position) -> Option<(Decimal, Decimal)> {
     if live.entry_price <= Decimal::ZERO {
         return None;
     }
     let p = crate::engine::continuation_trade_params(strategy_id, cfg.s4_interval);
-    let sl = candidate_stop(live.entry_price, "LONG", p.min_stop_pct).ok()?;
-    let tp = if crate::engine::is_continuation(strategy_id) {
-        let risk = live.entry_price - sl;
-        if risk <= Decimal::ZERO {
-            return None;
-        }
-        (live.entry_price + p.reward_r * risk) * (Decimal::ONE + crate::money::round_trip_taker_pct())
-    } else {
-        take_profit_price_net(live.entry_price, "LONG", cfg.tp_pct).ok()?
-    };
+    let sl = live
+        .stop_loss
+        .filter(|s| *s > Decimal::ZERO)
+        .or_else(|| candidate_stop(live.entry_price, "LONG", p.min_stop_pct).ok())?;
+    let tp = live
+        .take_profit
+        .filter(|t| *t > sl)
+        .or_else(|| protective_tp_for_rearm(cfg, strategy_id, live.entry_price, sl))?;
     if sl <= Decimal::ZERO || tp <= sl {
         return None;
     }
@@ -1543,6 +1581,7 @@ fn flatten_missing_protectives(
         Ok(()) => String::new(),
         Err(e) => format!("; close: {e}"),
     };
+    cancel_leftover_sells(client, &live.symbol);
     journal::record_flatten(
         state.strategy_id,
         &[live.symbol.clone()],

@@ -30,7 +30,8 @@ pub fn make_client(cfg: &Config) -> BinanceFutures {
     BinanceFutures::from_config(cfg)
 }
 
-/// Fill missing SL/TP from the journal so a restarted TUI still knows 1R.
+/// Fill missing SL/TP/`opened_bar_time` from the journal so a restarted TUI
+/// still knows 1R and does not scan the whole 1h book as this trade's peak.
 pub fn merge_overlay_with_journal(mut overlay: Vec<Position>, journal: Vec<Position>) -> Vec<Position> {
     for j in journal {
         if j.side != Side::Long || j.qty <= Decimal::ZERO {
@@ -43,6 +44,9 @@ pub fn merge_overlay_with_journal(mut overlay: Vec<Position>, journal: Vec<Posit
             p.stop_loss = overlay_long_stop(p.side, p.stop_loss, j.stop_loss);
             if p.take_profit.is_none() {
                 p.take_profit = j.take_profit;
+            }
+            if p.opened_bar_time.is_none() {
+                p.opened_bar_time = j.opened_bar_time;
             }
         } else {
             overlay.push(j);

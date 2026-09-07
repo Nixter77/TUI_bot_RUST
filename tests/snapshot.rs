@@ -359,6 +359,27 @@ fn journal_overlay_does_not_lower_live_stop() {
 }
 
 #[test]
+fn journal_overlay_keeps_opened_bar_time_on_restore() {
+    let live = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), None);
+    let mut journal = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("96")), Some(d("106")));
+    journal.opened_bar_time = Some(1_788_191_230_000);
+    let merged = merge_overlay_with_journal(vec![live], vec![journal]);
+    assert_eq!(merged[0].opened_bar_time, Some(1_788_191_230_000));
+    assert_eq!(merged[0].stop_loss, Some(d("97")), "live stop stays");
+    assert_eq!(merged[0].take_profit, Some(d("106")));
+}
+
+#[test]
+fn journal_overlay_does_not_clobber_live_opened_bar_time() {
+    let mut live = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
+    live.opened_bar_time = Some(1_800_000_000_000);
+    let mut journal = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("96")), Some(d("106")));
+    journal.opened_bar_time = Some(1_700_000_000_000);
+    let merged = merge_overlay_with_journal(vec![live], vec![journal]);
+    assert_eq!(merged[0].opened_bar_time, Some(1_800_000_000_000));
+}
+
+#[test]
 fn s4_fetches_liquid_universe_not_only_entry_book() {
     // Monitor desk = liquid_universe. Near-24h-high names are filtered from the
     // entry book but must still get signal-TF + 4h history (else «нет 15м бара»).

@@ -306,6 +306,34 @@ pub fn update_mark(symbol: &str, mark: Decimal, now: f64) {
     }
 }
 
+/// Fold S5 1h bar high/low into MFE/MAE. Last-price polls miss Hour1 wicks
+/// (live S5 closes wrote mfe_r=0 after «откат с пика»). Journal only — no trade rule.
+fn apply_s5_bars_to_meta(m: &mut OpenTradeMeta, bars: &[Bar], since_ms: i64) -> bool {
+    if m.strategy_id != 5 {
+        return false;
+    }
+    let before_mfe = m.mfe_usdt.clone();
+    let before_mae = m.mae_usdt.clone();
+    let before_peak = m.mfe_peak_ts;
+    let before_t1r = m.time_to_1r_ts;
+    for bar in bars {
+        if bar.open_time < since_ms {
+            continue;
+        }
+        let ts = (bar.open_time as f64) / 1000.0;
+        if bar.high > Decimal::ZERO {
+            apply_mark_to_meta(m, bar.high, ts);
+        }
+        if bar.low > Decimal::ZERO {
+            apply_mark_to_meta(m, bar.low, ts);
+        }
+    }
+    m.mfe_usdt != before_mfe
+        || m.mae_usdt != before_mae
+        || m.mfe_peak_ts != before_peak
+        || m.time_to_1r_ts != before_t1r
+}
+
 /// Touch all open positions from a snapshot (manage tick). Single lock + one persist.
 pub fn update_from_positions(positions: &[Position], snapshot: &MarketSnapshot, now: f64) {
     let mut store = lock_poison(&STORE);
@@ -327,11 +355,20 @@ pub fn update_from_positions(positions: &[Position], snapshot: &MarketSnapshot, 
                     .map(|b| b.close)
                     .filter(|c| *c > Decimal::ZERO)
             });
-        let Some(mark) = mark else { continue };
         let key = pos.symbol.to_ascii_uppercase();
         if let Some(m) = store.get_mut(&key) {
-            if apply_mark_to_meta(m, mark, now) {
-                dirty = true;
+            if let Some(mark) = mark {
+                if apply_mark_to_meta(m, mark, now) {
+                    dirty = true;
+                }
+            }
+            if m.strategy_id == 5 {
+                let since = pos
+                    .opened_bar_time
+                    .unwrap_or((m.opened_ts * 1000.0) as i64);
+                if apply_s5_bars_to_meta(m, snapshot.bars_for(&pos.symbol), since) {
+                    dirty = true;
+                }
             }
         }
     }
@@ -574,5 +611,33 @@ mod tests {
         );
         assert_eq!(mfe2, d("3"));
         assert_eq!(mae2, d("3"));
+    }
+
+    #[test]
+    fn s5_folds_1h_bar_high_low_into_close_mfe_mae_r() {
+        let dir = tempfile::tempdir().unwrap();
+        set_active_path(Some(dir.path().join("open_meta.json")));
+        on_open(5, "AVAXUSDT", d("100"), d("97"), d("1"), 1_700_000_000.0, None);
+        let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
+        pos.opened_bar_time = Some(1_700_000_000_000);
+        let bar = Bar {
+            open_time: 1_700_000_000_000,
+            open: d("100"),
+            high: d("106"),
+            low: d("98"),
+            close: d("100"),
+            volume: d("20"),
+        };
+        let mut snap = MarketSnapshot::empty(d("10000"));
+        snap.tickers = vec![Ticker::new("AVAXUSDT", d("100"), d("0"), d("50000000"))];
+        snap.universe_bars.insert("AVAXUSDT".into(), vec![bar]);
+        update_from_positions(&[pos], &snap, 1_700_003_600.0);
+        let m = metrics_for_close("AVAXUSDT", Some(d("-0.1")), 1_700_003_600.0, false);
+        assert_eq!(m.mfe_r.as_deref(), Some("2"), "1h high 106 vs 3 USDT risk");
+        let mae: Decimal = m.mae_r.as_ref().unwrap().parse().unwrap();
+        assert!(mae > d("0.6") && mae < d("0.7"), "1h low 98 is ~0.67R: {mae}");
+        assert_eq!(m.mfe_usdt.as_deref(), Some("6"));
+        assert_eq!(m.mae_usdt.as_deref(), Some("2"));
+        set_active_path(None);
     }
 }

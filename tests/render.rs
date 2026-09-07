@@ -185,13 +185,12 @@ fn strategy4_startup_ignores_strategy1_always_enter() {
 }
 
 #[test]
-fn strategy5_startup_ignores_strategy4_always_enter() {
+fn strategy5_startup_inherits_strategy4_always_enter() {
     let mut env = std::collections::HashMap::new();
     env.insert("STRATEGY4_ALWAYS_ENTER".into(), "1".into());
     let s5 = render_startup_frame(None, None, 5, false, true, Some(&env)).unwrap();
     assert!(s5.contains("S5 Verify"), "{s5}");
-    assert!(s5.contains("00–02"), "{s5}");
-    assert!(!s5.contains("круглосуточно"), "{s5}");
+    assert!(s5.contains("круглосуточно"), "{s5}");
     let s4 = render_startup_frame(None, None, 4, false, true, Some(&env)).unwrap();
     assert!(s4.contains("круглосуточно"), "{s4}");
 }

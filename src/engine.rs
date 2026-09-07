@@ -5,14 +5,14 @@ use crate::continuation::{continuation_decisions, ContinuationParams, SCAN_SEC};
 use crate::dayrisk::{apply_day_risk, default_daily_loss_r, default_daily_loss_usdt};
 use crate::errors::is_retry_error;
 use crate::models::{
-    coalesce_position, push_recent, remembered_positions, unmanaged_positions, Decision, EngineState,
-    MarketSnapshot, Position, Side,
+    coalesce_position, last_closed_bar, push_recent, remembered_positions, unmanaged_positions,
+    Decision, EngineState, MarketSnapshot, Position, Side,
 };
 use crate::momentum::mark_for;
 use crate::profit::current_equity;
 use crate::ranking::iter_liquid_majors;
 use crate::scalp::{scalp_decision, ScalpParams};
-use crate::sessions::{HourWindow, DEFAULT_ENTRY_WINDOWS};
+use crate::sessions::HourWindow;
 use crate::trend::{trend_decision, TrendParams};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -65,33 +65,47 @@ pub fn continuation_slot_cap(strategy_id: i32, s4: i32, s5: i32) -> i32 {
     }
 }
 
-/// S5 keeps UTC session hours even when S4 soaks 24/7 (`STRATEGY4_ALWAYS_ENTER`).
-/// Empty S4 windows (cleared on 24/7) restore the default Asia/London/NY bands.
+/// S4 and S5 share `STRATEGY4_ALWAYS_ENTER` / entry windows.
+/// Forced S5-only UTC bands (s5-entry-hours) were 2nd-worst bt_netR; S4 soak unchanged.
 pub fn continuation_session_knobs(
-    strategy_id: i32,
+    _strategy_id: i32,
     s4_always_enter: bool,
     s4_entry_windows: &[HourWindow],
 ) -> (bool, Vec<HourWindow>) {
-    if strategy_id == 5 {
-        let windows = if s4_entry_windows.is_empty() {
-            DEFAULT_ENTRY_WINDOWS.to_vec()
-        } else {
-            s4_entry_windows.to_vec()
-        };
-        (false, windows)
-    } else {
-        (s4_always_enter, s4_entry_windows.to_vec())
-    }
+    (s4_always_enter, s4_entry_windows.to_vec())
 }
 
-/// Continuation params: signal TF + matching stop/pullback band.
+/// Continuation params: signal TF + stop/pullback from `continuation_stop_band`.
+/// S5 is Hour1 3–8% / 2% pullback even when S4 soaks 15m 2–5%.
 pub fn continuation_trade_params(
     strategy_id: i32,
     s4_interval: crate::config::TradeInterval,
 ) -> crate::continuation::ContinuationParams {
     use crate::continuation::ContinuationParams;
     let signal = continuation_interval(strategy_id, s4_interval);
-    ContinuationParams::default().with_interval(signal)
+    let band = continuation_stop_band(strategy_id, s4_interval);
+    let mut p = ContinuationParams::default().with_interval(signal);
+    p.min_stop_pct = band.min_stop_pct();
+    p.max_stop_pct = band.max_stop_pct();
+    p.min_pullback_pct = band.min_pullback_pct();
+    if strategy_id == 5 {
+        // A/B vs 5% and 8% on cached 1h: 3% had higher pnl (less skip) than 8%.
+        p.near_high_frac = Decimal::new(3, 2);
+        // One step above S4 50k so thin 1h names fail the desk floor.
+        p.min_quote_volume = Decimal::from(100_000);
+        // A/B vs 3 and 4 on cached 1h: lookback 2 had higher pnl (4 matched 3).
+        p.stop_lookback = 2;
+        // A/B vs 2.5× on cached 1h: 2×ATR had higher pnl (same n/wr, still in Hour1 3–8%).
+        p.atr_k = Decimal::from(2);
+        // A/B vs 1.5R on cached 1h: 2R bank had higher pnl (same n/wr). S4 stays 1.5R.
+        p.bank_r = Decimal::from(2);
+        // A/B 0.5× SMA20 vol: cache pnl +0.24 vs prior +3.09 — keep 0.3× hist mean.
+        // A/B 1.5% vs 2.5% vs 2% on cached 1h: 1.5% had higher pnl. S4 band stays 2%.
+        p.min_pullback_pct = Decimal::new(15, 3);
+        // A/B 15 vs 25 vs 20: per-symbol cache is identical (one ticker). Keep 20.
+        p.liquid_n = 20;
+    }
+    p
 }
 
 pub fn strategy_title(id: i32) -> &'static str {
@@ -231,6 +245,7 @@ pub fn decide(
             held
         };
         let scaled = HashSet::new();
+        let trail_bar = HashMap::new();
         let (d, scan_ts, _) = continuation_decisions(
             snapshot,
             &held,
@@ -244,6 +259,8 @@ pub fn decide(
             &[],
             0.0,
             &scaled,
+            &trail_bar,
+            &HashSet::new(),
         );
         return Ok((
             d.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),
@@ -371,8 +388,9 @@ fn continuation_params(strategy_id: i32, momentum: Option<&MomentumParams>) -> C
     let s4 = momentum.map(|m| m.s4_interval).unwrap_or_default();
     let mut p = continuation_trade_params(strategy_id, s4);
     if let Some(m) = momentum {
-        // Never shrink below 3; STRATEGY4/5_MAX_POSITIONS (default 5) sets the working cap.
-        p.max_positions = continuation_slot_cap(strategy_id, m.s4_max_positions, m.s5_max_positions).max(3);
+        // Honor STRATEGY5_MAX_POSITIONS 1–10 (do not floor at 3 — that ignored 1|2).
+        let cap = continuation_slot_cap(strategy_id, m.s4_max_positions, m.s5_max_positions);
+        p.max_positions = cap.clamp(1, 10);
         let (always, windows) =
             continuation_session_knobs(strategy_id, m.s4_always_enter, &m.s4_entry_windows);
         p.always_enter = always;
@@ -425,7 +443,9 @@ pub fn tick_decisions(
         let merged: Vec<Position> = live_longs
             .iter()
             .map(|live| {
-                let rem = remembered.iter().find(|r| r.symbol == live.symbol);
+                let rem = remembered
+                    .iter()
+                    .find(|r| r.symbol.eq_ignore_ascii_case(&live.symbol));
                 coalesce_position(Some(live), rem).unwrap_or_else(|| live.clone())
             })
             .collect();
@@ -446,8 +466,14 @@ pub fn tick_decisions(
     } else {
         let mut merged_list = remembered.clone();
         if let Some(pos) = &snapshot.position {
-            if pos.qty > Decimal::ZERO && !merged_list.iter().any(|p| p.symbol == pos.symbol) {
-                let rem = remembered.iter().find(|r| r.symbol == pos.symbol);
+            if pos.qty > Decimal::ZERO
+                && !merged_list
+                    .iter()
+                    .any(|p| p.symbol.eq_ignore_ascii_case(&pos.symbol))
+            {
+                let rem = remembered
+                    .iter()
+                    .find(|r| r.symbol.eq_ignore_ascii_case(&pos.symbol));
                 if let Some(extra) = coalesce_position(Some(pos), rem) {
                     merged_list.push(extra);
                 }
@@ -488,6 +514,8 @@ pub fn tick_decisions(
         inflight.retain(|s| !s.eq_ignore_ascii_case(symbol));
         let up = symbol.to_ascii_uppercase();
         state.scaled_one_r.remove(&up);
+        state.hour1_trail_bar.remove(&up);
+        state.s4_inherited.remove(&up);
         state.rearm_miss_since.remove(&up);
         state.rearm_fail_count.remove(&up);
         let remembered_pos = remembered
@@ -585,6 +613,7 @@ pub fn tick_decisions(
             Some(snapshot),
         )
     } else if is_continuation(sid) {
+        // S4 and S5 share DAILY_LOSS: allow_enter is !daily_halt; flatten/trail still run.
         let inflight_f: Vec<String> = inflight.iter().filter(|s| s.as_str() != "*").cloned().collect();
         let cont = continuation_params(sid, momentum);
         let (d, ts, leaders) = continuation_decisions(
@@ -600,6 +629,8 @@ pub fn tick_decisions(
             &state.recent_leaders,
             cooldown_until,
             &state.scaled_one_r,
+            &state.hour1_trail_bar,
+            &state.s4_inherited,
         );
         next_leaders = leaders;
         (d, ts)
@@ -666,6 +697,15 @@ pub fn tick_decisions(
             state.scaled_one_r.insert(key.clone());
             crate::openmeta::mark_scaled(&key);
         }
+        if let Decision::AmendStop { symbol, reason, .. } = decision {
+            if sid == 5 && reason.contains("trail по минимуму") {
+                if let Some(bar) = last_closed_bar(snapshot.bars_for(symbol)) {
+                    state
+                        .hour1_trail_bar
+                        .insert(symbol.to_ascii_uppercase(), bar.open_time);
+                }
+            }
+        }
     }
 
     let mut actions = state.recent_actions.clone();
@@ -703,6 +743,8 @@ pub fn tick_decisions(
         rearm_miss_since: state.rearm_miss_since,
         rearm_fail_count: state.rearm_fail_count,
         scaled_one_r: state.scaled_one_r,
+        hour1_trail_bar: state.hour1_trail_bar,
+        s4_inherited: state.s4_inherited,
     };
     (
         new_state,

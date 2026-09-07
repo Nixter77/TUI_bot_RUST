@@ -273,7 +273,7 @@ fn scratch_above_entry_is_not_a_win_after_fees() {
 }
 
 #[test]
-fn s5_losing_close_cools_twenty_four_hours() {
+fn s5_losing_close_cools_twelve_hours() {
     let events = vec![TradeEvent {
         ts: "2026-09-06T21:00:33Z".into(),
         event: "close".into(),
@@ -282,24 +282,23 @@ fn s5_losing_close_cools_twenty_four_hours() {
         pnl: Some("-0.207".into()),
         ..Default::default()
     }];
-    assert_eq!(S5_LOSS_SYMBOL_COOLDOWN_SEC, 86_400.0);
+    assert_eq!(S5_LOSS_SYMBOL_COOLDOWN_SEC, LOSS_SYMBOL_COOLDOWN_SEC);
     assert_eq!(
         symbol_pause_sec_for(5, false, COOLDOWN_SEC),
-        S5_LOSS_SYMBOL_COOLDOWN_SEC
+        LOSS_SYMBOL_COOLDOWN_SEC
     );
-    assert_eq!(symbol_pause_sec_for(4, false, COOLDOWN_SEC), LOSS_SYMBOL_COOLDOWN_SEC);
     let t0 = tui_bot::sessions::make_utc_ts(2026, 9, 6, 21, 0, 33);
-    let plus_13h = t0 + 13.0 * 3600.0;
-    let s5 = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(5));
+    let plus_11h = t0 + 11.0 * 3600.0;
+    let s5 = cooldowns_from_events_for(&events, plus_11h, COOLDOWN_SEC, Some(5));
     assert!(
-        s5.get("ZECUSDT").copied().unwrap_or(0.0) > plus_13h,
-        "S5 loser still cooling 13h later: {s5:?}"
+        s5.get("ZECUSDT").copied().unwrap_or(0.0) > plus_11h,
+        "S5 loser still cooling 11h later: {s5:?}"
     );
-    let s4 = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(4));
+    let s4 = cooldowns_from_events_for(&events, plus_11h, COOLDOWN_SEC, Some(4));
     assert!(s4.is_empty(), "S4 must not inherit S5 cooldown: {s4:?}");
-    let plus_25h = t0 + 25.0 * 3600.0;
-    let later = cooldowns_from_events_for(&events, plus_25h, COOLDOWN_SEC, Some(5));
-    assert!(!later.contains_key("ZECUSDT"), "S5 loser free after 24h+: {later:?}");
+    let plus_13h = t0 + 13.0 * 3600.0;
+    let later = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(5));
+    assert!(!later.contains_key("ZECUSDT"), "S5 loser free after 12h+: {later:?}");
 }
 
 #[test]
@@ -380,6 +379,42 @@ fn unmatched_reads_active_path_not_default() {
     assert_eq!(open[0].stop_loss, Some(d("16.7139")));
 }
 
+#[test]
+fn close_tags_opener_strategy_id_not_running_lens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trades.jsonl");
+    let j = TradeJournal::new(Some(&path));
+    j.record_open(
+        4,
+        "AVAXUSDT",
+        d("0.02"),
+        d("100"),
+        "S4 open",
+        false,
+        Some(d("98.5")),
+        Some(d("103.1")),
+        None,
+    );
+    j.record_close(
+        5,
+        "AVAXUSDT",
+        d("0.02"),
+        d("100"),
+        d("99"),
+        "S5 running close",
+        false,
+        Some(d("98.5")),
+        Some(d("103.1")),
+        false,
+    );
+    let events = j.read_events();
+    let close = events.iter().find(|e| e.event == "close").expect("close");
+    assert_eq!(
+        close.strategy_id, 4,
+        "close must keep opener S4, not running S5: {close:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn journal_file_is_owner_only() {
@@ -454,4 +489,51 @@ fn open_meta_r_math_and_persist_roundtrip() {
     assert_eq!(mfe, d("0"));
     assert_eq!(mae, d("2")); // (100-99)*2
     set_active_path(None);
+}
+
+#[test]
+fn s5_close_persists_mfe_mae_r_from_1h_bars() {
+    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    use tui_bot::journal::{record_close, set_active, TradeEvent};
+    use tui_bot::models::{Bar, MarketSnapshot, Position, Ticker};
+    use tui_bot::openmeta::{on_open, update_from_positions};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trades.jsonl");
+    set_active(Some(path.clone()));
+    on_open(5, "AVAXUSDT", d("100"), d("97"), d("1"), 1_700_000_000.0, None);
+    let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
+    pos.opened_bar_time = Some(1_700_000_000_000);
+    let bar = Bar {
+        open_time: 1_700_000_000_000,
+        open: d("100"),
+        high: d("106"),
+        low: d("98"),
+        close: d("99"),
+        volume: d("20"),
+    };
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("99"), d("-1"), d("50000000"))];
+    snap.universe_bars.insert("AVAXUSDT".into(), vec![bar]);
+    update_from_positions(&[pos], &snap, 1_700_003_600.0);
+    record_close(
+        5,
+        "AVAXUSDT",
+        d("1"),
+        d("100"),
+        d("99"),
+        "test",
+        true,
+        Some(d("97")),
+        Some(d("106")),
+        false,
+    );
+    let line = fs::read_to_string(&path).unwrap();
+    let ev: TradeEvent = serde_json::from_str(line.lines().last().unwrap()).unwrap();
+    assert_eq!(ev.event, "close");
+    assert_eq!(ev.strategy_id, 5);
+    assert_eq!(ev.mfe_r.as_deref(), Some("2"));
+    assert!(ev.mae_r.is_some(), "mae_r must persist on S5 close");
+    let mae: Decimal = ev.mae_r.as_ref().unwrap().parse().unwrap();
+    assert!(mae > Decimal::ZERO, "1h low 98 must record MAE R: {mae}");
+    set_active(None);
 }

@@ -4,10 +4,11 @@
 //! S4 signal bars come from `STRATEGY4_INTERVAL` (5m / 15m / 30m / 1h).
 //! S5 is the 1h A/B arm: same core, Hour1 geometry (stop/pullback/hold), not the
 //! 15m 2–5% soak band. TP is 2R after fees. Post-BE trail is the signal-bar low;
+//! Hour1 trails the last closed 1h low only after BE is on the book.
 //! S5 does not ratchet a 0.8% mark trail (that sits inside a 1h candle).
 
 use crate::config::TradeInterval;
-use crate::indicators::{last_atr, last_ema, mean_volume, vwap};
+use crate::indicators::{ema_series, last_atr, last_ema, mean_volume, vwap};
 use crate::money::round_trip_taker_pct;
 use crate::models::{
     bar_is_red, last_closed_bar, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side, Ticker,
@@ -23,12 +24,53 @@ use std::sync::{Mutex, OnceLock};
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
 const S5_PRIVACY_SKIP: &str = "кластер privacy — не беру";
+const S5_CORR_SKIP: &str = "кластер 1h хода — не беру";
+const S5_CORR_CAP: usize = 2;
 
 /// Live S5 2026-09-06: ZEC+DASH+ZEN dumped as one book. Hour1 only — S4 soak unchanged.
 fn s5_skip_symbol(symbol: &str) -> bool {
     let s = symbol.trim().to_ascii_uppercase();
     let base = s.strip_suffix("USDT").unwrap_or(&s);
     matches!(base, "ZEC" | "DASH" | "ZEN" | "XMR")
+}
+
+fn hour1_bar_ret(bar: &Bar) -> Option<Decimal> {
+    if bar.open <= Decimal::ZERO {
+        return None;
+    }
+    Some((bar.close - bar.open) / bar.open)
+}
+
+/// Same 1h impulse: both last-closed Hour1 bars green and within 2× return.
+fn same_hour1_move(a: &Bar, b: &Bar) -> bool {
+    let (Some(ra), Some(rb)) = (hour1_bar_ret(a), hour1_bar_ret(b)) else {
+        return false;
+    };
+    if ra <= Decimal::ZERO || rb <= Decimal::ZERO {
+        return false;
+    }
+    let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+    hi > Decimal::ZERO && lo * Decimal::from(2) >= hi
+}
+
+/// Open Hour1 names already riding the candidate's 1h impulse. Cap is 2, not a coin skip.
+fn s5_same_move_held(
+    snapshot: &MarketSnapshot,
+    positions: &[Position],
+    candidate: &str,
+    now: f64,
+) -> usize {
+    let Some(cand) = signal_bar(snapshot, candidate, TradeInterval::Hour1, now) else {
+        return 0;
+    };
+    positions
+        .iter()
+        .filter(|pos| pos.qty > Decimal::ZERO && !pos.symbol.eq_ignore_ascii_case(candidate))
+        .filter(|pos| {
+            signal_bar(snapshot, &pos.symbol, TradeInterval::Hour1, now)
+                .is_some_and(|bar| same_hour1_move(cand, bar))
+        })
+        .count()
 }
 /// Book kline fetch and new-entry scan share this cadence.
 pub const SCAN_SEC: f64 = 60.0;
@@ -80,6 +122,8 @@ pub struct ContinuationParams {
     pub stretch_pct: Decimal,
     pub near_high_frac: Decimal,
     pub reward_r: Decimal,
+    /// Exit A: flatten at this R multiple (S4 soak 1.5R; S5 A/B 2R vs 1.5R).
+    pub bank_r: Decimal,
     pub min_stop_pct: Decimal,
     pub max_stop_pct: Decimal,
     pub always_enter: bool,
@@ -115,6 +159,7 @@ impl Default for ContinuationParams {
             stretch_pct: Decimal::from(4),
             near_high_frac: Decimal::new(5, 2), // 0.05 — widen near-high book
             reward_r: TradeInterval::Minute5.reward_r(),
+            bank_r: Decimal::new(15, 1),
             min_stop_pct: TradeInterval::Minute5.min_stop_pct(),
             max_stop_pct: TradeInterval::Minute5.max_stop_pct(),
             always_enter: false,
@@ -221,11 +266,37 @@ pub fn week_change(ticker: &Ticker, bars: &[Bar]) -> Decimal {
     (last.close - prev.close) / prev.close * Decimal::from(100)
 }
 
-fn signal_bar<'a>(snapshot: &'a MarketSnapshot, symbol: &str) -> Option<&'a Bar> {
-    if let Some(bar) = snapshot.last_bars.get(symbol) {
-        return Some(bar);
+fn bar_is_forming(bar: &Bar, interval: TradeInterval, now: f64) -> bool {
+    let open_s = (bar.open_time as f64) / 1000.0;
+    if now < open_s {
+        return false;
     }
-    last_closed_bar(snapshot.bars_for(symbol))
+    now - open_s < (interval.duration_ms() as f64) / 1000.0
+}
+
+/// Hour1/S5: never the forming 1h candle. S4 soak may still use last_bars.
+fn signal_bar<'a>(
+    snapshot: &'a MarketSnapshot,
+    symbol: &str,
+    interval: TradeInterval,
+    now: f64,
+) -> Option<&'a Bar> {
+    if interval == TradeInterval::Hour1 {
+        if let Some(bar) = snapshot.last_bars.get(symbol) {
+            if !bar_is_forming(bar, interval, now) {
+                return Some(bar);
+            }
+        }
+        let bars = snapshot.bars_for(symbol);
+        if let Some(bar) = bars.iter().rev().find(|b| !bar_is_forming(b, interval, now)) {
+            return Some(bar);
+        }
+        return last_closed_bar(bars);
+    }
+    snapshot
+        .last_bars
+        .get(symbol)
+        .or_else(|| last_closed_bar(snapshot.bars_for(symbol)))
 }
 
 fn ticker_for<'a>(tickers: &'a [Ticker], symbol: &str) -> Option<&'a Ticker> {
@@ -258,6 +329,7 @@ pub fn is_reversing(
     ticker: &Ticker,
     recent_leaders: &[String],
     p: &ContinuationParams,
+    now: f64,
 ) -> bool {
     let bars = snapshot.bars_for(&ticker.symbol);
     let was_leader = recent_leaders
@@ -277,7 +349,7 @@ pub fn is_reversing(
     .map(|s| s.to_ascii_uppercase())
     .collect();
     let dropped = !top.contains(&ticker.symbol.to_ascii_uppercase());
-    let red = signal_bar(snapshot, &ticker.symbol)
+    let red = signal_bar(snapshot, &ticker.symbol, p.interval, now)
         .map(|b| bar_is_red(Some(b)))
         .unwrap_or(false);
     dropped || red
@@ -289,6 +361,7 @@ pub fn manage_continuation_long(
     p: &ContinuationParams,
     now: f64,
     already_scaled: bool,
+    hour1_trail_bar: &HashMap<String, i64>,
 ) -> Decision {
     if pos.side != Side::Long || pos.qty <= Decimal::ZERO {
         return Decision::hold("continuation is buy-only; short not managed");
@@ -366,7 +439,9 @@ pub fn manage_continuation_long(
             // stale uPnL, or restore high is not "1R был" — live S5 ZEC/ZEN
             // flattened red and DASH scaled at MFE 0.72R (2026-09-06).
             let in_hand = one_r_in_hand(pos, mark);
-            if in_hand && !already_scaled {
+            // Hour1/S5: no 50% scale-out — full size to BE then trail.
+            // S4 soak still banks half at 1R.
+            if in_hand && !already_scaled && p.interval != TradeInterval::Hour1 {
                 let reduce_qty = (pos.qty / Decimal::TWO).normalize();
                 if reduce_qty > Decimal::ZERO
                     && reduce_qty < pos.qty
@@ -383,11 +458,11 @@ pub fn manage_continuation_long(
                 }
             }
             if in_hand && risk > Decimal::ZERO {
-                let target_15 = pos.entry_price + Decimal::new(15, 1) * risk;
+                let target_bank = pos.entry_price + p.bank_r * risk;
                 let one_r = pos.entry_price + risk;
-                if mark >= target_15 || (peak >= target_15 && mark >= one_r) {
+                if mark >= target_bank || (peak >= target_bank && mark >= one_r) {
                     return Decision::ExitPosition {
-                        reason: "1.5R — фиксирую".into(),
+                        reason: format!("{}R — фиксирую", p.bank_r.normalize()),
                         symbol: pos.symbol.clone(),
                     };
                 }
@@ -407,18 +482,6 @@ pub fn manage_continuation_long(
             }
             return Decision::hold("continuation hold / 1R wick отдан");
         }
-        // Hour1/S5: BE at 0.5R in-hand so a 0.5–0.8R peak does not dump 1R
-        // (live DASH MFE 0.72R → «откат с пика»). S4 soak stays 1R BE.
-        if p.interval == TradeInterval::Hour1 && half_r_in_hand(pos, mark) {
-            let be = pos.entry_price * (Decimal::ONE + round_trip_taker_pct());
-            if be > sl && be < mark && long_stop_is_valid(be, mark) {
-                return Decision::AmendStop {
-                    stop_loss: be,
-                    reason: "безубыток на 0.5R".into(),
-                    symbol: pos.symbol.clone(),
-                };
-            }
-        }
         return Decision::hold("continuation hold / жду 1R");
     }
 
@@ -426,15 +489,16 @@ pub fn manage_continuation_long(
     let risk = position_risk(pos, p);
     if let Some(risk) = risk {
         if risk > Decimal::ZERO {
-            let target_15 = pos.entry_price + Decimal::new(15, 1) * risk;
+            let target_bank = pos.entry_price + p.bank_r * risk;
             let lock_05 = pos.entry_price + Decimal::new(5, 1) * risk;
-            if mark >= target_15 {
+            let bank_reason = format!("{}R — фиксирую", p.bank_r.normalize());
+            if mark >= target_bank {
                 return Decision::ExitPosition {
-                    reason: "1.5R — фиксирую".into(),
+                    reason: bank_reason,
                     symbol: pos.symbol.clone(),
                 };
             }
-            if peak >= target_15 {
+            if peak >= target_bank {
                 if mark > lock_05
                     && lock_05 > sl
                     && lock_05 < mark
@@ -447,22 +511,33 @@ pub fn manage_continuation_long(
                     };
                 }
                 return Decision::ExitPosition {
-                    reason: "1.5R — фиксирую".into(),
+                    reason: bank_reason,
                     symbol: pos.symbol.clone(),
                 };
             }
         }
     }
 
-    // Hour1: last *closed* 1h low only. last_bars is the forming candle and
-    // ratchets every poll (live S5 DASH: 16× trail mark 0.8% / 32 min).
+    // Hour1: last *closed* 1h low only, and only after BE (sl >= entry).
+    // last_bars is the forming candle and ratchets every poll
+    // (live S5 DASH: 16× trail mark 0.8% / 32 min). Do not pull the stop
+    // up to a closed-bar low while original risk is still open.
+    if p.interval == TradeInterval::Hour1 && sl < pos.entry_price {
+        return Decision::hold("continuation hold / trail after BE");
+    }
     let Some(last) = (if p.interval == TradeInterval::Hour1 {
         last_closed_bar(snapshot.bars_for(&pos.symbol))
     } else {
-        signal_bar(snapshot, &pos.symbol)
+        signal_bar(snapshot, &pos.symbol, p.interval, now)
     }) else {
         return Decision::hold("continuation hold / trail not raised");
     };
+    if p.interval == TradeInterval::Hour1 {
+        let key = pos.symbol.to_ascii_uppercase();
+        if hour1_trail_bar.get(&key) == Some(&last.open_time) {
+            return Decision::hold("continuation hold / trail already this 1h bar");
+        }
+    }
     let mut candidate = last.low;
     if p.interval != TradeInterval::Hour1 && p.trail_pct > Decimal::ZERO {
         if let Ok(pct_sl) = candidate_stop(mark, "LONG", p.trail_pct) {
@@ -550,11 +625,10 @@ fn risk_from_take_profit(pos: &Position, reward_r: Decimal) -> Option<Decimal> {
     }
 }
 
-/// S4 soak keeps 4h. S5 1h would otherwise be only 4 signal bars — scale to 16h
-/// (same 16-bar hold as 15m × 4h).
+/// S4 soak keeps 4h. Hour1 A/B 12h vs 16h on cached 1h: 12h had higher pnl. Not 4h.
 fn max_hold_sec(p: &ContinuationParams) -> f64 {
     if p.interval == TradeInterval::Hour1 {
-        16.0 * 3600.0
+        12.0 * 3600.0
     } else {
         4.0 * 3600.0
     }
@@ -569,7 +643,7 @@ fn time_stop_reason(pos: &Position, now: f64, p: &ContinuationParams) -> Option<
             return Some(format!("тайм-стоп {hours}ч"));
         }
     }
-    // Hour1 hold is 16h; flattening at session end would cut S5 after 2–3h.
+    // Hour1 hold is 12h; flattening at session end would cut S5 after 2–3h.
     if p.interval == TradeInterval::Hour1 {
         return None;
     }
@@ -601,23 +675,6 @@ fn one_r_in_hand(pos: &Position, mark: Decimal) -> bool {
     one_r_price(pos).is_some_and(|target| mark >= target)
 }
 
-fn half_r_price(pos: &Position) -> Option<Decimal> {
-    let sl = pos.stop_loss?;
-    if sl >= pos.entry_price || pos.entry_price <= Decimal::ZERO {
-        return None;
-    }
-    let risk = pos.entry_price - sl;
-    if risk <= Decimal::ZERO {
-        None
-    } else {
-        Some(pos.entry_price + Decimal::new(5, 1) * risk)
-    }
-}
-
-fn half_r_in_hand(pos: &Position, mark: Decimal) -> bool {
-    half_r_price(pos).is_some_and(|target| mark >= target)
-}
-
 fn reached_one_r(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) -> bool {
     let Some(target) = one_r_price(pos) else {
         return false;
@@ -646,14 +703,13 @@ fn reached_one_r(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) -> bo
 
 fn hist_bars<'a>(snapshot: &'a MarketSnapshot, symbol: &str, last: &Bar) -> &'a [Bar] {
     let bars = snapshot.bars_for(symbol);
-    if bars
-        .last()
-        .is_some_and(|b| b.open_time == last.open_time && bars.len() >= 2)
-    {
-        &bars[..bars.len() - 1]
-    } else {
-        bars
-    }
+    // Only bars strictly before the signal. A forming candle after a closed
+    // Hour1 resume must not supply the pullback wick or "продолжение вверх".
+    let end = bars
+        .iter()
+        .position(|b| b.open_time >= last.open_time)
+        .unwrap_or(bars.len());
+    &bars[..end]
 }
 
 /// Skip if the signal bar is not a green pullback-resume (red in recent history).
@@ -710,6 +766,7 @@ fn skip_no_pullback(
 }
 
 /// Skip unless last 4h close is above EMA20. Missing 4h history skips.
+/// S5 Hour1 shares this gate (closed 4h series, no signal-TF fallback).
 /// 4h higher-low removed (was a choke); signal-TF also EMA20-only (no HL series).
 pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<String> {
     let bars = snapshot.htf_bars_for(symbol);
@@ -730,7 +787,7 @@ pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<Stri
 }
 
 /// Skip unless last close is above EMA20 on the signal TF.
-/// Signal-TF higher-low series removed (was choking continuation entries); 4h HL already dropped.
+/// Hour1/S5 also requires EMA20 rising (not flat/down). S4 soak stays close>EMA only.
 pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &ContinuationParams) -> Option<String> {
     let tf = p.interval.as_ru();
     let bars = snapshot.bars_for(symbol);
@@ -738,12 +795,33 @@ pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &Continuation
         return Some(format!("нет {tf} истории — не вхожу"));
     }
     let closes: Vec<Decimal> = bars.iter().map(|b| b.close).collect();
-    let Some(ema) = last_ema(&closes, 20) else {
+    let series = ema_series(&closes, 20);
+    let Some(ema) = series.last().copied().flatten() else {
         return Some(format!("нет {tf} истории — не вхожу"));
     };
     let last = bars.last()?;
     if last.close <= ema {
         return Some("цена ниже EMA20 — не вхожу".into());
+    }
+    // Hour1: EMA20 must already be rising into the signal bar (not the last
+    // close vs last EMA, which is the same as close>EMA20).
+    if p.interval == TradeInterval::Hour1 {
+        if closes.len() < 22 {
+            return Some(format!("нет {tf} истории — не вхожу"));
+        }
+        let prior = ema_series(&closes[..closes.len() - 1], 20);
+        let Some(e1) = prior.last().copied().flatten() else {
+            return Some(format!("нет {tf} истории — не вхожу"));
+        };
+        let Some(e0) = prior
+            .get(prior.len().saturating_sub(2))
+            .and_then(|v| *v)
+        else {
+            return Some(format!("нет {tf} истории — не вхожу"));
+        };
+        if e1 <= e0 {
+            return Some("EMA20 1ч не растёт — не вхожу".into());
+        }
     }
     None
 }
@@ -797,7 +875,12 @@ fn structure_stop(
     Some(sl)
 }
 
-fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &ContinuationParams) -> Decision {
+fn enter_from_ticker(
+    snapshot: &MarketSnapshot,
+    ticker: &Ticker,
+    p: &ContinuationParams,
+    now: f64,
+) -> Decision {
     if is_major_symbol(&ticker.symbol) {
         return Decision::hold("мажор — не беру");
     }
@@ -807,7 +890,7 @@ fn enter_from_ticker(snapshot: &MarketSnapshot, ticker: &Ticker, p: &Continuatio
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Decision::hold("мелочь — не гоняю");
     }
-    let Some(last) = signal_bar(snapshot, &ticker.symbol).cloned() else {
+    let Some(last) = signal_bar(snapshot, &ticker.symbol, p.interval, now).cloned() else {
         return Decision::hold(format!("нет {} бара — не вхожу", p.interval.as_ru()));
     };
     let Some(sl) = structure_stop(snapshot, &ticker.symbol, &last, ticker.last_price, p) else {
@@ -862,7 +945,7 @@ pub fn s4_setup_skip(
         exclude,
         p,
     );
-    skip_new_long(snapshot, ticker, p, &leaders, &liquid)
+    skip_new_long(snapshot, ticker, p, &leaders, &liquid, crate::sessions::unix_now())
 }
 
 pub fn pick_strategy4_book(
@@ -947,6 +1030,7 @@ pub fn continuation_decision(
         .collect();
     let empty: HashMap<String, f64> = HashMap::new();
     let scaled: HashSet<String> = HashSet::new();
+    let trail_bar: HashMap<String, i64> = HashMap::new();
     let (d, _, _) = continuation_decisions(
         snapshot,
         &held,
@@ -960,6 +1044,8 @@ pub fn continuation_decision(
         &[],
         0.0,
         &scaled,
+        &trail_bar,
+        &HashSet::new(),
     );
     d.into_iter().next().unwrap_or_else(|| Decision::hold("hold"))
 }
@@ -972,6 +1058,7 @@ fn skip_new_long(
     p: &ContinuationParams,
     recent_leaders: &[String],
     liquid: &HashSet<String>,
+    now: f64,
 ) -> Option<String> {
     // Phase-2 BTC regime: same path as monitor Ready (s4_setup_skip).
     if let Some(reason) = crate::regime::block_alt_entry(snapshot) {
@@ -982,6 +1069,14 @@ fn skip_new_long(
     }
     if p.interval == TradeInterval::Hour1 && s5_skip_symbol(&ticker.symbol) {
         return Some(S5_PRIVACY_SKIP.into());
+    }
+    // Live: first 3 min of the 1h bar — wait for the closed kline to settle.
+    // Exact hour-open (into == 0) is the sim tick on a completed bar; do not skip.
+    if p.interval == TradeInterval::Hour1 {
+        let into = now.rem_euclid(3600.0);
+        if into > 0.0 && into < 180.0 {
+            return Some("первые 3 мин часа — не вхожу".into());
+        }
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
         return Some("мелочь — не гоняю".into());
@@ -996,7 +1091,7 @@ fn skip_new_long(
     if near_24h_high(ticker, p.near_high_frac) {
         return Some(NEAR_HIGH_SKIP.into());
     }
-    let Some(bar) = signal_bar(snapshot, &ticker.symbol) else {
+    let Some(bar) = signal_bar(snapshot, &ticker.symbol, p.interval, now) else {
         return Some(format!("нет {} бара — не вхожу", p.interval.as_ru()));
     };
     if let Some(reason) = skip_no_htf_trend(snapshot, &ticker.symbol) {
@@ -1008,7 +1103,7 @@ fn skip_new_long(
     if let Some(reason) = skip_no_uptrend(snapshot, &ticker.symbol, p) {
         return Some(reason);
     }
-    if is_reversing(snapshot, ticker, recent_leaders, p) {
+    if is_reversing(snapshot, ticker, recent_leaders, p, now) {
         return Some("разворот бывшего лидера — не гоняю".into());
     }
     let bars = snapshot.bars_for(&ticker.symbol);
@@ -1025,22 +1120,37 @@ fn skip_new_long(
     None
 }
 
+fn soak_params_for_inherited() -> ContinuationParams {
+    let mut q = ContinuationParams::default().with_interval(TradeInterval::Minute15);
+    // S4 soak is 24/7 — do not session-flatten inherited slots after 4→5 adopt.
+    q.always_enter = true;
+    q
+}
+
 fn manage_open_book(
     positions: &[Position],
     snapshot: &MarketSnapshot,
     p: &ContinuationParams,
     now: f64,
     scaled_one_r: &HashSet<String>,
+    hour1_trail_bar: &HashMap<String, i64>,
+    inherited_s4: &HashSet<String>,
 ) -> Vec<Decision> {
+    let soak = soak_params_for_inherited();
     let mut out = Vec::new();
     for pos in positions {
         if pos.qty <= Decimal::ZERO {
             continue;
         }
+        let inherited = p.interval == TradeInterval::Hour1
+            && inherited_s4
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&pos.symbol));
+        let use_p = if inherited { &soak } else { p };
         let already = scaled_one_r
             .iter()
             .any(|s| s.eq_ignore_ascii_case(&pos.symbol));
-        let decision = manage_continuation_long(pos, snapshot, p, now, already);
+        let decision = manage_continuation_long(pos, snapshot, use_p, now, already, hour1_trail_bar);
         if !decision.is_hold() {
             out.push(decision);
         }
@@ -1091,12 +1201,20 @@ fn maybe_enter(
         if blocked.contains(&ticker.symbol.to_ascii_uppercase()) {
             continue;
         }
-        if let Some(reason) = skip_new_long(snapshot, ticker, p, recent_leaders, &liquid) {
+        if let Some(reason) = skip_new_long(snapshot, ticker, p, recent_leaders, &liquid, now) {
             note_s4_skip(&reason);
             last_skip = Some(reason);
             continue;
         }
-        let decision = enter_from_ticker(snapshot, ticker, p);
+        // Hour1: max 2 names on the same 1h impulse (ZEC+DASH+ZEN book). S4 soak unchanged.
+        if p.interval == TradeInterval::Hour1
+            && s5_same_move_held(snapshot, positions, &ticker.symbol, now) >= S5_CORR_CAP
+        {
+            note_s4_skip(S5_CORR_SKIP);
+            last_skip = Some(S5_CORR_SKIP.into());
+            continue;
+        }
+        let decision = enter_from_ticker(snapshot, ticker, p, now);
         if let Decision::EnterLong { .. } = &decision {
             out.push(decision);
             break;
@@ -1127,6 +1245,8 @@ pub fn continuation_decisions(
     recent_leaders: &[String],
     desk_until: f64,
     scaled_one_r: &HashSet<String>,
+    hour1_trail_bar: &HashMap<String, i64>,
+    inherited_s4: &HashSet<String>,
 ) -> (Vec<Decision>, f64, Vec<String>) {
     let owned = ContinuationParams::default();
     let p = params.unwrap_or(&owned);
@@ -1136,7 +1256,15 @@ pub fn continuation_decisions(
         exclude,
         p,
     );
-    let out = manage_open_book(positions, snapshot, p, now, scaled_one_r);
+    let out = manage_open_book(
+        positions,
+        snapshot,
+        p,
+        now,
+        scaled_one_r,
+        hour1_trail_bar,
+        inherited_s4,
+    );
     if !allow_enter {
         if !out.is_empty() {
             return (out, last_scan_ts, leaders);

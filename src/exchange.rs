@@ -243,6 +243,40 @@ pub fn cancel_close_position_sells(client: &mut dyn LiveClient, symbol: &str) {
     }
 }
 
+/// After flatten: drop every leftover SELL (sized or closePosition) so none opens a short.
+pub fn cancel_leftover_sells(client: &mut dyn LiveClient, symbol: &str) {
+    if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
+        for row in rows {
+            let side = row
+                .get("side")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if side != "SELL" {
+                continue;
+            }
+            if let Some(id) = algo_id_of(&row) {
+                let _ = client.cancel_algo_order(symbol, &id);
+            }
+        }
+    }
+    if let Ok(rows) = client.open_orders(Some(symbol)) {
+        for row in rows {
+            let side = row
+                .get("side")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if side != "SELL" {
+                continue;
+            }
+            if let Some(id) = order_id_of(&row) {
+                let _ = client.cancel_plain_order(symbol, id);
+            }
+        }
+    }
+}
+
 fn flag_true(value: &Value) -> bool {
     match value {
         Value::Bool(true) => true,
