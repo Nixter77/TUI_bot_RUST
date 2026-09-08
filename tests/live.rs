@@ -50,6 +50,7 @@ struct FakeClient {
     pub fill_on_buy_fail: bool,
     pub fail_algo: bool,
     pub fail_replace: bool,
+    pub fail_replace_msg: Option<String>,
     pub fail_replace_times: usize,
     pub fail_risk: bool,
     pub order_list_calls: usize,
@@ -82,6 +83,7 @@ impl FakeClient {
             fill_on_buy_fail: false,
             fail_algo: false,
             fail_replace: false,
+            fail_replace_msg: None,
             fail_replace_times: 0,
             fail_risk: false,
             order_list_calls: 0,
@@ -185,7 +187,10 @@ impl LiveClient for FakeClient {
             return Err(ExchangeError("HTTP 502 /fapi/v1/algoOrder: gateway".into()));
         }
         if self.fail_replace {
-            return Err(ExchangeError("HTTP 502 /fapi/v1/algoOrder: gateway".into()));
+            let msg = self.fail_replace_msg.clone().unwrap_or_else(|| {
+                "HTTP 502 /fapi/v1/algoOrder: gateway".into()
+            });
+            return Err(ExchangeError(msg));
         }
         if let Some((sym, amt)) = &self.flip_to_short_on_replace {
             self.risk = json!([{
@@ -1803,6 +1808,84 @@ fn s5_amend_without_stored_tp_uses_2r_not_cfg_tp_pct() {
     let want_tp = s5_2r_tp(d("1000"), sl, &cfg);
     assert_eq!(*tp, Some(want_tp));
     assert_ne!(want_tp, take_profit_price_net(d("1000"), "LONG", cfg.tp_pct).unwrap());
+}
+
+
+#[test]
+fn amend_2021_fail_closed_flattens_no_storm() {
+    // Protective amend that would immediately trigger must flatten once, not KEEP-retry.
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fail_replace = true;
+    client.fail_replace_msg = Some(
+        "HTTP 400 /fapi/v1/algoOrder: {\"code\":-2021,\"msg\":\"Order would immediately trigger.\"}"
+            .into(),
+    );
+    let live = Position::long(
+        "ORCAUSDT",
+        d("49.4"),
+        d("1.542"),
+        Some(d("1.48")),
+        Some(d("1.667")),
+    );
+    let mut snap = live_book(Some(live.clone()), vec![live.clone()]);
+    // Mark above amend SL so we hit exchange -2021 (not local mark<=sl precheck).
+    snap.tickers = vec![Ticker::new("ORCAUSDT", d("1.50"), d("0"), d("1e9"))];
+    let state = EngineState::new(4);
+    let decision = Decision::AmendStop {
+        stop_loss: d("1.49"),
+        reason: "trail mark 0.8%".into(),
+        symbol: "ORCAUSDT".into(),
+    };
+    let r1 = apply_live(&cfg, &mut client, &snap, &decision, Some(&state));
+    assert!(
+        r1.error
+            .as_deref()
+            .is_some_and(|e| e.contains("2021") || e.contains("fail-closed")),
+        "err={:?}",
+        r1.error
+    );
+    assert_eq!(r1.forget_symbol, "ORCAUSDT");
+    assert_eq!(client.closes.len(), 1, "must market_close fail-closed: {:?}", client.closes);
+    assert_eq!(client.closes[0].0, "ORCAUSDT");
+}
+
+#[test]
+fn rearm_2021_fail_closed_immediate() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fail_replace = true;
+    client.fail_replace_msg = Some(
+        "HTTP 400 /fapi/v1/algoOrder: {\"code\":-2021,\"msg\":\"Order would immediately trigger.\"}"
+            .into(),
+    );
+    let live = Position::long(
+        "ORCAUSDT",
+        d("49.4"),
+        d("1.542"),
+        Some(d("1.48")),
+        Some(d("1.667")),
+    );
+    let mut snap = live_book(Some(live.clone()), vec![live.clone()]);
+    snap.tickers = vec![Ticker::new("ORCAUSDT", d("1.50"), d("0"), d("1e9"))];
+    let mut state = EngineState::new(4);
+    state.positions = vec![live];
+    let done = rearm_live_protectives(&cfg, &mut client, &mut state, &snap);
+    assert_eq!(done, vec!["ORCAUSDT".to_string()]);
+    assert_eq!(client.closes.len(), 1, "{:?}", client.closes);
+    assert!(state.positions.is_empty(), "{:?}", state.positions);
+}
+
+#[test]
+fn classify_2021_is_retry_not_keep() {
+    let info = tui_bot::errors::classify(
+        "HTTP 400 /fapi/v1/algoOrder: {\"code\":-2021,\"msg\":\"Order would immediately trigger.\"}",
+    );
+    assert_eq!(info.code, Some(-2021));
+    assert_eq!(info.action, tui_bot::errors::ACTION_RETRY);
+    assert!(tui_bot::errors::is_immediate_trigger_error(
+        "HTTP 400: {\"code\":-2021,\"msg\":\"Order would immediately trigger.\"}"
+    ));
 }
 
 #[test]

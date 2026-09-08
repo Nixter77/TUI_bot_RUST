@@ -1494,10 +1494,6 @@ pub fn rearm_live_protectives(
         return Vec::new();
     }
     let now = unix_now();
-    // During retry backoff, do not re-POST algoOrder every poll (ORCA −2021 storm).
-    if now < state.retry_until {
-        return Vec::new();
-    }
     let mut done = Vec::new();
     let longs: Vec<Position> = snapshot
         .open_positions
@@ -1589,8 +1585,7 @@ pub fn rearm_live_protectives(
                 done.push(live.symbol.clone());
                 continue;
             }
-            // Back off retries so ACTION_KEEP-class noise cannot mill every poll.
-            arm_retry_backoff(state);
+            // Space retries via rearm_miss_since wall clock; avoid entry-wide retry_until here.
             state.last_error = Some(exc.0);
             continue;
         }

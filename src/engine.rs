@@ -426,7 +426,7 @@ pub fn tick_decisions(
 ) -> (EngineState, Vec<Decision>) {
     let mut state = state.clone();
     let remembered = remembered_positions(state.position.as_ref(), &state.positions);
-    let (merged_list, mut inflight): (Vec<Position>, Vec<String>) = if snapshot.live_book {
+    let (mut merged_list, mut inflight): (Vec<Position>, Vec<String>) = if snapshot.live_book {
         let mut live_longs: Vec<Position> = snapshot
             .open_positions
             .iter()
