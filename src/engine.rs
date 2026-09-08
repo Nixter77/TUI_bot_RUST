@@ -486,6 +486,17 @@ pub fn tick_decisions(
         (merged_list, inflight)
     };
 
+    // S4/S5: only manage opens tagged for this strategy_id (foreign → unmanaged).
+    if is_continuation(state.strategy_id) {
+        merged_list.retain(|p| {
+            crate::openmeta::continuation_owns(
+                &p.symbol,
+                state.strategy_id,
+                &state.s4_inherited,
+            )
+        });
+    }
+
     let merged = merged_list.first().cloned();
     crate::openmeta::update_from_positions(&merged_list, snapshot, now);
     let mut work = snapshot.clone();
@@ -571,8 +582,13 @@ pub fn tick_decisions(
         );
     }
     let mut tail = Vec::new();
-    if snapshot.live_book && now_flat {
+    if snapshot.live_book {
+        // Flat book leftovers OR foreign-strategy longs (S4/S5 isolation).
         tail = unmanaged_positions(&snapshot.open_positions, &merged_list);
+        if !now_flat {
+            // Keep only non-managed rows (foreign / shorts); managed stays in book.
+            // unmanaged_positions already excludes managed longs.
+        }
     }
 
     let mut next_leaders = state.recent_leaders.clone();

@@ -2,8 +2,8 @@
 
 use crate::config::Config;
 use crate::errors::{
-    classify, retry_backoff_sec, ACTION_COOLDOWN, ACTION_IGNORE, ACTION_OPERATOR, ACTION_RETRY,
-    ACTION_SKIP, COOLDOWN_SEC,
+    classify, is_immediate_trigger_error, retry_backoff_sec, ACTION_COOLDOWN, ACTION_IGNORE,
+    ACTION_OPERATOR, ACTION_RETRY, ACTION_SKIP, COOLDOWN_SEC,
 };
 use crate::exchange::{
     cancel_leftover_sells, size_risk_market_order, sell_protectives_are_sized, size_market_order,
@@ -36,6 +36,46 @@ pub struct LiveApplyResult {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ReconcileResult {
     pub last_text: String,
+}
+
+fn arm_retry_backoff(state: &mut EngineState) {
+    state.retry_strikes = state.retry_strikes.saturating_add(1).min(3);
+    let until = unix_now() + retry_backoff_sec(state.retry_strikes);
+    if until > state.retry_until {
+        state.retry_until = until;
+    }
+}
+
+/// −2021 on protective place/amend: market already through the trigger — flatten, do not storm.
+fn fail_closed_immediate_trigger(
+    cfg: &Config,
+    client: &mut dyn LiveClient,
+    state: Option<&EngineState>,
+    symbol: &str,
+    qty: Decimal,
+    detail: &str,
+) -> LiveApplyResult {
+    let _ = client.cancel_protectives(symbol);
+    let close_note = match client.market_close(symbol, "LONG", qty) {
+        Ok(()) => String::new(),
+        Err(e) => format!("; close: {e}"),
+    };
+    cancel_leftover_sells(client, symbol);
+    if let Some(st) = state {
+        journal::record_flatten(
+            st.strategy_id,
+            &[symbol.to_string()],
+            cfg.live,
+            "−2021 immediate trigger — flatten",
+        );
+    }
+    LiveApplyResult {
+        error: Some(format!("fail-closed −2021: {detail}{close_note}")),
+        filled: false,
+        qty: Some(qty),
+        forget_symbol: symbol.to_string(),
+        ..Default::default()
+    }
 }
 
 fn skip_symbols(state: Option<&EngineState>) -> std::collections::HashSet<String> {
@@ -637,7 +677,30 @@ fn amend_live(
             None => return err("skip amend: missing take profit and entry"),
         }
     };
+    // Local mark already through the new stop → fail-closed without hammering algoOrder.
+    if let Some(mark) = mark_for_symbol(snapshot, &pos.symbol) {
+        if mark <= stop_loss {
+            return fail_closed_immediate_trigger(
+                cfg,
+                client,
+                state,
+                &pos.symbol,
+                pos.qty,
+                "mark through SL before amend",
+            );
+        }
+    }
     if let Err(e) = client.replace_stop(&pos.symbol, stop_loss, Some(tp), Some(pos.qty)) {
+        if is_immediate_trigger_error(&e.0) {
+            return fail_closed_immediate_trigger(
+                cfg,
+                client,
+                state,
+                &pos.symbol,
+                pos.qty,
+                &e.0,
+            );
+        }
         if reason.contains("безубыток на 1R") {
             let _ = client.cancel_protectives(&pos.symbol);
             let close_note = match client.market_close(&pos.symbol, "LONG", pos.qty) {
@@ -778,6 +841,7 @@ fn reduce_live(
     // BE amend: retry once; if still fail → flatten remain AND keep scaled latch (no reduce spam).
     let be_err = match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
         Ok(()) => None,
+        Err(first) if is_immediate_trigger_error(&first.0) => Some(first),
         Err(_first) => match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
             Ok(()) => None,
             Err(e2) => Some(e2),
@@ -1430,11 +1494,23 @@ pub fn rearm_live_protectives(
         return Vec::new();
     }
     let now = unix_now();
+    // During retry backoff, do not re-POST algoOrder every poll (ORCA −2021 storm).
+    if now < state.retry_until {
+        return Vec::new();
+    }
     let mut done = Vec::new();
     let longs: Vec<Position> = snapshot
         .open_positions
         .iter()
         .filter(|p| p.side == Side::Long && p.qty > Decimal::ZERO)
+        .filter(|p| {
+            !crate::engine::is_continuation(state.strategy_id)
+                || crate::openmeta::continuation_owns(
+                    &p.symbol,
+                    state.strategy_id,
+                    &state.s4_inherited,
+                )
+        })
         .cloned()
         .collect();
     for live in longs {
@@ -1473,7 +1549,29 @@ pub fn rearm_live_protectives(
             // Listing error is not proof the stop is still there. Rearm.
             _ => {}
         }
+        // Mark already through SL → fail-closed immediately (no algoOrder storm).
+        if let Some(mark) = mark_for_symbol(snapshot, &live.symbol) {
+            if mark <= sl {
+                flatten_missing_protectives(
+                    cfg,
+                    client,
+                    state,
+                    &live,
+                    "rearm: mark through SL (−2021 fail-closed)",
+                );
+                arm_retry_backoff(state);
+                done.push(live.symbol.clone());
+                continue;
+            }
+        }
         if let Err(exc) = client.replace_stop(&live.symbol, sl, Some(tp), Some(live.qty)) {
+            // −2021: stop would fire now — fail-closed flatten + backoff (no keep-storm).
+            if is_immediate_trigger_error(&exc.0) {
+                flatten_missing_protectives(cfg, client, state, &live, &exc.0);
+                arm_retry_backoff(state);
+                done.push(live.symbol.clone());
+                continue;
+            }
             // -4130 ≠ armed. Drop closePosition blockers; only mark sized if verified.
             if classify(&exc.0).code == Some(-4130) {
                 crate::exchange::cancel_close_position_sells(client, &live.symbol);
@@ -1491,6 +1589,8 @@ pub fn rearm_live_protectives(
                 done.push(live.symbol.clone());
                 continue;
             }
+            // Back off retries so ACTION_KEEP-class noise cannot mill every poll.
+            arm_retry_backoff(state);
             state.last_error = Some(exc.0);
             continue;
         }

@@ -6,7 +6,7 @@ use crate::models::{Bar, EngineState, MarketSnapshot, Position, Ticker};
 use crate::money::{dec, fmt_fixed};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -162,11 +162,15 @@ pub fn set_active_path(path: Option<PathBuf>) {
     *lock_poison(&ACTIVE_PATH) = path;
     // Reload from disk when path changes.
     let p = lock_poison(&ACTIVE_PATH).clone();
-    let map = p
+    let mut map = p
         .as_ref()
         .map(|path| load_file(path))
         .unwrap_or_default();
+    let dropped = sanitize_map(&mut map);
     *lock_poison(&STORE) = map;
+    if dropped > 0 {
+        persist_now();
+    }
 }
 
 fn active_path() -> PathBuf {
@@ -206,6 +210,68 @@ pub fn persist_now() {
 pub fn get(symbol: &str) -> Option<OpenTradeMeta> {
     let key = symbol.to_ascii_uppercase();
     lock_poison(&STORE).get(&key).cloned()
+}
+
+/// Drop garbage / inverted / unparseable rows. Long-book meta only.
+/// - qty/entry/sl <= 0 or unparseable
+/// - strategy_id outside 1..=5
+/// - SL > entry by more than 5% (not a BE bump; e.g. entry=1000 sl=49000)
+/// - initial stop distance > 50% of entry
+pub fn meta_is_sane(m: &OpenTradeMeta) -> bool {
+    if !(1..=5).contains(&m.strategy_id) {
+        return false;
+    }
+    let (Some(entry), Some(qty)) = (m.entry_dec(), m.qty_dec()) else {
+        return false;
+    };
+    let Some(sl) = dec(&m.initial_sl).ok() else {
+        return false;
+    };
+    if entry <= Decimal::ZERO || qty <= Decimal::ZERO || sl <= Decimal::ZERO {
+        return false;
+    }
+    if sl > entry {
+        let prem = (sl - entry) / entry;
+        if prem > Decimal::new(5, 2) {
+            return false;
+        }
+    } else {
+        let dist = (entry - sl) / entry;
+        if dist > Decimal::new(5, 1) {
+            return false;
+        }
+    }
+    initial_risk_usdt(entry, sl, qty).is_some()
+}
+
+fn sanitize_map(map: &mut HashMap<String, OpenTradeMeta>) -> usize {
+    let before = map.len();
+    map.retain(|_, m| meta_is_sane(m));
+    before.saturating_sub(map.len())
+}
+
+/// Sanitize in-memory store and persist if anything dropped. Returns drop count.
+pub fn sanitize_store() -> usize {
+    let mut store = lock_poison(&STORE);
+    let dropped = sanitize_map(&mut store);
+    if dropped > 0 {
+        persist_locked(&store);
+    }
+    dropped
+}
+
+/// S4/S5 manage isolation: only touch positions tagged for this strategy
+/// (S5 may also manage `s4_inherited` slots after an explicit 4→5 adopt).
+pub fn continuation_owns(symbol: &str, strategy_id: i32, inherited_s4: &HashSet<String>) -> bool {
+    let key = symbol.to_ascii_uppercase();
+    match get(&key).map(|m| m.strategy_id) {
+        Some(sid) if sid == strategy_id => true,
+        Some(4) if strategy_id == 5 && inherited_s4.iter().any(|s| s == &key) => true,
+        // Tagged for another strategy → do not manage (S4 must not trail S5, etc.).
+        Some(_) => false,
+        // Untagged (paper / first tick before on_open) → current lens may manage.
+        None => true,
+    }
 }
 
 pub fn on_open(
@@ -431,10 +497,16 @@ pub fn remove(symbol: &str) {
 
 /// Restore `scaled_one_r` and ensure meta exists for unmatched opens.
 pub fn seed_from_positions(state: &mut EngineState, positions: &[Position], now: f64) {
+    // Drop durable garbage before seeding latches / claiming opens.
+    let _ = sanitize_store();
     let mut store = lock_poison(&STORE);
     for pos in positions {
         let key = pos.symbol.to_ascii_uppercase();
         if let Some(m) = store.get(&key) {
+            // Foreign strategy meta must not latch scaled_one_r on this lens.
+            if m.strategy_id != state.strategy_id {
+                continue;
+            }
             if m.scaled_at_1r {
                 state.scaled_one_r.insert(key.clone());
             }
@@ -450,24 +522,25 @@ pub fn seed_from_positions(state: &mut EngineState, positions: &[Position], now:
             .opened_bar_time
             .map(|ms| ms as f64 / 1000.0)
             .unwrap_or(now);
-        store.insert(
-            key.clone(),
-            OpenTradeMeta {
-                symbol: key,
-                strategy_id: state.strategy_id,
-                entry: fmt_fixed(pos.entry_price),
-                initial_sl: fmt_fixed(sl),
-                initial_qty: fmt_fixed(pos.qty),
-                initial_risk_usdt: fmt_fixed(risk),
-                opened_ts: opened,
-                mfe_usdt: "0".into(),
-                mae_usdt: "0".into(),
-                mfe_peak_ts: None,
-                time_to_1r_ts: None,
-                scaled_at_1r: false,
-                btc_regime: None,
-            },
-        );
+        let meta = OpenTradeMeta {
+            symbol: key.clone(),
+            strategy_id: state.strategy_id,
+            entry: fmt_fixed(pos.entry_price),
+            initial_sl: fmt_fixed(sl),
+            initial_qty: fmt_fixed(pos.qty),
+            initial_risk_usdt: fmt_fixed(risk),
+            opened_ts: opened,
+            mfe_usdt: "0".into(),
+            mae_usdt: "0".into(),
+            mfe_peak_ts: None,
+            time_to_1r_ts: None,
+            scaled_at_1r: false,
+            btc_regime: None,
+        };
+        if !meta_is_sane(&meta) {
+            continue;
+        }
+        store.insert(key, meta);
     }
     persist_locked(&store);
 }
@@ -640,4 +713,88 @@ mod tests {
         assert_eq!(m.mae_usdt.as_deref(), Some("2"));
         set_active_path(None);
     }
+
+    #[test]
+    fn garbage_meta_is_rejected() {
+        let bad_btc = OpenTradeMeta {
+            symbol: "BTCUSDT".into(),
+            strategy_id: 1,
+            entry: "1000".into(),
+            initial_sl: "49000".into(),
+            initial_qty: "0.02".into(),
+            initial_risk_usdt: "960".into(),
+            opened_ts: 1.0,
+            mfe_usdt: "0".into(),
+            mae_usdt: "0".into(),
+            mfe_peak_ts: None,
+            time_to_1r_ts: None,
+            scaled_at_1r: false,
+            btc_regime: None,
+        };
+        assert!(!meta_is_sane(&bad_btc));
+        let ok = OpenTradeMeta {
+            symbol: "ORCAUSDT".into(),
+            strategy_id: 4,
+            entry: "1.542".into(),
+            initial_sl: "1.48".into(),
+            initial_qty: "49.4".into(),
+            initial_risk_usdt: "3.0628".into(),
+            opened_ts: 1.0,
+            mfe_usdt: "0".into(),
+            mae_usdt: "0".into(),
+            mfe_peak_ts: None,
+            time_to_1r_ts: None,
+            scaled_at_1r: false,
+            btc_regime: None,
+        };
+        assert!(meta_is_sane(&ok));
+        let be = OpenTradeMeta {
+            symbol: "RAYSOLUSDT".into(),
+            strategy_id: 4,
+            entry: "1.0943".into(),
+            initial_sl: "1.1411968".into(), // ~4.3% above entry — still within 5% BE band
+            initial_qty: "39.6".into(),
+            initial_risk_usdt: "1.857".into(),
+            opened_ts: 1.0,
+            mfe_usdt: "0".into(),
+            mae_usdt: "0".into(),
+            mfe_peak_ts: None,
+            time_to_1r_ts: None,
+            scaled_at_1r: false,
+            btc_regime: None,
+        };
+        assert!(meta_is_sane(&be));
+    }
+
+    #[test]
+    fn continuation_owns_isolates_s4_s5() {
+        let mut map = HashMap::new();
+        map.insert(
+            "AAAUSDT".into(),
+            OpenTradeMeta {
+                symbol: "AAAUSDT".into(),
+                strategy_id: 4,
+                entry: "10".into(),
+                initial_sl: "9.5".into(),
+                initial_qty: "1".into(),
+                initial_risk_usdt: "0.5".into(),
+                opened_ts: 1.0,
+                mfe_usdt: "0".into(),
+                mae_usdt: "0".into(),
+                mfe_peak_ts: None,
+                time_to_1r_ts: None,
+                scaled_at_1r: false,
+                btc_regime: None,
+            },
+        );
+        *lock_poison(&STORE) = map;
+        let empty = HashSet::new();
+        assert!(continuation_owns("AAAUSDT", 4, &empty));
+        assert!(!continuation_owns("AAAUSDT", 5, &empty));
+        let mut inh = HashSet::new();
+        inh.insert("AAAUSDT".into());
+        assert!(continuation_owns("AAAUSDT", 5, &inh));
+        assert!(continuation_owns("MISSING", 4, &empty)); // untagged → allow
+    }
+
 }

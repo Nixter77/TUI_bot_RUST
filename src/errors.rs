@@ -50,7 +50,9 @@ fn policy(code: i32) -> Option<(&'static str, &'static str)> {
         -2011 | -2013 | -4130 => (ACTION_IGNORE, "ignore"),
         -2014 | -2015 | -1022 | -2023 | -1002 | -1003 | -1099 => (ACTION_OPERATOR, "operator"),
         -2018 | -2019 => (ACTION_COOLDOWN, "margin"),
-        -2022 | -2026 | -2021 | -4087 | -2024 => (ACTION_KEEP, "keep"),
+        -2022 | -2026 | -4087 | -2024 => (ACTION_KEEP, "keep"),
+        // −2021: protective would fire now — live fail-closes; ACTION_RETRY backs off the storm.
+        -2021 => (ACTION_RETRY, "immediate_trigger"),
         -2027 | -4411 | -1121 | -4164 | -1013 | -1111 | -2010 => (ACTION_SKIP, "skip"),
         _ => return None,
     })
@@ -76,6 +78,10 @@ fn policy_message(code: i32) -> (&'static str, String) {
         -4130 => (
             ACTION_IGNORE,
             "TP/SL уже стоят на бирже (−4130). Не дублирую.".into(),
+        ),
+        -2021 => (
+            ACTION_RETRY,
+            "SL/TP сразу бы сработал (−2021). Закрываю fail-closed, без шторма.".into(),
         ),
         -2022 => (
             ACTION_KEEP,
@@ -311,4 +317,9 @@ pub fn is_retry_error(text: Option<&str>) -> bool {
         None | Some("") => false,
         Some(t) => classify(t).action == ACTION_RETRY,
     }
+}
+
+/// Binance −2021: conditional SL/TP would fire immediately at current mark.
+pub fn is_immediate_trigger_error(text: &str) -> bool {
+    classify(text).code == Some(-2021)
 }
