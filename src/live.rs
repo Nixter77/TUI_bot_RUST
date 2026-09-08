@@ -1500,7 +1500,17 @@ pub fn rearm_live_protectives(
         .iter()
         .filter(|p| p.side == Side::Long && p.qty > Decimal::ZERO)
         .filter(|p| {
-            !crate::engine::is_continuation(state.strategy_id)
+            if !crate::engine::is_continuation(state.strategy_id) {
+                return true;
+            }
+            // Session-tracked slots always rearm (avoids cross-test open_meta races
+            // and keeps restore paths honest). Foreign tagged opens stay out.
+            let tracked = state
+                .positions
+                .iter()
+                .chain(state.position.iter())
+                .any(|x| x.symbol.eq_ignore_ascii_case(&p.symbol));
+            tracked
                 || crate::openmeta::continuation_owns(
                     &p.symbol,
                     state.strategy_id,
