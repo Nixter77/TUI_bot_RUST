@@ -94,7 +94,7 @@ impl TradeInterval {
     /// Skip the setup if structure/ATR stop is wider than this.
     pub fn max_stop_pct(self) -> Decimal {
         match self {
-            Self::Minute5 => Decimal::new(35, 3),
+            Self::Minute5 => Decimal::new(50, 3),
             Self::Minute15 => Decimal::new(50, 3),
             Self::Minute30 => Decimal::new(60, 3),
             Self::Hour1 => Decimal::new(80, 3),
@@ -154,8 +154,8 @@ pub fn fapi_base_allowed(base: &str, allow_mainnet: bool) -> bool {
 }
 pub const STRATEGY1_POLL_SECONDS: i32 = 60;
 pub const DEFAULT_MAX_POSITIONS: i32 = 1;
-/// Strategy 4 concurrent longs. Wider than S1 so the liquid book can fill.
-pub const DEFAULT_S4_MAX_POSITIONS: i32 = 5;
+/// Strategy 4 concurrent longs. Reduced from 5 to 3 for higher entry quality.
+pub const DEFAULT_S4_MAX_POSITIONS: i32 = 3;
 /// Strategy 2 (scalp) max hold in signal bars (1m-class). Shorter than legacy 24.
 pub const DEFAULT_S2_MAX_HOLD_BARS: usize = 8;
 

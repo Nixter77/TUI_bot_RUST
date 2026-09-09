@@ -2540,15 +2540,15 @@ fn strategy4_slots_ignore_strategy1_max_positions() {
     assert!(decisions.iter().any(is_enter), "{decisions:?}");
     assert_eq!(
         tui_bot::continuation::ContinuationParams::default().max_positions,
-        5
+        3
     );
 }
 
 #[test]
-fn strategy4_default_s4_max_positions_is_five() {
-    assert_eq!(tui_bot::config::DEFAULT_S4_MAX_POSITIONS, 5);
-    assert_eq!(MomentumParams::default().s4_max_positions, 5);
-    assert_eq!(tui_bot::continuation::ContinuationParams::default().max_positions, 5);
+fn strategy4_default_s4_max_positions_is_three() {
+    assert_eq!(tui_bot::config::DEFAULT_S4_MAX_POSITIONS, 3);
+    assert_eq!(MomentumParams::default().s4_max_positions, 3);
+    assert_eq!(tui_bot::continuation::ContinuationParams::default().max_positions, 3);
 }
 
 #[test]

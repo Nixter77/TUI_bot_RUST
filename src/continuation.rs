@@ -165,7 +165,7 @@ impl Default for ContinuationParams {
             always_enter: false,
             entry_windows: DEFAULT_ENTRY_WINDOWS.to_vec(),
             cooldown_sec: 1800.0,
-            max_positions: 5,
+            max_positions: 3,
             atr_period: 14,
             atr_k: Decimal::from(2),
             volume_confirm_frac: Decimal::new(3, 1), // 0.3
@@ -439,7 +439,7 @@ pub fn manage_continuation_long(
             // stale uPnL, or restore high is not "1R был" — live S5 ZEC/ZEN
             // flattened red and DASH scaled at MFE 0.72R (2026-09-06).
             let in_hand = one_r_in_hand(pos, mark);
-            // Hour1/S5: no 50% scale-out — full size to BE then trail.
+            // Hour1/S5: no 50% scale-out — full size to BE then trail at 2R.
             // S4 soak still banks half at 1R.
             if in_hand && !already_scaled && p.interval != TradeInterval::Hour1 {
                 let reduce_qty = (pos.qty / Decimal::TWO).normalize();
@@ -473,6 +473,17 @@ pub fn manage_continuation_long(
                     reason: "безубыток на 1R".into(),
                     symbol: pos.symbol.clone(),
                 };
+            }
+            // S5: never exit just because 1R was hit — let price reach 2R or stop
+            if in_hand && p.interval == TradeInterval::Hour1 {
+                if be > sl && be < mark && long_stop_is_valid(be, mark) {
+                    return Decision::AmendStop {
+                        stop_loss: be,
+                        reason: "безубыток на 1R".into(),
+                        symbol: pos.symbol.clone(),
+                    };
+                }
+                return Decision::hold("S5 держу до 2R");
             }
             if in_hand {
                 return Decision::ExitPosition {
@@ -737,12 +748,17 @@ fn skip_no_pullback(
         return Some("нет отката — не догоняю".into());
     }
     let recent: Vec<&Bar> = hist.iter().rev().take(5).collect();
-    if !recent.iter().any(|b| b.close < b.open) {
-        return Some("нет отката — не догоняю".into());
+    // Require at least 2 red candles in last 5 (not just 1) — deeper pullback filter
+    if recent.iter().filter(|b| b.close < b.open).count() < 2 {
+        return Some("недостаточно отката — не вхожу".into());
     }
     if let Some(prev) = hist.last() {
         if last.close <= prev.close {
             return Some("нет продолжения вверх — не вхожу".into());
+        }
+        // Confirmation candle: signal bar must close above previous bar's high
+        if last.close <= prev.high {
+            return Some("нет подтверждения — close ниже prev high".into());
         }
     }
     if p.volume_confirm_frac > Decimal::ZERO {

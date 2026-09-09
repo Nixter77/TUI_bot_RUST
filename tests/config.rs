@@ -156,7 +156,7 @@ fn leverage_and_notional_options() {
     assert!(unset.leverage.is_none());
     assert!(!unset.notional_from_exchange);
     assert_eq!(unset.max_positions, 1);
-    assert_eq!(unset.s4_max_positions, 5);
+    assert_eq!(unset.s4_max_positions, 3);
     assert_eq!(unset.daily_loss_usdt, Decimal::from(20));
     assert_eq!(unset.daily_loss_r, Decimal::from(3));
     assert_eq!(unset.order_notional, Decimal::from(20));
@@ -184,7 +184,7 @@ fn leverage_and_notional_options() {
     env.insert("STRATEGY1_MAX_POSITIONS".into(), "3".into());
     let three = load_config(false, None, Some(&env)).unwrap();
     assert_eq!(three.max_positions, 3);
-    assert_eq!(three.s4_max_positions, 5);
+    assert_eq!(three.s4_max_positions, 3);
 
     let mut env = HashMap::new();
     env.insert("STRATEGY4_MAX_POSITIONS".into(), "4".into());
