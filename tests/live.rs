@@ -30,6 +30,7 @@ struct FakeClient {
     pub buys: usize,
     pub protects: usize,
     pub protect_qty: Option<Decimal>,
+    pub protect_prices: Option<(Decimal, Decimal)>,
     pub protect_cancels: Vec<String>,
     pub replaces: Vec<(String, Decimal, Option<Decimal>)>,
     pub replace_qty: Option<Decimal>,
@@ -48,6 +49,7 @@ struct FakeClient {
     pub flip_to_short_on_replace: Option<(String, Decimal)>,
     pub fail_buy: Option<String>,
     pub fill_on_buy_fail: bool,
+    pub fill_price: Decimal,
     pub fail_algo: bool,
     pub fail_replace: bool,
     pub fail_replace_msg: Option<String>,
@@ -63,6 +65,7 @@ impl FakeClient {
             buys: 0,
             protects: 0,
             protect_qty: None,
+            protect_prices: None,
             protect_cancels: Vec::new(),
             replaces: Vec::new(),
             replace_qty: None,
@@ -81,6 +84,7 @@ impl FakeClient {
             flip_to_short_on_replace: None,
             fail_buy: None,
             fill_on_buy_fail: false,
+            fill_price: d("1000"),
             fail_algo: false,
             fail_replace: false,
             fail_replace_msg: None,
@@ -132,17 +136,24 @@ impl LiveClient for FakeClient {
             }
             return Err(ExchangeError(msg.clone()));
         }
+        self.risk = json!([{
+            "symbol": symbol,
+            "positionAmt": qty.to_string(),
+            "entryPrice": self.fill_price.to_string(),
+            "unRealizedProfit": "0",
+        }]);
         Ok(())
     }
     fn place_tp_sl(
         &mut self,
         _symbol: &str,
-        _tp: Decimal,
-        _sl: Decimal,
+        tp: Decimal,
+        sl: Decimal,
         qty: Option<Decimal>,
     ) -> Result<(), ExchangeError> {
         self.protects += 1;
         self.protect_qty = qty;
+        self.protect_prices = Some((tp, sl));
         if self.dup4130 {
             return Err(ExchangeError(
                 r#"HTTP 400 /fapi/v1/algoOrder: {"code":-4130,"msg":"An open stop or take profit order with GTE and closePosition in the direction is existing."}"#.into(),
@@ -257,8 +268,8 @@ fn enter() -> Decision {
     Decision::EnterLong {
         symbol: "BTCUSDT".into(),
         reason: "x".into(),
-        take_profit: d("51000"),
-        stop_loss: d("49000"),
+        take_profit: d("1010"),
+        stop_loss: d("990"),
     }
 }
 
@@ -334,14 +345,45 @@ fn close_position_4130_with_sized_pair_counts_as_armed() {
     client.dup4130 = true;
     // Sized pair already on book → -4130 after cancel/verify is armed success.
     client.algo_orders = vec![
-        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"STOP_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"49000","algoId":"s1"}),
-        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"TAKE_PROFIT_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"51000","algoId":"t1"}),
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"STOP_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"990","algoId":"s1"}),
+        json!({"symbol":"BTCUSDT","side":"SELL","orderType":"TAKE_PROFIT_MARKET","quantity":"0.01","closePosition":false,"triggerPrice":"1010","algoId":"t1"}),
     ];
     let result = apply_live(&cfg, &mut client, &snap(None), &enter(), None);
     assert!(result.filled, "{:?}", result);
     assert!(result.error.is_none(), "{:?}", result.error);
     assert_eq!(client.buys, 1);
     assert!(client.closes.is_empty());
+}
+
+#[test]
+fn live_entry_rebases_protection_and_accounting_to_confirmed_fill() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.fill_price = d("1005"); // market moved 0.5% after the snapshot
+    let mut state = EngineState::new(1);
+
+    let result = apply_decision(&cfg, &mut client, &mut state, &snap(None), &enter());
+
+    assert!(result.filled, "{:?}", result.error);
+    assert_eq!(result.entry_price, Some(d("1005")));
+    assert_eq!(client.protect_prices, Some((d("1015.05"), d("994.95"))));
+    let pos = state.position.expect("adopted fill");
+    assert_eq!(pos.entry_price, d("1005"));
+    assert_eq!(pos.stop_loss, Some(d("994.95")));
+    assert_eq!(pos.take_profit, Some(d("1015.05")));
+}
+
+#[test]
+fn fixed_notional_below_exchange_minimum_skips_instead_of_upsizing() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.min_notional = d("50");
+
+    let result = apply_live(&cfg, &mut client, &snap(None), &enter(), None);
+
+    assert!(!result.filled);
+    assert!(result.error.as_deref().unwrap_or("").contains("below 50 minNotional"));
+    assert_eq!(client.buys, 0);
 }
 
 #[test]
@@ -2172,4 +2214,3 @@ fn reduce_be_amend_retries_once_then_flattens_and_keeps_latch() {
         state.scaled_one_r
     );
 }
-

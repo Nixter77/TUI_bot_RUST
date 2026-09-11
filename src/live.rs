@@ -28,8 +28,13 @@ pub const REARM_FAIL_MAX: u8 = 3;
 pub struct LiveApplyResult {
     pub error: Option<String>,
     pub filled: bool,
+    /// Confirmed exchange average entry, never the stale market snapshot.
+    pub entry_price: Option<Decimal>,
     pub mark: Option<Decimal>,
     pub qty: Option<Decimal>,
+    /// Protection prices actually submitted for a newly filled long.
+    pub stop_loss: Option<Decimal>,
+    pub take_profit: Option<Decimal>,
     pub forget_symbol: String,
 }
 
@@ -393,6 +398,27 @@ fn place_fill_protectives(
     }
 }
 
+/// Keep the decision's percentage geometry when the market fill differs from
+/// the snapshot used to form the signal. Using the stale absolute prices can
+/// leave a stop above a long fill (or make TP/1R accounting wrong).
+fn rebase_long_protectives(
+    signal_mark: Decimal,
+    fill_price: Decimal,
+    take_profit: Decimal,
+    stop_loss: Decimal,
+) -> Result<(Decimal, Decimal), String> {
+    if signal_mark <= Decimal::ZERO || fill_price <= Decimal::ZERO {
+        return Err("invalid signal or fill price".into());
+    }
+    let scale = fill_price / signal_mark;
+    let sl = stop_loss * scale;
+    let tp = take_profit * scale;
+    if sl <= Decimal::ZERO || tp <= fill_price || sl >= fill_price {
+        return Err("rebased TP/SL invalid for exchange fill".into());
+    }
+    Ok((tp, sl))
+}
+
 fn leverage_for(cfg: &Config, snapshot: &MarketSnapshot, symbol: &str) -> i32 {
     if let Some(l) = cfg.leverage {
         return l;
@@ -535,6 +561,16 @@ fn enter_live(
         } else {
             cfg.order_notional
         };
+        // A configured fixed notional is a hard risk limit. `size_market_order`
+        // normally lifts it to Binance's minimum; silently buying 50/100 USDT
+        // when the operator requested 20 turns a small loss into a much larger
+        // one. Only the explicit exchange/min mode may use that minimum.
+        if !cfg.notional_from_exchange && notional < filters.min_notional {
+            return err(format!(
+                "skip enter: ORDER_NOTIONAL_USDT {notional} below {} minNotional",
+                filters.min_notional
+            ));
+        }
         match size_market_order(notional, mark, &filters) {
             Ok(q) => q,
             Err(e) => return err(e.0),
@@ -549,21 +585,31 @@ fn enter_live(
             return err(e.0);
         }
     }
-    if let Err(e) = client.market_buy(symbol, qty) {
-        match fetch_book(client) {
-            Ok(book) => {
-                let Some(row) = book.iter().find(|p| {
-                    p.symbol.eq_ignore_ascii_case(symbol)
-                        && p.side == Side::Long
-                        && p.qty > Decimal::ZERO
-                }) else {
-                    return err(e.0);
-                };
-                qty = row.qty;
+    let buy_error = client.market_buy(symbol, qty).err();
+    // RESULT confirms that Binance accepted the order, not that `mark` was the
+    // fill. Read positionRisk for both successful and timed-out posts; its
+    // entryPrice and quantity are the only safe source for protection/accounting.
+    let filled_pos = match fetch_book(client) {
+        Ok(book) => book
+            .into_iter()
+            .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.side == Side::Long && p.qty > Decimal::ZERO),
+        Err(e) => {
+            if buy_error.is_none() {
+                let _ = client.market_close(symbol, "LONG", qty);
+                return err(format!("flattened unconfirmed fill: {e}"));
             }
-            Err(_) => return err(e.0),
+            return err(buy_error.map(|e| e.0).unwrap_or(e.0));
         }
-    }
+    };
+    let Some(filled_pos) = filled_pos else {
+        return err(buy_error.map(|e| e.0).unwrap_or_else(|| "market buy not found in position book".into()));
+    };
+    qty = filled_pos.qty;
+    let entry_price = filled_pos.entry_price;
+    let (take_profit, stop_loss) = match rebase_long_protectives(mark, entry_price, take_profit, stop_loss) {
+        Ok(prices) => prices,
+        Err(detail) => return fail_closed_immediate_trigger(cfg, client, state, symbol, qty, &detail),
+    };
     if let Some(flipped) = flatten_live_short(client, symbol) {
         return LiveApplyResult {
             error: Some(format!("вход перевернул в шорт — закрыл {}", flipped.symbol)),
@@ -574,8 +620,11 @@ fn enter_live(
     match place_fill_protectives(client, symbol, take_profit, stop_loss, qty) {
         Ok(()) => LiveApplyResult {
             filled: true,
-            mark: Some(mark),
+            entry_price: Some(entry_price),
+            mark: Some(entry_price),
             qty: Some(qty),
+            stop_loss: Some(stop_loss),
+            take_profit: Some(take_profit),
             ..Default::default()
         },
         Err(exc) => {
@@ -586,8 +635,11 @@ fn enter_live(
                     if sell_protectives_are_sized(&rows) {
                         return LiveApplyResult {
                             filled: true,
-                            mark: Some(mark),
+                            entry_price: Some(entry_price),
+                            mark: Some(entry_price),
                             qty: Some(qty),
+                            stop_loss: Some(stop_loss),
+                            take_profit: Some(take_profit),
                             ..Default::default()
                         };
                     }
@@ -614,6 +666,7 @@ fn enter_live(
                     mark: Some(mark),
                     qty: Some(qty),
                     forget_symbol: symbol.to_string(),
+                    ..Default::default()
                 }
             }
         }
@@ -726,6 +779,7 @@ fn amend_live(
                 mark,
                 qty: Some(pos.qty),
                 forget_symbol: pos.symbol.clone(),
+                ..Default::default()
             };
         }
         return err(e.0);
@@ -869,6 +923,7 @@ fn reduce_live(
             mark,
             qty: Some(close_qty),
             forget_symbol: pos.symbol.clone(),
+            ..Default::default()
         };
     }
     if let Some(flipped) = flatten_live_short(client, &pos.symbol) {
@@ -1083,11 +1138,18 @@ pub fn apply_paper_decision(
     }
 }
 
-pub fn adopt_live_fill(state: &mut EngineState, decision: &Decision, mark: Decimal, qty: Decimal) {
+pub fn adopt_live_fill(
+    state: &mut EngineState,
+    decision: &Decision,
+    entry_price: Decimal,
+    qty: Decimal,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+) {
     let Decision::EnterLong {
         symbol,
-        stop_loss,
-        take_profit,
+        stop_loss: _,
+        take_profit: _,
         ..
     } = decision
     else {
@@ -1097,9 +1159,9 @@ pub fn adopt_live_fill(state: &mut EngineState, decision: &Decision, mark: Decim
         symbol: symbol.clone(),
         side: Side::Long,
         qty,
-        entry_price: mark,
-        stop_loss: Some(*stop_loss),
-        take_profit: Some(*take_profit),
+        entry_price,
+        stop_loss: Some(stop_loss),
+        take_profit: Some(take_profit),
         unrealized_pnl: Decimal::ZERO,
         opened_bar_time: Some((unix_now() * 1000.0) as i64),
         leverage: 0,
@@ -1402,14 +1464,19 @@ pub fn apply_decision(
     }
     if result.filled {
         if let Decision::EnterLong { .. } = decision {
-            if let (Some(mark), Some(qty)) = (result.mark, result.qty) {
-                adopt_live_fill(state, decision, mark, qty);
+            if let (Some(entry_price), Some(qty), Some(stop_loss), Some(take_profit)) = (
+                result.entry_price,
+                result.qty,
+                result.stop_loss,
+                result.take_profit,
+            ) {
+                adopt_live_fill(state, decision, entry_price, qty, stop_loss, take_profit);
                 if result.error.is_none() {
                     if let Decision::EnterLong {
                         symbol,
                         reason,
-                        stop_loss,
-                        take_profit,
+                        stop_loss: _,
+                        take_profit: _,
                     } = decision
                     {
                         state.sized_stops.insert(symbol.to_ascii_uppercase());
@@ -1421,16 +1488,16 @@ pub fn apply_decision(
                         let snap = crate::openmeta::build_entry_snapshot(
                             snapshot,
                             symbol,
-                            mark,
-                            *stop_loss,
+                            entry_price,
+                            stop_loss,
                             Some(snap_risk),
                             Some(snapshot.account.equity()),
                         );
                         crate::openmeta::on_open(
                             state.strategy_id,
                             symbol,
-                            mark,
-                            *stop_loss,
+                            entry_price,
+                            stop_loss,
                             qty,
                             crate::sessions::unix_now(),
                             snap.btc_regime.clone(),
@@ -1439,11 +1506,11 @@ pub fn apply_decision(
                             state.strategy_id,
                             symbol,
                             qty,
-                            mark,
+                            entry_price,
                             reason,
                             cfg.live,
-                            Some(*stop_loss),
-                            Some(*take_profit),
+                            Some(stop_loss),
+                            Some(take_profit),
                             Some(&snap),
                         );
                     }
