@@ -900,7 +900,7 @@ fn enter_from_ticker(
     if is_major_symbol(&ticker.symbol) {
         return Decision::hold("мажор — не беру");
     }
-    if p.interval == TradeInterval::Hour1 && s5_skip_symbol(&ticker.symbol) {
+    if s5_skip_symbol(&ticker.symbol) {
         return Decision::hold(S5_PRIVACY_SKIP);
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
@@ -1083,7 +1083,8 @@ fn skip_new_long(
     if is_major_symbol(&ticker.symbol) {
         return Some("мажор — не беру".into());
     }
-    if p.interval == TradeInterval::Hour1 && s5_skip_symbol(&ticker.symbol) {
+    // ZEC+DASH+ZEN/XMR dump as one book on live (S5 2026-09-06); block on S4 too.
+    if s5_skip_symbol(&ticker.symbol) {
         return Some(S5_PRIVACY_SKIP.into());
     }
     // Live: first 3 min of the 1h bar — wait for the closed kline to settle.

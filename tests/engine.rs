@@ -3350,8 +3350,13 @@ fn strategy5_skips_live_privacy_cluster() {
     );
     let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
     assert!(
-        s4.iter().any(|d| is_enter(d) && d.symbol() == "ZECUSDT"),
-        "S4 soak must still allow liquid ZEC: {s4:?}"
+        !s4.iter().any(is_enter),
+        "S4 must skip ZEC privacy cluster too: {s4:?}"
+    );
+    assert!(
+        s4.iter()
+            .any(|d| d.reason().contains("privacy") || d.reason().contains("кластер")),
+        "{s4:?}"
     );
 }
 
