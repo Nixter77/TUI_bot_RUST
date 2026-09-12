@@ -325,7 +325,7 @@ fn attach_stop_from_entry(pos: &Position, mark: Decimal, p: &ContinuationParams)
     };
     if mark <= cand {
         return Decision::ExitPosition {
-            reason: "continuation stop from entry".into(),
+            reason: "continuation stop from entry".to_string(),
             symbol: pos.symbol.clone(),
         };
     }
@@ -334,7 +334,7 @@ fn attach_stop_from_entry(pos: &Position, mark: Decimal, p: &ContinuationParams)
     }
     Decision::AmendStop {
         stop_loss: cand,
-        reason: "attach stop from entry".into(),
+        reason: "attach stop from entry".to_string(),
         symbol: pos.symbol.clone(),
     }
 }
@@ -391,7 +391,7 @@ pub fn manage_continuation_long(
     if let Some(tp) = pos.take_profit {
         if mark >= tp {
             return Decision::ExitPosition {
-                reason: "continuation take profit".into(),
+                reason: "continuation take profit".to_string(),
                 symbol: pos.symbol.clone(),
             };
         }
@@ -401,7 +401,7 @@ pub fn manage_continuation_long(
     };
     if mark <= sl {
         return Decision::ExitPosition {
-            reason: "continuation stop loss".into(),
+            reason: "continuation stop loss".to_string(),
             symbol: pos.symbol.clone(),
         };
     }
@@ -411,7 +411,7 @@ pub fn manage_continuation_long(
         if let (Some(ema), Some(last)) = (last_ema(&closes, 20), htf.last()) {
             if last.close <= ema {
                 return Decision::ExitPosition {
-                    reason: "4ч сломал тренд".into(),
+                    reason: "4ч сломал тренд".to_string(),
                     symbol: pos.symbol.clone(),
                 };
             }
@@ -438,12 +438,12 @@ pub fn manage_continuation_long(
                 if lock_025 > sl && lock_025 < mark && long_stop_is_valid(lock_025, mark) {
                     return Decision::AmendStop {
                         stop_loss: lock_025,
-                        reason: "откат с пика — замок 0.25R".into(),
+                        reason: "откат с пика — замок 0.25R".to_string(),
                         symbol: pos.symbol.clone(),
                     };
                 }
                 return Decision::ExitPosition {
-                    reason: "откат с пика".into(),
+                    reason: "откат с пика".to_string(),
                     symbol: pos.symbol.clone(),
                 };
             }
@@ -466,7 +466,7 @@ pub fn manage_continuation_long(
                 {
                     return Decision::ReduceLong {
                         symbol: pos.symbol.clone(),
-                        reason: "частичная фиксация 1R".into(),
+                        reason: "частичная фиксация 1R".to_string(),
                         qty: reduce_qty,
                         stop_loss: be,
                     };
@@ -485,7 +485,7 @@ pub fn manage_continuation_long(
             if in_hand && be > sl && be < mark && long_stop_is_valid(be, mark) {
                 return Decision::AmendStop {
                     stop_loss: be,
-                    reason: "безубыток на 1R".into(),
+                    reason: "безубыток на 1R".to_string(),
                     symbol: pos.symbol.clone(),
                 };
             }
@@ -494,7 +494,7 @@ pub fn manage_continuation_long(
                 if be > sl && be < mark && long_stop_is_valid(be, mark) {
                     return Decision::AmendStop {
                         stop_loss: be,
-                        reason: "безубыток на 1R".into(),
+                        reason: "безубыток на 1R".to_string(),
                         symbol: pos.symbol.clone(),
                     };
                 }
@@ -502,7 +502,7 @@ pub fn manage_continuation_long(
             }
             if in_hand {
                 return Decision::ExitPosition {
-                    reason: "1R был — фиксирую".into(),
+                    reason: "1R был — фиксирую".to_string(),
                     symbol: pos.symbol.clone(),
                 };
             }
@@ -532,7 +532,7 @@ pub fn manage_continuation_long(
                 {
                     return Decision::AmendStop {
                         stop_loss: lock_05,
-                        reason: "замок 0.5R".into(),
+                        reason: "замок 0.5R".to_string(),
                         symbol: pos.symbol.clone(),
                     };
                 }
@@ -677,7 +677,7 @@ fn time_stop_reason(pos: &Position, now: f64, p: &ContinuationParams) -> Option<
         && !p.entry_windows.is_empty()
         && !in_entry_window(now, Some(&p.entry_windows), false)
     {
-        return Some("конец окна входа".into());
+        return Some("конец окна входа".to_string());
     }
     None
 }
@@ -756,30 +756,30 @@ fn skip_no_pullback(
     // 6% is the 15m soak cap. Hour1 allows a wider signal candle up to max_stop.
     let max_range = p.max_stop_pct.max(Decimal::new(6, 2));
     if last.close > Decimal::ZERO && range / last.close > max_range {
-        return Some("свеча слишком широкая — не вхожу".into());
+        return Some("свеча слишком широкая — не вхожу".to_string());
     }
     let hist = hist_bars(snapshot, symbol, last);
     if hist.len() < 2 {
-        return Some("нет отката — не догоняю".into());
+        return Some("нет отката — не догоняю".to_string());
     }
     let recent: Vec<&Bar> = hist.iter().rev().take(5).collect();
     // Require at least 2 red candles in last 5 (not just 1) — deeper pullback filter
     if recent.iter().filter(|b| b.close < b.open).count() < 2 {
-        return Some("недостаточно отката — не вхожу".into());
+        return Some("недостаточно отката — не вхожу".to_string());
     }
     if let Some(prev) = hist.last() {
         if last.close <= prev.close {
-            return Some("нет продолжения вверх — не вхожу".into());
+            return Some("нет продолжения вверх — не вхожу".to_string());
         }
         // Confirmation candle: signal bar must close above previous bar's high
         if last.close <= prev.high {
-            return Some("нет подтверждения — close ниже prev high".into());
+            return Some("нет подтверждения — close ниже prev high".to_string());
         }
     }
     if p.volume_confirm_frac > Decimal::ZERO {
         if let Some(avg_vol) = mean_volume(hist) {
             if avg_vol > Decimal::ZERO && last.volume < avg_vol * p.volume_confirm_frac {
-                return Some("слабый объём — не подтверждено".into());
+                return Some("слабый объём — не подтверждено".to_string());
             }
         }
     }
@@ -789,7 +789,7 @@ fn skip_no_pullback(
         if swing_high > Decimal::ZERO {
             let depth = (swing_high - pullback_low) / swing_high;
             if depth < p.min_pullback_pct {
-                return Some("откат слишком мелкий — не вхожу".into());
+                return Some("откат слишком мелкий — не вхожу".to_string());
             }
         }
     }
@@ -802,17 +802,17 @@ fn skip_no_pullback(
 pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<String> {
     let bars = snapshot.htf_bars_for(symbol);
     if bars.len() < 21 {
-        return Some("нет 4ч истории — не вхожу".into());
+        return Some("нет 4ч истории — не вхожу".to_string());
     }
     let closes: Vec<Decimal> = bars.iter().map(|b| b.close).collect();
     let Some(ema) = last_ema(&closes, 20) else {
-        return Some("нет 4ч истории — не вхожу".into());
+        return Some("нет 4ч истории — не вхожу".to_string());
     };
     let Some(last) = bars.last() else {
-        return Some("нет 4ч истории — не вхожу".into());
+        return Some("нет 4ч истории — не вхожу".to_string());
     };
     if last.close <= ema {
-        return Some("4ч ниже EMA20 — не вхожу".into());
+        return Some("4ч ниже EMA20 — не вхожу".to_string());
     }
     None
 }
@@ -832,7 +832,7 @@ pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &Continuation
     };
     let last = bars.last()?;
     if last.close <= ema {
-        return Some("цена ниже EMA20 — не вхожу".into());
+        return Some("цена ниже EMA20 — не вхожу".to_string());
     }
     // Hour1: EMA20 must already be rising into the signal bar (not the last
     // close vs last EMA, which is the same as close>EMA20).
@@ -851,7 +851,7 @@ pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &Continuation
             return Some(format!("нет {tf} истории — не вхожу"));
         };
         if e1 <= e0 {
-            return Some("EMA20 1ч не растёт — не вхожу".into());
+            return Some("EMA20 1ч не растёт — не вхожу".to_string());
         }
     }
     None
@@ -949,14 +949,14 @@ fn skip_24h_tape(ticker: &Ticker, p: &ContinuationParams) -> Option<String> {
     // Dumps and dead tape stay out. A green day above `stretch_pct` is a
     // pullback candidate — chase is `near_24h_high`, not "anyone +4%".
     if c <= -p.stretch_pct {
-        return Some("улетело за день — не догоняю".into());
+        return Some("улетело за день — не догоняю".to_string());
     }
     if c < Decimal::ZERO || c < p.min_change_percent {
-        return Some("слабый рост 24h — не вхожу".into());
+        return Some("слабый рост 24h — не вхожу".to_string());
     }
     if let Some(max_c) = p.max_change_percent {
         if c > max_c {
-            return Some("улетело за день — не догоняю".into());
+            return Some("улетело за день — не догоняю".to_string());
         }
     }
     None
@@ -1099,13 +1099,13 @@ fn skip_new_long(
         return Some(reason);
     }
     if is_major_symbol(&ticker.symbol) {
-        let r = "мажор — не беру".into();
+        let r = "мажор — не беру".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
     // ZEC+DASH+ZEN/XMR dump as one book on live (S5 2026-09-06); block on S4 too.
     if s5_skip_symbol(&ticker.symbol) {
-        let r = S5_PRIVACY_SKIP.into();
+        let r = S5_PRIVACY_SKIP.to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
@@ -1114,16 +1114,16 @@ fn skip_new_long(
     if p.interval == TradeInterval::Hour1 {
         let into = now.rem_euclid(3600.0);
         if into > 0.0 && into < 180.0 {
-            return Some("первые 3 мин часа — не вхожу".into());
+            return Some("первые 3 мин часа — не вхожу".to_string());
         }
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
-        let r = "мелочь — не гоняю".into();
+        let r = "мелочь — не гоняю".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
     if !liquid.contains(&ticker.symbol.to_ascii_uppercase()) {
-        let r = "тонкий стакан — не гоняю".into();
+        let r = "тонкий стакан — не гоняю".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
@@ -1133,7 +1133,7 @@ fn skip_new_long(
     }
     // Same gate as monitor Ready: near-high must fail s4_setup_skip, not only the book.
     if near_24h_high(ticker, p.near_high_frac) {
-        let r = NEAR_HIGH_SKIP.into();
+        let r = NEAR_HIGH_SKIP.to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
@@ -1153,7 +1153,7 @@ fn skip_new_long(
         return Some(reason);
     }
     if is_reversing(snapshot, ticker, recent_leaders, p, now) {
-        let r = "разворот бывшего лидера — не гоняю".into();
+        let r = "разворот бывшего лидера — не гоняю".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
@@ -1161,12 +1161,12 @@ fn skip_new_long(
     if !bars.is_empty() {
         if let Some(vwap_price) = vwap(bars) {
             if ticker.last_price < vwap_price {
-                return Some("цена ниже VWAP — не вхожу".into());
+                return Some("цена ниже VWAP — не вхожу".to_string());
             }
         }
     }
     if structure_stop(snapshot, &ticker.symbol, bar, ticker.last_price, p).is_none() {
-        let r = "стоп слишком широкий — не вхожу".into();
+        let r = "стоп слишком широкий — не вхожу".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
     }
@@ -1266,7 +1266,7 @@ fn maybe_enter(
         {
             log_skip_reason(&ticker.symbol, S5_CORR_SKIP);
             note_s4_skip(S5_CORR_SKIP);
-            last_skip = Some(S5_CORR_SKIP.into());
+            last_skip = Some(S5_CORR_SKIP.to_string());
             continue;
         }
         let decision = enter_from_ticker(snapshot, ticker, p, now);
@@ -1281,7 +1281,7 @@ fn maybe_enter(
         vec![Decision::hold("continuation book full")]
     } else {
         vec![Decision::hold(
-            last_skip.unwrap_or_else(|| "нет входа в топ роста".into()),
+            last_skip.unwrap_or_else(|| "нет входа в топ роста".to_string()),
         )]
     }
 }
