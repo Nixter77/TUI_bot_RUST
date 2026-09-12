@@ -2,9 +2,13 @@
 
 use crate::config::{default_risk_pct, TradeInterval, STRATEGY1_POLL_SECONDS};
 use crate::dayrisk::{default_daily_loss_r, default_daily_loss_usdt};
-use crate::models::{MarketSnapshot, bar_is_red, near_24h_high, Bar, Decision, Position, Side, Ticker};
+use crate::models::{
+    bar_is_red, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side, Ticker,
+};
 use crate::ranking::{momentum_min_change_percent, pick_momentum_book};
-use crate::sessions::{in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS};
+use crate::sessions::{
+    in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS,
+};
 use crate::trail::{candidate_stop, long_stop_is_valid, take_profit_price_net, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
@@ -59,7 +63,11 @@ impl Default for MomentumParams {
     }
 }
 
-pub(crate) fn mark_for(symbol: &str, tickers: &[Ticker], bars_close: Option<Decimal>) -> Option<Decimal> {
+pub(crate) fn mark_for(
+    symbol: &str,
+    tickers: &[Ticker],
+    bars_close: Option<Decimal>,
+) -> Option<Decimal> {
     if let Some(c) = bars_close {
         if c > Decimal::ZERO {
             return Some(c);
@@ -155,7 +163,10 @@ fn enter_from_ticker(ticker: &Ticker, p: &MomentumParams) -> Decision {
         return Decision::hold("computed stop invalid");
     }
     let rank_note = if p.max_positions > 1 {
-        format!("top {} rising {}%", p.max_positions, ticker.price_change_percent)
+        format!(
+            "top {} rising {}%",
+            p.max_positions, ticker.price_change_percent
+        )
     } else {
         format!("most rising {}%", ticker.price_change_percent)
     };
@@ -213,10 +224,7 @@ pub fn momentum_decisions(
     let p = params.unwrap_or(&owned);
     let poll = p.poll_seconds;
     if poll != 60 && poll != 120 {
-        return (
-            vec![Decision::hold("poll_seconds must be 60 or 120")],
-            now,
-        );
+        return (vec![Decision::hold("poll_seconds must be 60 or 120")], now);
     }
     let book = pick_momentum_book(
         tickers,
@@ -253,7 +261,10 @@ pub fn momentum_decisions(
     if !in_entry_window(now, Some(&p.entry_windows), p.always_enter) {
         if out.is_empty() {
             let status = session_status(now, Some(&p.entry_windows), p.always_enter);
-            return (vec![Decision::hold(outside_entry_reason(&status))], last_scan_ts);
+            return (
+                vec![Decision::hold(outside_entry_reason(&status))],
+                last_scan_ts,
+            );
         }
         return (out, last_scan_ts);
     }
@@ -355,7 +366,10 @@ pub fn momentum_decisions(
         return (vec![Decision::hold("нет 5м бара — не вхожу")], now);
     }
     if !red.is_empty() {
-        return (vec![Decision::hold("слот в минусе — новый не открываю")], now);
+        return (
+            vec![Decision::hold("слот в минусе — новый не открываю")],
+            now,
+        );
     }
     if book.is_empty() {
         return (vec![Decision::hold("no eligible rising symbol")], now);
@@ -363,7 +377,10 @@ pub fn momentum_decisions(
     if held.len() as i32 >= p.max_positions {
         return (vec![Decision::hold("momentum book full")], now);
     }
-    (vec![Decision::hold("top rising already held or cooling")], now)
+    (
+        vec![Decision::hold("top rising already held or cooling")],
+        now,
+    )
 }
 
 pub fn momentum_decision(
@@ -375,7 +392,10 @@ pub fn momentum_decision(
 ) -> (Decision, f64) {
     if let Some(pos) = position {
         if pos.qty > Decimal::ZERO && pos.side != Side::Long {
-            return (Decision::hold("momentum is buy-only; short not managed"), last_scan_ts);
+            return (
+                Decision::hold("momentum is buy-only; short not managed"),
+                last_scan_ts,
+            );
         }
     }
     let held: Vec<Position> = position
@@ -400,7 +420,10 @@ pub fn momentum_decision(
         None,
     );
     (
-        decisions.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),
+        decisions
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Decision::hold("hold")),
         scan_ts,
     )
 }

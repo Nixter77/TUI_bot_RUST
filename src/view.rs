@@ -6,7 +6,9 @@ use crate::engine::{
 };
 use crate::errorlog::guess_source;
 use crate::errors::is_retry_error;
-use crate::models::{coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side};
+use crate::models::{
+    coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side,
+};
 use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
 use crate::render::ViewModel;
 use crate::signals::signals_enabled;
@@ -87,7 +89,10 @@ fn hide_poll_retry(snapshot: &MarketSnapshot) -> bool {
         .unwrap_or(false)
 }
 
-fn footer_errors(snapshot: &MarketSnapshot, state: &EngineState) -> (Option<String>, Option<String>, String) {
+fn footer_errors(
+    snapshot: &MarketSnapshot,
+    state: &EngineState,
+) -> (Option<String>, Option<String>, String) {
     let poll = snapshot.last_error.clone();
     let live = state.last_error.clone();
     if let Some(p) = &poll {
@@ -124,7 +129,9 @@ pub fn build_view(
     let (ui_error, logged_error, error_source) = footer_errors(snapshot, state);
     let shown = view_positions_with(snapshot, &state.positions);
     let tail = unmanaged_positions(&shown, &state.positions);
-    let day_pnl = state.day_start_equity.map(|start| acc.wallet_balance + acc.unrealized_pnl - start);
+    let day_pnl = state
+        .day_start_equity
+        .map(|start| acc.wallet_balance + acc.unrealized_pnl - start);
     let (cont_always, cont_windows) = continuation_session_knobs(
         state.strategy_id,
         cfg.s4_always_enter,

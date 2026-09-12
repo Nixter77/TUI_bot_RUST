@@ -14,7 +14,11 @@ pub fn take_profit_price(entry: Decimal, side: &str, tp_pct: Decimal) -> Result<
 }
 
 /// TP so that `tp_pct` remains after taker in + taker out.
-pub fn take_profit_price_net(entry: Decimal, side: &str, tp_pct: Decimal) -> Result<Decimal, String> {
+pub fn take_profit_price_net(
+    entry: Decimal,
+    side: &str,
+    tp_pct: Decimal,
+) -> Result<Decimal, String> {
     take_profit_price(entry, side, tp_pct + round_trip_taker_pct())
 }
 
@@ -28,7 +32,11 @@ pub fn candidate_stop(price: Decimal, side: &str, trail_pct: Decimal) -> Result<
     }
 }
 
-pub fn trail_stop_upward(current_sl: Option<Decimal>, candidate: Decimal, side: &str) -> Result<Decimal, String> {
+pub fn trail_stop_upward(
+    current_sl: Option<Decimal>,
+    candidate: Decimal,
+    side: &str,
+) -> Result<Decimal, String> {
     let cand = require_positive(candidate, "candidate").map_err(|e| e.to_string())?;
     let Some(current) = current_sl else {
         return Ok(cand);

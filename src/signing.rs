@@ -41,7 +41,8 @@ pub fn sign_query(secret: &str, query_string: &str) -> Result<String, SignError>
     if secret.is_empty() {
         return Err(SignError::EmptySecret);
     }
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SignError::InvalidKey)?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| SignError::InvalidKey)?;
     mac.update(query_string.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }

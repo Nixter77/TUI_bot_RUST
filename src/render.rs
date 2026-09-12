@@ -168,7 +168,10 @@ fn book_line(view: &ViewModel) -> String {
         view.basket_symbols.join(", ")
     };
     if view.strategy_id == 1 || is_continuation(view.strategy_id) {
-        format!("{lev}  |  {size}  |  корзина до {}: {basket}", view.max_positions)
+        format!(
+            "{lev}  |  {size}  |  корзина до {}: {basket}",
+            view.max_positions
+        )
     } else {
         format!("{lev}  |  {size}  |  скан: {basket}")
     }
@@ -189,15 +192,23 @@ fn fmt_remain(seconds: f64) -> String {
 }
 
 fn fmt_utc_clock(ts: f64) -> String {
-    crate::sessions::utc_datetime(ts).format("%H:%M").to_string()
+    crate::sessions::utc_datetime(ts)
+        .format("%H:%M")
+        .to_string()
 }
 
 fn fmt_utc_hms(ts: f64) -> String {
-    crate::sessions::utc_datetime(ts).format("%H:%M:%S").to_string()
+    crate::sessions::utc_datetime(ts)
+        .format("%H:%M:%S")
+        .to_string()
 }
 
 /// One heading plus a row per cooling symbol. Empty when nothing is paused.
-pub fn cooldown_lines(now: f64, cooldown_until: f64, cooldowns: &HashMap<String, f64>) -> Vec<String> {
+pub fn cooldown_lines(
+    now: f64,
+    cooldown_until: f64,
+    cooldowns: &HashMap<String, f64>,
+) -> Vec<String> {
     let mut active: Vec<(String, f64)> = cooldowns
         .iter()
         .filter(|(_, until)| **until > now)
@@ -268,7 +279,11 @@ fn session_line(view: &ViewModel) -> Option<String> {
 }
 
 pub fn account_profit_figure(view: &ViewModel) -> Decimal {
-    calc_account_profit(view.wallet_balance, view.unrealized_pnl, view.starting_equity)
+    calc_account_profit(
+        view.wallet_balance,
+        view.unrealized_pnl,
+        view.starting_equity,
+    )
 }
 
 /// Green/red for profit vs loss. Yellow = 1R still approaching.
@@ -416,7 +431,9 @@ pub fn line_tone(line: &str, account_profit: Decimal) -> Option<LineTone> {
         return Some(tone_of(account_profit));
     }
     if line.contains("Нереализованный PnL") || line.contains("ованный PnL") {
-        return number_after(line, ":").or_else(|| parse_leading_decimal(line)).map(tone_of);
+        return number_after(line, ":")
+            .or_else(|| parse_leading_decimal(line))
+            .map(tone_of);
     }
     if let Some(v) = number_after(line, "uPnL=") {
         return Some(tone_of(v));
@@ -560,15 +577,25 @@ pub fn render_frame(view: &ViewModel) -> String {
     } else {
         "keys=missing"
     };
-    let header = format!("home-economic  |  Binance USDT-M Futures TestNet  |  {live_flag}  |  {cred}");
+    let header =
+        format!("home-economic  |  Binance USDT-M Futures TestNet  |  {live_flag}  |  {cred}");
 
     let equity = current_equity(view.wallet_balance, view.unrealized_pnl);
     let acc_lines = [
         "=== Счёт ===".to_string(),
-        format!("Баланс кошелька:     {} USDT", fmt_money(view.wallet_balance)),
-        format!("Нереализованный PnL: {} USDT", fmt_money(view.unrealized_pnl)),
+        format!(
+            "Баланс кошелька:     {} USDT",
+            fmt_money(view.wallet_balance)
+        ),
+        format!(
+            "Нереализованный PnL: {} USDT",
+            fmt_money(view.unrealized_pnl)
+        ),
         format!("Сумма счета:         {} USDT", fmt_money(equity)),
-        format!("Доступно:            {} USDT", fmt_money(view.available_balance)),
+        format!(
+            "Доступно:            {} USDT",
+            fmt_money(view.available_balance)
+        ),
         format!("Прибыль счета:       {} USDT", fmt_money(profit)),
     ];
 
@@ -718,8 +745,15 @@ pub fn render_frame(view: &ViewModel) -> String {
         footer.push(format!("  {part}"));
     }
     footer.extend([
-        format!("Текущая: {} — {}", view.strategy_id, strategy_title(view.strategy_id)),
-        format!("Каденс стратегии 1: {} с (1 или 2 минуты)", view.poll_seconds),
+        format!(
+            "Текущая: {} — {}",
+            view.strategy_id,
+            strategy_title(view.strategy_id)
+        ),
+        format!(
+            "Каденс стратегии 1: {} с (1 или 2 минуты)",
+            view.poll_seconds
+        ),
         book_line(view),
     ]);
     if let Some(session) = session_line(view) {

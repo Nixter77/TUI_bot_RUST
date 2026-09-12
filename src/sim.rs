@@ -1,13 +1,13 @@
 //! Walk-forward simulator. Same decide()/tick() as live; no orders.
 
+use crate::config::default_risk_pct;
+use crate::continuation::ContinuationParams;
 use crate::engine::{tick, MomentumParams};
 use crate::journal::{long_pnl, taker_fee};
 use crate::models::{Account, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker};
+use crate::openmeta::initial_risk_usdt;
 use crate::scalp::ScalpParams;
 use crate::trend::TrendParams;
-use crate::continuation::ContinuationParams;
-use crate::openmeta::initial_risk_usdt;
-use crate::config::default_risk_pct;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -107,7 +107,10 @@ fn hit_protectives(pos: &Position, bar: &Bar) -> Option<(Decimal, String)> {
     let hit_sl = pos.stop_loss.map(|sl| bar.low <= sl).unwrap_or(false);
     let hit_tp = pos.take_profit.map(|tp| bar.high >= tp).unwrap_or(false);
     if hit_sl && hit_tp {
-        return Some((pos.stop_loss.unwrap(), "stop (wick, both sides — assume SL)".into()));
+        return Some((
+            pos.stop_loss.unwrap(),
+            "stop (wick, both sides — assume SL)".into(),
+        ));
     }
     if hit_sl {
         return Some((pos.stop_loss.unwrap(), "stop (wick)".into()));
@@ -122,7 +125,11 @@ pub fn change_percent(bars: &[Bar], index: usize, lookback: usize) -> Decimal {
     if index >= bars.len() {
         return Decimal::ZERO;
     }
-    let prev_i = if index < lookback { 0 } else { index - lookback };
+    let prev_i = if index < lookback {
+        0
+    } else {
+        index - lookback
+    };
     let prev = bars[prev_i].close;
     let last = bars[index].close;
     if prev <= Decimal::ZERO {
@@ -258,11 +265,16 @@ pub fn simulate_bars_opts(
                 // If the initial risk (entry - stop) * qty exceeds desired, scale qty down.
                 if let Some(desired_risk) = (Some(start_equity)).and_then(|e| {
                     let pct = default_risk_pct();
-                    if pct > Decimal::ZERO { Some(e * pct) } else { None }
+                    if pct > Decimal::ZERO {
+                        Some(e * pct)
+                    } else {
+                        None
+                    }
                 }) {
                     let stop_dist = (px - stop_loss).abs();
                     if stop_dist > Decimal::ZERO {
-                        let initial_risk = initial_risk_usdt(px, stop_loss, qty).unwrap_or(Decimal::ZERO);
+                        let initial_risk =
+                            initial_risk_usdt(px, stop_loss, qty).unwrap_or(Decimal::ZERO);
                         if initial_risk > desired_risk && initial_risk > Decimal::ZERO {
                             // scale qty to hit desired_risk
                             qty = qty * (desired_risk / initial_risk);
@@ -317,17 +329,8 @@ pub fn simulate_bars_opts(
         let chg = change_percent(bars, i, lookback);
         let week_lb = lookback.saturating_mul(7).min(i);
         let week_chg = change_percent(bars, i, week_lb.max(1));
-        let window_high = chunk
-            .iter()
-            .map(|b| b.high)
-            .max()
-            .unwrap_or(bar.high);
-        let mut ticker = Ticker::new(
-            symbol,
-            bar.close,
-            chg,
-            Decimal::from(50_000_000),
-        );
+        let window_high = chunk.iter().map(|b| b.high).max().unwrap_or(bar.high);
+        let mut ticker = Ticker::new(symbol, bar.close, chg, Decimal::from(50_000_000));
         ticker.high_price = window_high;
         ticker.week_change_percent = week_chg;
         let tickers = vec![ticker];
@@ -361,7 +364,15 @@ pub fn simulate_bars_opts(
                 snap.htf_bars.insert("BTCUSDT".into(), closed);
             }
         }
-        let (new_state, decision) = tick(&state, &snap, now, momentum, scalp, trend, continuation_override);
+        let (new_state, decision) = tick(
+            &state,
+            &snap,
+            now,
+            momentum,
+            scalp,
+            trend,
+            continuation_override,
+        );
         state = new_state;
         match decision {
             Decision::EnterLong { .. } if pos.is_none() => pending = Some(decision),

@@ -2,12 +2,12 @@
 
 use crate::config::{Config, TradeInterval};
 use crate::continuation::{liquid_universe, s4_setup_skip, ContinuationParams};
-use crate::engine::{
-    continuation_interval, continuation_session_knobs, continuation_stop_band, continuation_trade_params,
-    is_continuation,
-};
 use crate::dayrisk::utc_day_key;
 use crate::engine::strategy_title;
+use crate::engine::{
+    continuation_interval, continuation_session_knobs, continuation_stop_band,
+    continuation_trade_params, is_continuation,
+};
 use crate::indicators::{last_ema, vwap};
 use crate::journal::{event_unix, parse_pnl, TradeEvent};
 use crate::models::{near_24h_high, EngineState, MarketSnapshot, Position, Side, Ticker};
@@ -157,7 +157,10 @@ pub fn build_monitor(
         cooldown_until: state.cooldown_until,
         cooldowns: state.cooldowns.clone(),
         now_ts: now,
-        last_error: snapshot.last_error.clone().or_else(|| state.last_error.clone()),
+        last_error: snapshot
+            .last_error
+            .clone()
+            .or_else(|| state.last_error.clone()),
         has_credentials: cfg.credentials.is_some(),
         s4_interval: continuation_interval(state.strategy_id, cfg.s4_interval),
         max_positions: if is_continuation(state.strategy_id) {
@@ -292,7 +295,8 @@ fn candidate_tickers(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsho
             }
         }
         1 => {
-            for t in pick_strategy1_book(&snapshot.tickers, cfg.max_positions.max(8) as usize, skip) {
+            for t in pick_strategy1_book(&snapshot.tickers, cfg.max_positions.max(8) as usize, skip)
+            {
                 push_unique(&mut out, &mut seen, t);
             }
         }
@@ -361,7 +365,10 @@ fn pause_reason(state: &EngineState, symbol: &str, now: f64) -> Option<String> {
     let key = symbol.to_ascii_uppercase();
     let until = state.cooldowns.get(&key).copied().unwrap_or(0.0);
     if until > now {
-        Some(format!("пауза после сделки ещё {}", fmt_remain(until - now)))
+        Some(format!(
+            "пауза после сделки ещё {}",
+            fmt_remain(until - now)
+        ))
     } else {
         None
     }
@@ -383,7 +390,12 @@ fn next_utc_midnight(now: f64) -> f64 {
         .unwrap_or(now + 86_400.0)
 }
 
-fn next_bar_until(snapshot: &MarketSnapshot, symbol: &str, interval: TradeInterval, now: f64) -> String {
+fn next_bar_until(
+    snapshot: &MarketSnapshot,
+    symbol: &str,
+    interval: TradeInterval,
+    now: f64,
+) -> String {
     let bars = snapshot.bars_for(symbol);
     let Some(last) = bars.last() else {
         if let Some(bar) = snapshot.last_bars.get(symbol) {
@@ -486,7 +498,8 @@ fn s4_setup_until(
             return format!("ещё {}% вниз от 24h high", pct_gap(pct));
         }
     }
-    if snapshot.bars_for(&ticker.symbol).is_empty() && !snapshot.last_bars.contains_key(&ticker.symbol)
+    if snapshot.bars_for(&ticker.symbol).is_empty()
+        && !snapshot.last_bars.contains_key(&ticker.symbol)
     {
         return next_bar_until(snapshot, &ticker.symbol, p.interval, now);
     }
@@ -569,7 +582,9 @@ fn until_entry(
                     if ticker.last_price > cap {
                         return format!(
                             "ещё {}% вниз от 24h high",
-                            pct_gap((ticker.last_price - cap) / ticker.last_price * Decimal::from(100))
+                            pct_gap(
+                                (ticker.last_price - cap) / ticker.last_price * Decimal::from(100)
+                            )
                         );
                     }
                 }
@@ -617,14 +632,7 @@ pub fn classify_waiting(
         } else {
             (WaitKind::Ready, "готов к входу".into())
         };
-        let until = until_entry(
-            cfg,
-            state,
-            snapshot,
-            &ticker,
-            kind,
-            now,
-        );
+        let until = until_entry(cfg, state, snapshot, &ticker, kind, now);
         rows.push(WaitRow {
             symbol: ticker.symbol.clone(),
             change_pct: ticker.price_change_percent,
@@ -677,7 +685,9 @@ fn closed_today_rows(events: &[TradeEvent], now: f64) -> (Vec<ClosedRow>, Decima
         let clock = if ev.ts.len() >= 19 {
             ev.ts[11..19].to_string()
         } else {
-            crate::sessions::utc_datetime(ts).format("%H:%M:%S").to_string()
+            crate::sessions::utc_datetime(ts)
+                .format("%H:%M:%S")
+                .to_string()
         };
         rows.push(ClosedRow {
             clock,
@@ -747,7 +757,10 @@ fn fmt_pct(value: Decimal) -> String {
 
 fn fmt_vol(value: Decimal) -> String {
     if value >= Decimal::from(1_000_000) {
-        format!("{}M", (value / Decimal::from(1_000_000)).round_dp(1).normalize())
+        format!(
+            "{}M",
+            (value / Decimal::from(1_000_000)).round_dp(1).normalize()
+        )
     } else if value >= Decimal::from(1000) {
         format!("{}k", (value / Decimal::from(1000)).round_dp(0).normalize())
     } else {
@@ -800,11 +813,7 @@ fn one_r_text(pos: &Position, mark: Decimal) -> Option<String> {
     Some(format!("  {text}"))
 }
 
-fn growth_tag(
-    symbol: &str,
-    positions: &[Position],
-    waiting: &[WaitRow],
-) -> String {
+fn growth_tag(symbol: &str, positions: &[Position], waiting: &[WaitRow]) -> String {
     if let Some(pos) = positions
         .iter()
         .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.qty > Decimal::ZERO)
@@ -1074,5 +1083,3 @@ pub fn render_monitor(view: &MonitorView) -> String {
     }
     format!("{}\n", out.join("\n"))
 }
-
-

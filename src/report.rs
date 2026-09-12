@@ -63,7 +63,9 @@ fn rule(title: &str) -> String {
 }
 
 fn is_partial_scale(ev: &TradeEvent) -> bool {
-    ev.reason.to_ascii_lowercase().contains("частичная фиксация")
+    ev.reason
+        .to_ascii_lowercase()
+        .contains("частичная фиксация")
 }
 
 #[derive(Default)]
@@ -246,10 +248,26 @@ pub fn format_report_filtered(
     let journal = TradeJournal::new(Some(trades_path.unwrap_or(Path::new(DEFAULT_JOURNAL_PATH))));
     let events = journal.read_events();
     let scoped = filter_events(&events, strategy);
-    let closes: Vec<_> = scoped.iter().copied().filter(|e| e.event == "close").collect();
-    let opens: Vec<_> = scoped.iter().copied().filter(|e| e.event == "open").collect();
-    let skips: Vec<_> = scoped.iter().copied().filter(|e| e.event == "skip").collect();
-    let flats: Vec<_> = scoped.iter().copied().filter(|e| e.event == "flatten").collect();
+    let closes: Vec<_> = scoped
+        .iter()
+        .copied()
+        .filter(|e| e.event == "close")
+        .collect();
+    let opens: Vec<_> = scoped
+        .iter()
+        .copied()
+        .filter(|e| e.event == "open")
+        .collect();
+    let skips: Vec<_> = scoped
+        .iter()
+        .copied()
+        .filter(|e| e.event == "skip")
+        .collect();
+    let flats: Vec<_> = scoped
+        .iter()
+        .copied()
+        .filter(|e| e.event == "flatten")
+        .collect();
     let pnl = closes
         .iter()
         .filter_map(|e| parse_pnl(e.pnl.as_deref()))
@@ -320,7 +338,10 @@ pub fn format_report_filtered(
         }
         if tagged > 0 {
             lines.push(String::new());
-            lines.push(rule(&format!("BTC regime на входах ({tagged}/{})", opens.len())));
+            lines.push(rule(&format!(
+                "BTC regime на входах ({tagged}/{})",
+                opens.len()
+            )));
             for (k, n) in by_reg {
                 lines.push(format!("  {n:>4}  {k}"));
             }
@@ -366,8 +387,9 @@ pub fn format_report_filtered(
         }
     }
 
-    let err_events =
-        read_error_events(Some(errors_path.unwrap_or(Path::new(DEFAULT_ERROR_LOG_PATH))));
+    let err_events = read_error_events(Some(
+        errors_path.unwrap_or(Path::new(DEFAULT_ERROR_LOG_PATH)),
+    ));
     let shown: Vec<_> = err_events.iter().filter(|e| e.event == "shown").collect();
     if !shown.is_empty() {
         let mut codes: std::collections::HashMap<String, usize> = std::collections::HashMap::new();

@@ -162,10 +162,7 @@ pub fn set_active_path(path: Option<PathBuf>) {
     *lock_poison(&ACTIVE_PATH) = path;
     // Reload from disk when path changes.
     let p = lock_poison(&ACTIVE_PATH).clone();
-    let mut map = p
-        .as_ref()
-        .map(|path| load_file(path))
-        .unwrap_or_default();
+    let mut map = p.as_ref().map(|path| load_file(path)).unwrap_or_default();
     let dropped = sanitize_map(&mut map);
     *lock_poison(&STORE) = map;
     if dropped > 0 {
@@ -307,7 +304,6 @@ pub fn on_open(
     persist_locked(&store);
 }
 
-
 /// True when durable meta says this symbol already scaled at 1R for the *same* entry + strategy.
 pub fn meta_scaled_for_entry(symbol: &str, entry: Decimal, strategy_id: i32) -> bool {
     let key = symbol.to_ascii_uppercase();
@@ -429,9 +425,7 @@ pub fn update_from_positions(positions: &[Position], snapshot: &MarketSnapshot, 
                 }
             }
             if m.strategy_id == 5 {
-                let since = pos
-                    .opened_bar_time
-                    .unwrap_or((m.opened_ts * 1000.0) as i64);
+                let since = pos.opened_bar_time.unwrap_or((m.opened_ts * 1000.0) as i64);
                 if apply_s5_bars_to_meta(m, snapshot.bars_for(&pos.symbol), since) {
                     dirty = true;
                 }
@@ -444,7 +438,12 @@ pub fn update_from_positions(positions: &[Position], snapshot: &MarketSnapshot, 
 }
 
 /// Build close metrics; remove meta on full close. Partial keeps meta + scaled flag.
-pub fn metrics_for_close(symbol: &str, pnl: Option<Decimal>, now: f64, partial: bool) -> CloseMetrics {
+pub fn metrics_for_close(
+    symbol: &str,
+    pnl: Option<Decimal>,
+    now: f64,
+    partial: bool,
+) -> CloseMetrics {
     let key = symbol.to_ascii_uppercase();
     let mut store = lock_poison(&STORE);
     let Some(m) = store.get(&key).cloned() else {
@@ -463,7 +462,11 @@ pub fn metrics_for_close(symbol: &str, pnl: Option<Decimal>, now: f64, partial: 
     let final_r = pnl.and_then(|p| r_multiple(p, risk)).map(fmt_fixed);
     let out = CloseMetrics {
         initial_risk_usdt: Some(m.initial_risk_usdt.clone()),
-        initial_r: if risk > Decimal::ZERO { Some("1".into()) } else { None },
+        initial_r: if risk > Decimal::ZERO {
+            Some("1".into())
+        } else {
+            None
+        },
         final_r,
         mfe_r: r_multiple(mfe, risk).map(fmt_fixed),
         mae_r: r_multiple(mae, risk).map(fmt_fixed),
@@ -633,7 +636,11 @@ pub fn build_entry_snapshot(
             out.btc_ret_1h = ret_over_secs(btc_bars, px, 3600).map(fmt_fixed);
         }
     }
-    out.btc_regime = Some(crate::regime::classify_snapshot(snapshot).journal_tag().into());
+    out.btc_regime = Some(
+        crate::regime::classify_snapshot(snapshot)
+            .journal_tag()
+            .into(),
+    );
     out
 }
 
@@ -671,17 +678,8 @@ mod tests {
         assert_eq!(peak, Some(10.0));
         assert_eq!(t1r, Some(10.0)); // 3 >= 2 risk
 
-        let (mfe2, mae2, _, _) = apply_mark_excursion(
-            mfe,
-            mae,
-            peak,
-            t1r,
-            d("100"),
-            d("97"),
-            d("1"),
-            d("2"),
-            20.0,
-        );
+        let (mfe2, mae2, _, _) =
+            apply_mark_excursion(mfe, mae, peak, t1r, d("100"), d("97"), d("1"), d("2"), 20.0);
         assert_eq!(mfe2, d("3"));
         assert_eq!(mae2, d("3"));
     }
@@ -690,7 +688,15 @@ mod tests {
     fn s5_folds_1h_bar_high_low_into_close_mfe_mae_r() {
         let dir = tempfile::tempdir().unwrap();
         set_active_path(Some(dir.path().join("open_meta.json")));
-        on_open(5, "AVAXUSDT", d("100"), d("97"), d("1"), 1_700_000_000.0, None);
+        on_open(
+            5,
+            "AVAXUSDT",
+            d("100"),
+            d("97"),
+            d("1"),
+            1_700_000_000.0,
+            None,
+        );
         let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
         pos.opened_bar_time = Some(1_700_000_000_000);
         let bar = Bar {
@@ -708,7 +714,10 @@ mod tests {
         let m = metrics_for_close("AVAXUSDT", Some(d("-0.1")), 1_700_003_600.0, false);
         assert_eq!(m.mfe_r.as_deref(), Some("2"), "1h high 106 vs 3 USDT risk");
         let mae: Decimal = m.mae_r.as_ref().unwrap().parse().unwrap();
-        assert!(mae > d("0.6") && mae < d("0.7"), "1h low 98 is ~0.67R: {mae}");
+        assert!(
+            mae > d("0.6") && mae < d("0.7"),
+            "1h low 98 is ~0.67R: {mae}"
+        );
         assert_eq!(m.mfe_usdt.as_deref(), Some("6"));
         assert_eq!(m.mae_usdt.as_deref(), Some("2"));
         set_active_path(None);
@@ -796,5 +805,4 @@ mod tests {
         assert!(continuation_owns("AAAUSDT", 5, &inh));
         assert!(continuation_owns("MISSING", 4, &empty)); // untagged → allow
     }
-
 }

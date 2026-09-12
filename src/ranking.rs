@@ -278,7 +278,11 @@ pub fn pick_trend_ticker(tickers: &[Ticker], exclude: &[String]) -> Option<Ticke
     pick_liquid_major(tickers, exclude)
 }
 
-pub fn pick_chart_ticker(tickers: &[Ticker], strategy_id: i32, exclude: &[String]) -> Option<Ticker> {
+pub fn pick_chart_ticker(
+    tickers: &[Ticker],
+    strategy_id: i32,
+    exclude: &[String],
+) -> Option<Ticker> {
     if strategy_id == 1 {
         pick_strategy1_book(tickers, 1, exclude).into_iter().next()
     } else if strategy_id == 2 {

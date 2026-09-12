@@ -44,7 +44,12 @@ impl Default for TrendParams {
     }
 }
 
-pub fn trend_decision(bars: &[Bar], position: Option<&Position>, symbol: &str, params: Option<&TrendParams>) -> Decision {
+pub fn trend_decision(
+    bars: &[Bar],
+    position: Option<&Position>,
+    symbol: &str,
+    params: Option<&TrendParams>,
+) -> Decision {
     let owned = TrendParams::default();
     let p = params.unwrap_or(&owned);
     let need = (p.channel + 2)
@@ -129,7 +134,13 @@ fn at_least_min_stop(mark: Decimal, sl: Decimal, min_pct: Decimal) -> Decimal {
     }
 }
 
-fn manage_long(bars: &[Bar], position: &Position, mark: Decimal, atr: Decimal, p: &TrendParams) -> Decision {
+fn manage_long(
+    bars: &[Bar],
+    position: &Position,
+    mark: Decimal,
+    atr: Decimal,
+    p: &TrendParams,
+) -> Decision {
     let sl = position.stop_loss;
     if let Some(sl) = sl {
         if mark <= sl {
@@ -187,5 +198,3 @@ fn manage_long(bars: &[Bar], position: &Position, mark: Decimal, atr: Decimal, p
     }
     Decision::hold("trend hold")
 }
-
-

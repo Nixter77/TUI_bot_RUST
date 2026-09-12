@@ -12,10 +12,7 @@ use thiserror::Error;
 
 pub const DEFAULT_TESTNET_BASE: &str = "https://testnet.binancefuture.com";
 pub const MAINNET_BASE: &str = "https://fapi.binance.com";
-pub const ALLOWED_TESTNET_HOSTS: &[&str] = &[
-    "testnet.binancefuture.com",
-    "demo-fapi.binance.com",
-];
+pub const ALLOWED_TESTNET_HOSTS: &[&str] = &["testnet.binancefuture.com", "demo-fapi.binance.com"];
 pub const MAINNET_HOST: &str = "fapi.binance.com";
 
 /// Continuation (strategy 4) kline interval. Scalp stays 1m-class, trend stays 1d.
@@ -227,6 +224,8 @@ pub struct Config {
     pub daily_loss_usdt: Decimal,
     /// Max day loss in R (1R = day_start_equity × risk_pct). 0 disables R halt.
     pub daily_loss_r: Decimal,
+    /// Live trade pings. None = off. Token redacted in Debug.
+    pub telegram: Option<crate::telegram::TelegramDest>,
 }
 
 fn strip_quotes(value: &str) -> String {
@@ -274,14 +273,28 @@ fn is_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn env_get(name: &str, file_vals: &HashMap<String, String>, environ: Option<&HashMap<String, String>>) -> String {
+fn env_get(
+    name: &str,
+    file_vals: &HashMap<String, String>,
+    environ: Option<&HashMap<String, String>>,
+) -> String {
     if let Some(env) = environ {
-        return env.get(name).cloned().unwrap_or_default().trim().to_string();
+        return env
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
     }
     if let Ok(v) = std::env::var(name) {
         return v.trim().to_string();
     }
-    file_vals.get(name).cloned().unwrap_or_default().trim().to_string()
+    file_vals
+        .get(name)
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 pub fn load_config(
@@ -290,9 +303,11 @@ pub fn load_config(
     environ: Option<&HashMap<String, String>>,
 ) -> Result<Config, ConfigError> {
     let mut file_vals = HashMap::new();
-    let env_path: PathBuf = env_file
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".env"));
+    let env_path: PathBuf = env_file.map(PathBuf::from).unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".env")
+    });
     if environ.is_none() && env_path.is_file() {
         let mode = fs::metadata(&env_path)
             .map_err(|e| ConfigError(e.to_string()))?
@@ -357,12 +372,17 @@ pub fn load_config(
         )));
     }
 
-    let poll_raw = get("STRATEGY1_POLL_SECONDS", &STRATEGY1_POLL_SECONDS.to_string());
+    let poll_raw = get(
+        "STRATEGY1_POLL_SECONDS",
+        &STRATEGY1_POLL_SECONDS.to_string(),
+    );
     let poll: i32 = poll_raw
         .parse()
         .map_err(|_| ConfigError("STRATEGY1_POLL_SECONDS must be an integer".into()))?;
     if poll != 60 && poll != 120 {
-        return Err(ConfigError("STRATEGY1_POLL_SECONDS must be 60 or 120".into()));
+        return Err(ConfigError(
+            "STRATEGY1_POLL_SECONDS must be 60 or 120".into(),
+        ));
     }
 
     let notional_raw = get("ORDER_NOTIONAL_USDT", "20");
@@ -394,9 +414,12 @@ pub fn load_config(
     let timeout: f64 = get("HTTP_TIMEOUT", "10")
         .parse()
         .map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;
-    let max_positions: i32 = get("STRATEGY1_MAX_POSITIONS", &DEFAULT_MAX_POSITIONS.to_string())
-        .parse()
-        .map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;
+    let max_positions: i32 = get(
+        "STRATEGY1_MAX_POSITIONS",
+        &DEFAULT_MAX_POSITIONS.to_string(),
+    )
+    .parse()
+    .map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;
     let s4_max_positions: i32 = get(
         "STRATEGY4_MAX_POSITIONS",
         &DEFAULT_S4_MAX_POSITIONS.to_string(),
@@ -469,7 +492,9 @@ pub fn load_config(
     } else {
         let v = dec(&start_raw).map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;
         if v < Decimal::ZERO {
-            return Err(ConfigError("BINANCE_STARTING_EQUITY cannot be negative".into()));
+            return Err(ConfigError(
+                "BINANCE_STARTING_EQUITY cannot be negative".into(),
+            ));
         }
         Some(v)
     };
@@ -479,8 +504,8 @@ pub fn load_config(
         "1" | "true" | "TRUE" | "yes"
     );
     let hours_raw = get("STRATEGY1_ENTRY_HOURS", DEFAULT_ENTRY_HOURS);
-    let mut entry_windows =
-        parse_entry_windows(&hours_raw).map_err(|e| ConfigError(format!("STRATEGY1_ENTRY_HOURS: {e}")))?;
+    let mut entry_windows = parse_entry_windows(&hours_raw)
+        .map_err(|e| ConfigError(format!("STRATEGY1_ENTRY_HOURS: {e}")))?;
     if always_enter {
         entry_windows.clear();
     }
@@ -495,8 +520,8 @@ pub fn load_config(
     if s4_always_enter {
         s4_entry_windows.clear();
     }
-    let s4_interval = TradeInterval::parse(&get("STRATEGY4_INTERVAL", "5m"))
-        .map_err(ConfigError)?;
+    let s4_interval =
+        TradeInterval::parse(&get("STRATEGY4_INTERVAL", "5m")).map_err(ConfigError)?;
 
     let s2_always_enter = matches!(
         get_opt("STRATEGY2_ALWAYS_ENTER").as_str(),
@@ -516,9 +541,7 @@ pub fn load_config(
         .parse()
         .map_err(|_| ConfigError("STRATEGY2_MAX_HOLD_BARS must be an integer".into()))?;
     if !(1..=240).contains(&s2_max_hold_bars) {
-        return Err(ConfigError(
-            "STRATEGY2_MAX_HOLD_BARS must be 1–240".into(),
-        ));
+        return Err(ConfigError("STRATEGY2_MAX_HOLD_BARS must be 1–240".into()));
     }
 
     if live && creds.is_none() {
@@ -526,6 +549,25 @@ pub fn load_config(
             "refusing --live without BINANCE_API_KEY and BINANCE_API_SECRET".into(),
         ));
     }
+
+    let tg_notify_off = matches!(
+        get_opt("TELEGRAM_NOTIFY").to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    );
+    let tg_token = get_opt("TELEGRAM_BOT_TOKEN");
+    let tg_chat = get_opt("TELEGRAM_CHAT_ID");
+    let telegram = if tg_notify_off {
+        None
+    } else if tg_token.is_empty() && tg_chat.is_empty() {
+        None
+    } else if tg_token.is_empty() || tg_chat.is_empty() {
+        return Err(ConfigError(
+            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are both required".into(),
+        ));
+    } else {
+        Some(crate::telegram::TelegramDest::parse(&tg_token, &tg_chat).map_err(ConfigError)?)
+    };
+    crate::telegram::install(telegram.clone());
 
     let _ = default_daily_loss_usdt();
     let _ = default_daily_loss_r();
@@ -556,5 +598,6 @@ pub fn load_config(
         notional_from_exchange,
         daily_loss_usdt,
         daily_loss_r,
+        telegram,
     })
 }

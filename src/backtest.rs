@@ -1,14 +1,14 @@
 //! Public-klines profitability report. No keys, no orders.
 
+use crate::continuation::ContinuationParams;
 use crate::engine::MomentumParams;
 use crate::models::{bar_from_kline, Bar};
 use crate::scalp::ScalpParams;
 use crate::sim::{simulate_bars, SimResult};
 use crate::trend::TrendParams;
-use crate::continuation::ContinuationParams;
-use std::env;
 use rust_decimal::Decimal;
 use serde_json::Value;
+use std::env;
 use std::fs;
 
 const PUBLIC_FAPI: &str = "https://fapi.binance.com";
@@ -65,7 +65,8 @@ fn fetch_klines(symbol: &str, interval: &str) -> Option<Vec<Bar>> {
     if let Some(bars) = load_cached(symbol, interval) {
         return Some(bars);
     }
-    let url = format!("{PUBLIC_FAPI}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=1500");
+    let url =
+        format!("{PUBLIC_FAPI}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit=1500");
     let resp = ureq::get(&url)
         .set("User-Agent", "tui-bot-rust/backtest")
         .timeout(std::time::Duration::from_secs(15))
@@ -142,8 +143,15 @@ pub fn run_cli() -> i32 {
     // ran and which env flags were set.
     let _ = std::fs::create_dir_all(".state");
     let _ = std::fs::write(
-        format!(".state/run-sentinel-{}.txt", crate::sessions::unix_now() as i64),
-        format!("DUMP_S5={} SWEEP_S4S5={}", std::env::var("DUMP_S5").is_ok(), std::env::var("SWEEP_S4S5").is_ok()),
+        format!(
+            ".state/run-sentinel-{}.txt",
+            crate::sessions::unix_now() as i64
+        ),
+        format!(
+            "DUMP_S5={} SWEEP_S4S5={}",
+            std::env::var("DUMP_S5").is_ok(),
+            std::env::var("SWEEP_S4S5").is_ok()
+        ),
     );
     // Majors for S1–S3; alts for S4/S5 (continuation skips BTC/ETH/SOL/BNB/XRP/BCH).
     let majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
@@ -197,16 +205,33 @@ pub fn run_cli() -> i32 {
         let _ = fs::create_dir_all(".state");
         for (symbol, bars) in &univ_1h {
             let htf = htf_4h.get(symbol).map(|v| v.as_slice());
-            let opts = SimOpts { htf, btc_htf: btc_htf.as_deref() };
+            let opts = SimOpts {
+                htf,
+                btc_htf: btc_htf.as_deref(),
+            };
             let res = simulate_bars_opts(
-                5, bars, symbol, &format!("S5 debug {symbol} 1h"),
-                Decimal::from(20), Decimal::new(4,4), Decimal::new(1,4),
-                Some(40), Decimal::from(1000), Some(&cont_mom), None, None, opts, None,
+                5,
+                bars,
+                symbol,
+                &format!("S5 debug {symbol} 1h"),
+                Decimal::from(20),
+                Decimal::new(4, 4),
+                Decimal::new(1, 4),
+                Some(40),
+                Decimal::from(1000),
+                Some(&cont_mom),
+                None,
+                None,
+                opts,
+                None,
             );
             let mut s = String::new();
             s.push_str(&format!("{}\n", res.summary_line()));
             for t in &res.trades {
-                s.push_str(&format!("{} {} -> {} qty={} pnl={} reason={}\n", t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason));
+                s.push_str(&format!(
+                    "{} {} -> {} qty={} pnl={} reason={}\n",
+                    t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason
+                ));
             }
             let _ = fs::write(format!(".state/s5-{}-trades.txt", symbol), s);
         }
@@ -215,22 +240,44 @@ pub fn run_cli() -> i32 {
     // Sweep mode: run grid search for Continuation (S4/S5) params when env set.
     if env::var("SWEEP_S4S5").is_ok() {
         use rust_decimal::Decimal;
-        let mins = vec![Decimal::new(5, 1), Decimal::new(10, 1), Decimal::new(20, 1), Decimal::new(40, 1)]; // 0.5%,1%,2%,4%
+        let mins = vec![
+            Decimal::new(5, 1),
+            Decimal::new(10, 1),
+            Decimal::new(20, 1),
+            Decimal::new(40, 1),
+        ]; // 0.5%,1%,2%,4%
         let atrks = vec![Decimal::new(15, 1), Decimal::from(2), Decimal::new(25, 1)]; // 1.5,2,2.5
         let rewards = vec![Decimal::new(15, 1), Decimal::from(2), Decimal::new(25, 1)]; // 1.5,2,2.5 R
         #[derive(Debug)]
-        struct SweepRow { min: Decimal, atrk: Decimal, reward: Decimal, pnl: Decimal, trades: usize }
+        struct SweepRow {
+            min: Decimal,
+            atrk: Decimal,
+            reward: Decimal,
+            pnl: Decimal,
+            trades: usize,
+        }
         let mut out: Vec<SweepRow> = Vec::new();
         let mut debug_lines: Vec<String> = Vec::new();
-        debug_lines.push(format!("univ_15m_len={} univ_1h_len={}", univ_15m.len(), univ_1h.len()));
+        debug_lines.push(format!(
+            "univ_15m_len={} univ_1h_len={}",
+            univ_15m.len(),
+            univ_1h.len()
+        ));
         for min_c in &mins {
             for atr_k in &atrks {
                 for r in &rewards {
                     let mut total_pnl = Decimal::ZERO;
                     let mut total_trades = 0usize;
                     for (symbol, bars) in &univ_15m {
-                        debug_lines.push(format!("S4 sweep symbol={symbol} bars={} min={}% atr_k={} reward={}", bars.len(), min_c, atr_k, r));
-                        let mut p = ContinuationParams::default().with_interval(crate::config::TradeInterval::Minute15);
+                        debug_lines.push(format!(
+                            "S4 sweep symbol={symbol} bars={} min={}% atr_k={} reward={}",
+                            bars.len(),
+                            min_c,
+                            atr_k,
+                            r
+                        ));
+                        let mut p = ContinuationParams::default()
+                            .with_interval(crate::config::TradeInterval::Minute15);
                         p.min_change_percent = *min_c;
                         p.atr_k = *atr_k;
                         p.reward_r = *r;
@@ -249,16 +296,30 @@ pub fn run_cli() -> i32 {
                         p.entry_windows = Vec::new();
                         p.max_positions = 100;
                         let htf = htf_4h.get(symbol).map(|v| v.as_slice());
-                        let opts = crate::sim::SimOpts { htf, btc_htf: btc_htf.as_deref() };
+                        let opts = crate::sim::SimOpts {
+                            htf,
+                            btc_htf: btc_htf.as_deref(),
+                        };
                         let res = simulate_bars_opts(
-                            4, bars, symbol, &format!("S4 sweep {symbol} 15m"),
-                            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-                            Some(40), Decimal::from(1000), None, None, None, opts,
+                            4,
+                            bars,
+                            symbol,
+                            &format!("S4 sweep {symbol} 15m"),
+                            Decimal::from(20),
+                            Decimal::new(4, 4),
+                            Decimal::new(1, 4),
+                            Some(40),
+                            Decimal::from(1000),
+                            None,
+                            None,
+                            None,
+                            opts,
                             Some(&p),
                         );
                         // write per-symbol sweep debug file
                         let _ = std::fs::create_dir_all(".state");
-                        let fname = format!(".state/sweep-15m-{}-min{}-atrk{}-r{}.txt",
+                        let fname = format!(
+                            ".state/sweep-15m-{}-min{}-atrk{}-r{}.txt",
                             symbol,
                             min_c.to_string().replace('.', "p"),
                             atr_k.to_string().replace('.', "p"),
@@ -267,15 +328,25 @@ pub fn run_cli() -> i32 {
                         let mut dump = String::new();
                         dump.push_str(&format!("{}\n", res.summary_line()));
                         for t in &res.trades {
-                            dump.push_str(&format!("{} {} -> {} qty={} pnl={} reason={}\n", t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason));
+                            dump.push_str(&format!(
+                                "{} {} -> {} qty={} pnl={} reason={}\n",
+                                t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason
+                            ));
                         }
                         let _ = std::fs::write(fname, dump);
                         total_pnl += res.pnl();
                         total_trades += res.trades.len();
                     }
                     for (symbol, bars) in &univ_1h {
-                        debug_lines.push(format!("S5 sweep symbol={symbol} bars={} min={}% atr_k={} reward={}", bars.len(), min_c, atr_k, r));
-                        let mut p = ContinuationParams::default().with_interval(crate::config::TradeInterval::Hour1);
+                        debug_lines.push(format!(
+                            "S5 sweep symbol={symbol} bars={} min={}% atr_k={} reward={}",
+                            bars.len(),
+                            min_c,
+                            atr_k,
+                            r
+                        ));
+                        let mut p = ContinuationParams::default()
+                            .with_interval(crate::config::TradeInterval::Hour1);
                         p.min_change_percent = *min_c;
                         p.atr_k = *atr_k;
                         p.reward_r = *r;
@@ -292,16 +363,30 @@ pub fn run_cli() -> i32 {
                         p.entry_windows = Vec::new();
                         p.max_positions = 100;
                         let htf = htf_4h.get(symbol).map(|v| v.as_slice());
-                        let opts = crate::sim::SimOpts { htf, btc_htf: btc_htf.as_deref() };
+                        let opts = crate::sim::SimOpts {
+                            htf,
+                            btc_htf: btc_htf.as_deref(),
+                        };
                         let res = simulate_bars_opts(
-                            5, bars, symbol, &format!("S5 sweep {symbol} 1h"),
-                            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-                            Some(40), Decimal::from(1000), None, None, None, opts,
+                            5,
+                            bars,
+                            symbol,
+                            &format!("S5 sweep {symbol} 1h"),
+                            Decimal::from(20),
+                            Decimal::new(4, 4),
+                            Decimal::new(1, 4),
+                            Some(40),
+                            Decimal::from(1000),
+                            None,
+                            None,
+                            None,
+                            opts,
                             Some(&p),
                         );
                         // write per-symbol sweep debug file
                         let _ = std::fs::create_dir_all(".state");
-                        let fname = format!(".state/sweep-1h-{}-min{}-atrk{}-r{}.txt",
+                        let fname = format!(
+                            ".state/sweep-1h-{}-min{}-atrk{}-r{}.txt",
                             symbol,
                             min_c.to_string().replace('.', "p"),
                             atr_k.to_string().replace('.', "p"),
@@ -310,21 +395,33 @@ pub fn run_cli() -> i32 {
                         let mut dump = String::new();
                         dump.push_str(&format!("{}\n", res.summary_line()));
                         for t in &res.trades {
-                            dump.push_str(&format!("{} {} -> {} qty={} pnl={} reason={}\n", t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason));
+                            dump.push_str(&format!(
+                                "{} {} -> {} qty={} pnl={} reason={}\n",
+                                t.symbol, t.entry, t.exit, t.qty, t.pnl, t.reason
+                            ));
                         }
                         let _ = std::fs::write(fname, dump);
                         total_pnl += res.pnl();
                         total_trades += res.trades.len();
                     }
-                    out.push(SweepRow { min: *min_c, atrk: *atr_k, reward: *r, pnl: total_pnl, trades: total_trades });
+                    out.push(SweepRow {
+                        min: *min_c,
+                        atrk: *atr_k,
+                        reward: *r,
+                        pnl: total_pnl,
+                        trades: total_trades,
+                    });
                 }
             }
         }
-        out.sort_by(|a,b| b.pnl.cmp(&a.pnl));
+        out.sort_by(|a, b| b.pnl.cmp(&a.pnl));
         let mut s = String::new();
         s.push_str("S4/S5 sweep results:\n");
         for row in out.iter().take(20) {
-            s.push_str(&format!(" min={}% atr_k={} reward={} pnl={} trades={}\n", row.min, row.atrk, row.reward, row.pnl, row.trades));
+            s.push_str(&format!(
+                " min={}% atr_k={} reward={} pnl={} trades={}\n",
+                row.min, row.atrk, row.reward, row.pnl, row.trades
+            ));
         }
         let _ = std::fs::write(".state/sweep-report.txt", &s);
         let _ = std::fs::write(".state/sweep-debug.txt", debug_lines.join("\n"));
@@ -345,19 +442,46 @@ pub fn run_cli() -> i32 {
 
     for (symbol, bars) in &univ_5m {
         rows.push(simulate_bars(
-            1, bars, symbol, &format!("mom {symbol} 5m"),
-            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-            Some(40), Decimal::from(1000), Some(&mom), None, None,
+            1,
+            bars,
+            symbol,
+            &format!("mom {symbol} 5m"),
+            Decimal::from(20),
+            Decimal::new(4, 4),
+            Decimal::new(1, 4),
+            Some(40),
+            Decimal::from(1000),
+            Some(&mom),
+            None,
+            None,
         ));
         rows.push(simulate_bars(
-            2, bars, symbol, &format!("scalp {symbol} 5m"),
-            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-            Some(80), Decimal::from(1000), None, Some(&ScalpParams::default()), None,
+            2,
+            bars,
+            symbol,
+            &format!("scalp {symbol} 5m"),
+            Decimal::from(20),
+            Decimal::new(4, 4),
+            Decimal::new(1, 4),
+            Some(80),
+            Decimal::from(1000),
+            None,
+            Some(&ScalpParams::default()),
+            None,
         ));
         rows.push(simulate_bars(
-            3, bars, symbol, &format!("trend {symbol} 5m"),
-            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-            Some(70), Decimal::from(1000), None, None, Some(&TrendParams::default()),
+            3,
+            bars,
+            symbol,
+            &format!("trend {symbol} 5m"),
+            Decimal::from(20),
+            Decimal::new(4, 4),
+            Decimal::new(1, 4),
+            Some(70),
+            Decimal::from(1000),
+            None,
+            None,
+            Some(&TrendParams::default()),
         ));
     }
 
@@ -368,9 +492,20 @@ pub fn run_cli() -> i32 {
             btc_htf: btc_htf.as_deref(),
         };
         rows.push(simulate_bars_opts(
-            4, bars, symbol, &format!("S4 cont {symbol} 15m"),
-            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-            Some(40), Decimal::from(1000), Some(&cont_mom), None, None, opts, None,
+            4,
+            bars,
+            symbol,
+            &format!("S4 cont {symbol} 15m"),
+            Decimal::from(20),
+            Decimal::new(4, 4),
+            Decimal::new(1, 4),
+            Some(40),
+            Decimal::from(1000),
+            Some(&cont_mom),
+            None,
+            None,
+            opts,
+            None,
         ));
     }
     for (symbol, bars) in &univ_1h {
@@ -380,9 +515,20 @@ pub fn run_cli() -> i32 {
             btc_htf: btc_htf.as_deref(),
         };
         rows.push(simulate_bars_opts(
-            5, bars, symbol, &format!("S5 verify {symbol} 1h"),
-            Decimal::from(20), Decimal::new(4, 4), Decimal::new(1, 4),
-            Some(40), Decimal::from(1000), Some(&cont_mom), None, None, opts, None,
+            5,
+            bars,
+            symbol,
+            &format!("S5 verify {symbol} 1h"),
+            Decimal::from(20),
+            Decimal::new(4, 4),
+            Decimal::new(1, 4),
+            Some(40),
+            Decimal::from(1000),
+            Some(&cont_mom),
+            None,
+            None,
+            opts,
+            None,
         ));
     }
 

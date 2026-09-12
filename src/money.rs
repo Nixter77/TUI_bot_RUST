@@ -31,12 +31,20 @@ pub fn require_positive(value: Decimal, name: &'static str) -> Result<Decimal, M
     Ok(value)
 }
 
-pub fn quantize_to_step(value: Decimal, step: Decimal, round_up: bool) -> Result<Decimal, MoneyError> {
+pub fn quantize_to_step(
+    value: Decimal,
+    step: Decimal,
+    round_up: bool,
+) -> Result<Decimal, MoneyError> {
     if step <= Decimal::ZERO {
         return Err(MoneyError::NonPositiveStep);
     }
     let units = value / step;
-    let rounded = if round_up { units.ceil() } else { units.floor() };
+    let rounded = if round_up {
+        units.ceil()
+    } else {
+        units.floor()
+    };
     Ok(rounded * step)
 }
 
@@ -59,7 +67,12 @@ pub fn round_trip_taker_pct() -> Decimal {
     taker_fee() + taker_fee()
 }
 
-pub fn long_pnl(entry: Decimal, exit_price: Decimal, qty: Decimal, fee_rate: Decimal) -> (Decimal, Decimal) {
+pub fn long_pnl(
+    entry: Decimal,
+    exit_price: Decimal,
+    qty: Decimal,
+    fee_rate: Decimal,
+) -> (Decimal, Decimal) {
     let fee = (entry + exit_price) * qty * fee_rate;
     ((exit_price - entry) * qty - fee, fee)
 }

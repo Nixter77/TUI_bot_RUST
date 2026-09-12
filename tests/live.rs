@@ -1130,7 +1130,7 @@ fn live_tui_loop_fills_three_majors_then_refuses_fourth() {
     let mut snap = snap;
     for step in 0..3 {
         let (new_state, decisions) =
-            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None);
+            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None, None);
         state = new_state;
         let enters: Vec<Decision> = decisions
             .into_iter()
@@ -1198,7 +1198,7 @@ fn live_tui_loop_fills_three_fastest_alts() {
     let mut client = FakeClient::new();
     for step in 0..3 {
         let (new_state, decisions) =
-            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None);
+            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None, None);
         state = new_state;
         let enters: Vec<Decision> = decisions
             .into_iter()
@@ -1257,7 +1257,7 @@ fn live_tui_loop_strategy4_fills_three_liquid() {
     let mut client = FakeClient::new();
     for step in 0..3 {
         let (new_state, decisions) =
-            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None);
+            tick_decisions(&state, &snap, london_ts() + step as f64 * 60.0, Some(&mom), None, None, None);
         state = new_state;
         let enters: Vec<Decision> = decisions
             .into_iter()
@@ -2011,7 +2011,7 @@ fn paper_path_after_1r_tick_halves_and_be() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (mut new_state, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (mut new_state, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     let reduce = decisions
         .iter()
         .find(|d| matches!(d, Decision::ReduceLong { .. }))
@@ -2041,7 +2041,7 @@ fn paper_reduce_then_tick_does_not_re_reduce() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (mut st, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (mut st, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     let reduce = decisions
         .iter()
         .find(|d| matches!(d, Decision::ReduceLong { .. }))
@@ -2052,7 +2052,7 @@ fn paper_reduce_then_tick_does_not_re_reduce() {
     let left = st.positions.iter().find(|p| p.symbol == "AVAXUSDT").unwrap().clone();
     snap.position = Some(left.clone());
     snap.open_positions = vec![left];
-    let (st2, again) = tick_decisions(&st, &snap, london_ts() + 60.0, None, None, None);
+    let (st2, again) = tick_decisions(&st, &snap, london_ts() + 60.0, None, None, None, None);
     assert!(
         !again.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
         "latched paper book must not ReduceLong again: {again:?}"
@@ -2117,7 +2117,7 @@ fn live_reduce_latches_before_ack_and_second_tick_no_re_reduce() {
     snap.open_positions = vec![left.clone()];
     snap.position = Some(left);
     snap.live_book = true;
-    let (_, again) = tick_decisions(&state, &snap, london_ts() + 60.0, None, None, None);
+    let (_, again) = tick_decisions(&state, &snap, london_ts() + 60.0, None, None, None, None);
     assert!(
         !again.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
         "latched must not ReduceLong again: {again:?}"

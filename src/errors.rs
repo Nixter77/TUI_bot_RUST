@@ -73,7 +73,8 @@ fn policy_message(code: i32) -> (&'static str, String) {
         ),
         -4411 => (
             ACTION_SKIP,
-            "Биржа отказала (−4411): TradFi-Perps (золото/акции). Этот символ больше не берём.".into(),
+            "Биржа отказала (−4411): TradFi-Perps (золото/акции). Этот символ больше не берём."
+                .into(),
         ),
         -4130 => (
             ACTION_IGNORE,
@@ -128,7 +129,9 @@ pub fn extract_int_code(text: &str) -> Option<i32> {
     // − or - followed by 3-5 digits
     let bytes = text.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'-' || (b == 0xE2 && bytes.get(i + 1) == Some(&0x88) && bytes.get(i + 2) == Some(&0x92)) {
+        if b == b'-'
+            || (b == 0xE2 && bytes.get(i + 1) == Some(&0x88) && bytes.get(i + 2) == Some(&0x92))
+        {
             let rest = if b == b'-' {
                 &text[i + 1..]
             } else {
@@ -194,10 +197,16 @@ fn fallback_policy(text: &str, parsed: Option<(i32, String)>) -> (String, String
         return (ACTION_RETRY.into(), "Сеть: таймаут запроса.".into());
     }
     if text.contains("HTTP 408") {
-        return (ACTION_RETRY.into(), "TestNet не ответил вовремя (−1007).".into());
+        return (
+            ACTION_RETRY.into(),
+            "TestNet не ответил вовремя (−1007).".into(),
+        );
     }
     if text.contains("HTTP 429") {
-        return (ACTION_RETRY.into(), "TestNet перегружен (−1008/429).".into());
+        return (
+            ACTION_RETRY.into(),
+            "TestNet перегружен (−1008/429).".into(),
+        );
     }
     if text.contains("HTTP 502") || text.contains("HTTP 503") || text.contains("HTTP 504") {
         return (ACTION_RETRY.into(), "TestNet 5xx.".into());
@@ -228,7 +237,10 @@ fn clip_chars(text: &str, max: usize) -> String {
 
 pub fn classify(text: &str) -> ClassifiedError {
     let parsed = parse_binance_error(text);
-    let mut code = parsed.as_ref().map(|p| p.0).or_else(|| extract_int_code(text));
+    let mut code = parsed
+        .as_ref()
+        .map(|p| p.0)
+        .or_else(|| extract_int_code(text));
     let exchange_msg = parsed.as_ref().map(|p| p.1.clone()).unwrap_or_default();
     if code.is_none() {
         code = hint_code(text);
@@ -261,9 +273,19 @@ fn secret_re() -> &'static Regex {
     })
 }
 
+fn telegram_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(?:/bot)(\d{8,12}:[A-Za-z0-9_-]{20,})|\b(\d{8,12}:[A-Za-z0-9_-]{30,50})\b"#,
+        )
+        .expect("telegram token redact regex")
+    })
+}
+
 /// Strip HMAC/query credentials that ureq may put in transport errors.
 pub fn redact_secrets(text: &str) -> String {
-    secret_re()
+    let stripped = secret_re()
         .replace_all(text, |caps: &regex::Captures| {
             if caps.get(1).is_some() {
                 format!("{}=***", &caps[1])
@@ -271,6 +293,9 @@ pub fn redact_secrets(text: &str) -> String {
                 format!("{}: ***", &caps[3])
             }
         })
+        .into_owned();
+    telegram_token_re()
+        .replace_all(&stripped, "[tg-token]")
         .into_owned()
 }
 

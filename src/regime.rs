@@ -219,9 +219,7 @@ pub fn classify_btc(
     let atr_hot = atr_percentile_rank(htf_4h)
         .map(|p| p >= Decimal::from(85))
         .unwrap_or(false);
-    let panic_1h = ret_1h_pct
-        .map(|r| r <= d(PANIC_1H_PCT))
-        .unwrap_or(false);
+    let panic_1h = ret_1h_pct.map(|r| r <= d(PANIC_1H_PCT)).unwrap_or(false);
     let panic_vol = atr_hot && bar_drop >= d(PANIC_BAR_DROP);
 
     if below && (panic_1h || panic_vol) {
@@ -344,9 +342,11 @@ mod tests {
         assert_eq!(BtcRegime::StrongBull.as_str(), "STRONG_BULL");
         let mut snap = MarketSnapshot::empty(d("10000"));
         assert_eq!(block_alt_entry(&snap), None); // neutral
-        snap.htf_bars.insert(BTC.into(), falling_htf(40, 50_000.0, 120.0));
+        snap.htf_bars
+            .insert(BTC.into(), falling_htf(40, 50_000.0, 120.0));
         let px = snap.htf_bars_for(BTC).last().unwrap().close;
-        snap.tickers.push(crate::models::Ticker::new(BTC, px, d("0"), d("1")));
+        snap.tickers
+            .push(crate::models::Ticker::new(BTC, px, d("0"), d("1")));
         assert!(block_alt_entry(&snap).unwrap().contains("bear"));
     }
 
@@ -387,5 +387,4 @@ mod tests {
         assert!(BtcRegime::Panic.blocks_alt_entry());
         assert!(!BtcRegime::Bull.blocks_alt_entry());
     }
-
 }

@@ -206,7 +206,7 @@ fn paused_tick_does_not_enter() {
     snap.chart_symbol = "BTCUSDT".into();
     let mut state = EngineState::new(1);
     state.entries_paused = true;
-    let (new_state, decision) = tick(&state, &snap, 100.0, None, None, None);
+    let (new_state, decision) = tick(&state, &snap, 100.0, None, None, None, None);
     assert!(matches!(decision, Decision::Hold { .. }));
     assert!(!matches!(decision, Decision::EnterLong { .. }));
     assert!(new_state.entries_paused);
@@ -222,6 +222,6 @@ fn paused_tick_resumes_after_cooldown() {
     let mut state = EngineState::new(1);
     state.entries_paused = true;
     state.cooldown_until = 50.0;
-    let (new_state, _) = tick(&state, &snap, 100.0, None, None, None);
+    let (new_state, _) = tick(&state, &snap, 100.0, None, None, None, None);
     assert!(!new_state.entries_paused);
 }

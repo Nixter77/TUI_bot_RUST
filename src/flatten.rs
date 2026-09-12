@@ -131,12 +131,16 @@ pub fn flatten_open_book(client: &mut dyn FlattenClient) -> FlattenResult {
         Ok(raw) => match parse_positions(&raw) {
             Ok(p) => p,
             Err(exc) => {
-                result.errors.push(format!("не удалось подтвердить flatten: {exc}"));
+                result
+                    .errors
+                    .push(format!("не удалось подтвердить flatten: {exc}"));
                 return result;
             }
         },
         Err(exc) => {
-            result.errors.push(format!("не удалось подтвердить flatten: {exc}"));
+            result
+                .errors
+                .push(format!("не удалось подтвердить flatten: {exc}"));
             return result;
         }
     };

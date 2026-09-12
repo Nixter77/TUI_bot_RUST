@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use tui_bot::config::{load_config, load_dotenv_file, ConfigError, TradeInterval, STRATEGY1_POLL_SECONDS, MAINNET_BASE};
+use tui_bot::config::{
+    load_config, load_dotenv_file, ConfigError, TradeInterval, MAINNET_BASE, STRATEGY1_POLL_SECONDS,
+};
 
 #[test]
 fn poll_allowed_values() {
@@ -12,7 +14,10 @@ fn missing_keys_watch_ok_live_refused() {
     assert!(cfg.credentials.is_none());
     assert!(!cfg.live);
     assert!(cfg.poll_seconds == 60 || cfg.poll_seconds == 120);
-    assert!(matches!(load_config(true, None, Some(&HashMap::new())), Err(ConfigError(_))));
+    assert!(matches!(
+        load_config(true, None, Some(&HashMap::new())),
+        Err(ConfigError(_))
+    ));
 }
 
 #[test]
@@ -39,7 +44,10 @@ fn refuses_mainnet_without_override() {
 #[test]
 fn refuses_non_allowlisted_https_host() {
     let mut env = HashMap::new();
-    env.insert("BINANCE_FAPI_BASE".into(), "https://evil.example.com".into());
+    env.insert(
+        "BINANCE_FAPI_BASE".into(),
+        "https://evil.example.com".into(),
+    );
     assert!(load_config(false, None, Some(&env)).is_err());
 }
 
@@ -58,10 +66,16 @@ fn allows_demo_fapi_host() {
 fn credentials_debug_redacts_secret() {
     let mut env = HashMap::new();
     env.insert("BINANCE_API_KEY".into(), "A".repeat(32));
-    env.insert("BINANCE_API_SECRET".into(), "super-secret-value-not-logged".into());
+    env.insert(
+        "BINANCE_API_SECRET".into(),
+        "super-secret-value-not-logged".into(),
+    );
     let cfg = load_config(true, None, Some(&env)).unwrap();
     let dumped = format!("{:?}", cfg.credentials.as_ref().unwrap());
-    assert!(!dumped.contains("super-secret-value-not-logged"), "{dumped}");
+    assert!(
+        !dumped.contains("super-secret-value-not-logged"),
+        "{dumped}"
+    );
     assert!(dumped.contains("[redacted]"), "{dumped}");
 }
 
@@ -74,7 +88,10 @@ fn rejects_bad_poll_and_http_base() {
     env.insert("BINANCE_FAPI_BASE".into(), "http://example.com".into());
     assert!(load_config(false, None, Some(&env)).is_err());
     let mut env = HashMap::new();
-    env.insert("BINANCE_API_KEY".into(), "only-one-side-present-here".into());
+    env.insert(
+        "BINANCE_API_KEY".into(),
+        "only-one-side-present-here".into(),
+    );
     assert!(load_config(false, None, Some(&env)).is_err());
 }
 
@@ -82,10 +99,17 @@ fn rejects_bad_poll_and_http_base() {
 fn dotenv_parser_ignores_junk() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("_sample.env");
-    std::fs::write(&path, "# comment\nexport FOO=bar\nBINANCE_API_KEY=\"abcd\"\nnot a line\n").unwrap();
+    std::fs::write(
+        &path,
+        "# comment\nexport FOO=bar\nBINANCE_API_KEY=\"abcd\"\nnot a line\n",
+    )
+    .unwrap();
     let vals = load_dotenv_file(&path);
     assert_eq!(vals.get("FOO").map(String::as_str), Some("bar"));
-    assert_eq!(vals.get("BINANCE_API_KEY").map(String::as_str), Some("abcd"));
+    assert_eq!(
+        vals.get("BINANCE_API_KEY").map(String::as_str),
+        Some("abcd")
+    );
 }
 
 #[test]
@@ -258,7 +282,10 @@ fn daily_loss_r_from_env() {
 #[test]
 fn strategy4_interval_from_env() {
     assert_eq!(TradeInterval::parse("5m").unwrap(), TradeInterval::Minute5);
-    assert_eq!(TradeInterval::parse("15м").unwrap(), TradeInterval::Minute15);
+    assert_eq!(
+        TradeInterval::parse("15м").unwrap(),
+        TradeInterval::Minute15
+    );
     assert_eq!(TradeInterval::parse("30").unwrap(), TradeInterval::Minute30);
     assert_eq!(TradeInterval::parse("1h").unwrap(), TradeInterval::Hour1);
     assert!(TradeInterval::parse("4h").is_err());
@@ -286,11 +313,10 @@ fn strategy4_interval_from_env() {
     assert!(load_config(false, None, Some(&env)).is_err());
 }
 
-
 #[test]
 fn strategy2_entry_hours_and_max_hold_from_env() {
-    use tui_bot::sessions::DEFAULT_ENTRY_WINDOWS;
     use tui_bot::config::DEFAULT_S2_MAX_HOLD_BARS;
+    use tui_bot::sessions::DEFAULT_ENTRY_WINDOWS;
 
     let cfg = load_config(false, None, Some(&HashMap::new())).unwrap();
     assert_eq!(cfg.s2_entry_windows, DEFAULT_ENTRY_WINDOWS.to_vec());
@@ -324,3 +350,38 @@ fn strategy2_entry_hours_and_max_hold_from_env() {
     assert!(load_config(false, None, Some(&env)).is_err());
 }
 
+const TG_FAKE_TOKEN: &str = "123456789:AAFakeTokenForUnitTestsOnly01234567890";
+
+#[test]
+fn telegram_optional_and_paired() {
+    let off = load_config(false, None, Some(&HashMap::new())).unwrap();
+    assert!(off.telegram.is_none());
+
+    let mut env = HashMap::new();
+    env.insert("TELEGRAM_BOT_TOKEN".into(), TG_FAKE_TOKEN.into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+
+    let mut env = HashMap::new();
+    env.insert("TELEGRAM_CHAT_ID".into(), "111222333".into());
+    assert!(load_config(false, None, Some(&env)).is_err());
+
+    let mut env = HashMap::new();
+    env.insert("TELEGRAM_BOT_TOKEN".into(), TG_FAKE_TOKEN.into());
+    env.insert("TELEGRAM_CHAT_ID".into(), "111222333".into());
+    let cfg = load_config(false, None, Some(&env)).unwrap();
+    assert!(cfg.telegram.is_some());
+    assert_eq!(cfg.telegram.as_ref().unwrap().chat_id(), "111222333");
+    let dbg = format!("{:?}", cfg.telegram);
+    assert!(dbg.contains("[redacted]"), "{dbg}");
+    assert!(!dbg.contains(TG_FAKE_TOKEN), "{dbg}");
+
+    env.insert("TELEGRAM_NOTIFY".into(), "0".into());
+    let disabled = load_config(false, None, Some(&env)).unwrap();
+    assert!(disabled.telegram.is_none());
+
+    let mut env = HashMap::new();
+    env.insert("TELEGRAM_BOT_TOKEN".into(), "not-a-token".into());
+    env.insert("TELEGRAM_CHAT_ID".into(), "111222333".into());
+    let err = load_config(false, None, Some(&env)).unwrap_err();
+    assert!(!format!("{err:?}").contains("not-a-token"));
+}

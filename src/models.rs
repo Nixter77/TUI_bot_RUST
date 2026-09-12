@@ -431,9 +431,12 @@ impl EngineState {
     }
 }
 
-
 /// Fill a missing long SL; if both exist keep the higher (never lower the stop).
-pub fn overlay_long_stop(side: Side, live: Option<Decimal>, other: Option<Decimal>) -> Option<Decimal> {
+pub fn overlay_long_stop(
+    side: Side,
+    live: Option<Decimal>,
+    other: Option<Decimal>,
+) -> Option<Decimal> {
     if side != Side::Long {
         return live.or(other);
     }
@@ -445,7 +448,10 @@ pub fn overlay_long_stop(side: Side, live: Option<Decimal>, other: Option<Decima
     }
 }
 
-pub fn coalesce_position(live: Option<&Position>, remembered: Option<&Position>) -> Option<Position> {
+pub fn coalesce_position(
+    live: Option<&Position>,
+    remembered: Option<&Position>,
+) -> Option<Position> {
     let live = live?;
     let Some(remembered) = remembered else {
         return Some(live.clone());
@@ -479,7 +485,10 @@ pub fn coalesce_position(live: Option<&Position>, remembered: Option<&Position>)
     })
 }
 
-pub fn pick_managed_long(positions: &[Position], remembered: Option<&Position>) -> Option<Position> {
+pub fn pick_managed_long(
+    positions: &[Position],
+    remembered: Option<&Position>,
+) -> Option<Position> {
     let longs: Vec<&Position> = positions
         .iter()
         .filter(|p| p.side == Side::Long && p.qty > Decimal::ZERO)
@@ -507,7 +516,8 @@ pub fn pick_managed_longs(positions: &[Position], remembered: &[Position]) -> Ve
         .iter()
         .filter(|p| p.side == Side::Long && p.qty > Decimal::ZERO)
         .map(|live| {
-            coalesce_position(Some(live), mem.get(live.symbol.as_str()).copied()).unwrap_or_else(|| live.clone())
+            coalesce_position(Some(live), mem.get(live.symbol.as_str()).copied())
+                .unwrap_or_else(|| live.clone())
         })
         .collect()
 }
@@ -521,7 +531,8 @@ pub fn unmanaged_positions(open_book: &[Position], managed: &[Position]) -> Vec<
     open_book
         .iter()
         .filter(|pos| {
-            pos.qty > Decimal::ZERO && (pos.side != Side::Long || !managed_syms.contains(pos.symbol.as_str()))
+            pos.qty > Decimal::ZERO
+                && (pos.side != Side::Long || !managed_syms.contains(pos.symbol.as_str()))
         })
         .cloned()
         .collect()
@@ -550,7 +561,9 @@ pub fn remembered_positions(position: Option<&Position>, extra: &[Position]) -> 
 }
 
 pub fn ticker_from_mapping(item: &serde_json::Value) -> Result<Ticker, String> {
-    let obj = item.as_object().ok_or_else(|| "ticker must be an object".to_string())?;
+    let obj = item
+        .as_object()
+        .ok_or_else(|| "ticker must be an object".to_string())?;
     let symbol = obj
         .get("symbol")
         .and_then(|v| v.as_str())
@@ -585,7 +598,9 @@ pub fn ticker_from_mapping(item: &serde_json::Value) -> Result<Ticker, String> {
 }
 
 pub fn bar_from_kline(row: &serde_json::Value) -> Result<Bar, String> {
-    let arr = row.as_array().ok_or_else(|| "kline row too short".to_string())?;
+    let arr = row
+        .as_array()
+        .ok_or_else(|| "kline row too short".to_string())?;
     if arr.len() < 6 {
         return Err("kline row too short".into());
     }
@@ -604,7 +619,9 @@ fn json_dec(v: Option<&serde_json::Value>) -> Result<Decimal, String> {
     let v = v.ok_or_else(|| "missing numeric value".to_string())?;
     match v {
         serde_json::Value::String(s) => crate::money::dec(s).map_err(|e| e.to_string()),
-        serde_json::Value::Number(n) => crate::money::dec(&n.to_string()).map_err(|e| e.to_string()),
+        serde_json::Value::Number(n) => {
+            crate::money::dec(&n.to_string()).map_err(|e| e.to_string())
+        }
         _ => Err("not a decimal".into()),
     }
 }

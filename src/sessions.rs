@@ -21,7 +21,11 @@ pub fn parse_entry_windows(raw: &str) -> Result<Vec<HourWindow>, String> {
     if text.is_empty() || matches!(text.as_str(), "*" | "24" | "all" | "always") {
         return Ok(Vec::new());
     }
-    let parts: Vec<&str> = text.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.is_empty() {
         return Ok(Vec::new());
     }
@@ -121,7 +125,10 @@ pub fn in_entry_window(ts: f64, windows: Option<&[HourWindow]>, always: bool) ->
 }
 
 fn window_at(hour: u32, windows: &[HourWindow]) -> Option<HourWindow> {
-    windows.iter().copied().find(|&w| hour_in_windows(hour, &[w]))
+    windows
+        .iter()
+        .copied()
+        .find(|&w| hour_in_windows(hour, &[w]))
 }
 
 /// Exclusive end of the UTC window that contains `ts`, or `None` if 24/7 / closed.
@@ -157,11 +164,7 @@ pub fn next_window_start(ts: f64, windows: &[HourWindow]) -> Option<DateTime<Utc
     let now = utc_datetime(ts);
     for day in 0..2 {
         let day0 = now + chrono::Duration::days(day);
-        let day0 = day0
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc();
+        let day0 = day0.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
         let mut starts: Vec<u8> = windows.iter().map(|w| w.0).collect();
         starts.sort_unstable();
         for start in starts {

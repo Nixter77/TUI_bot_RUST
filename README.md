@@ -339,6 +339,9 @@ chmod 600 .env
 | `STRATEGY4_MAX_POSITIONS` | `5` | Максимум одновременных лонгов Continuation (`1`–`10`). |
 | **Интерфейс и сигналы** | | |
 | `TRADER_SIGNALS` | `1` в TUI | `1` — включить звук, `0` — без звуков. |
+| `TELEGRAM_BOT_TOKEN` | — | Токен бота (BotFather). Вместе с `TELEGRAM_CHAT_ID` шлёт live open/close/flatten. Не коммитить. |
+| `TELEGRAM_CHAT_ID` | — | Числовой chat id (личка или группа). Без токена не задавать. |
+| `TELEGRAM_NOTIFY` | `1` если токен задан | `0` — выключить пинги, не удаляя токен. Amend (трейл SL) не шлётся. |
 
 ---
 
@@ -371,6 +374,11 @@ STRATEGY4_ENTRY_HOURS=0-2,7-10,13-16
 
 # Звуковые сигналы (1 - вкл, 0 - выкл)
 TRADER_SIGNALS=1
+
+# Telegram: live open/close/flatten (не amend). Токен не коммитить.
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
+# TELEGRAM_NOTIFY=1
 ```
 
 ---

@@ -6,7 +6,7 @@ use crate::errors::{
     ACTION_OPERATOR, ACTION_RETRY, ACTION_SKIP, COOLDOWN_SEC,
 };
 use crate::exchange::{
-    cancel_leftover_sells, size_risk_market_order, sell_protectives_are_sized, size_market_order,
+    cancel_leftover_sells, sell_protectives_are_sized, size_market_order, size_risk_market_order,
     ExchangeError, LiveClient,
 };
 use crate::flatten::{close_targets, flatten_open_book, FlattenResult};
@@ -85,11 +85,19 @@ fn fail_closed_immediate_trigger(
 
 fn skip_symbols(state: Option<&EngineState>) -> std::collections::HashSet<String> {
     state
-        .map(|s| s.skip_symbols.iter().map(|x| x.to_ascii_uppercase()).collect())
+        .map(|s| {
+            s.skip_symbols
+                .iter()
+                .map(|x| x.to_ascii_uppercase())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-fn held_symbols(snapshot: &MarketSnapshot, state: Option<&EngineState>) -> std::collections::HashSet<String> {
+fn held_symbols(
+    snapshot: &MarketSnapshot,
+    state: Option<&EngineState>,
+) -> std::collections::HashSet<String> {
     let mut held = std::collections::HashSet::new();
     if let Some(pos) = &snapshot.position {
         if pos.qty > Decimal::ZERO {
@@ -169,15 +177,16 @@ fn snapshot_long<'a>(snapshot: &'a MarketSnapshot, symbol: &str) -> Option<&'a P
         }
     }
     if !symbol.is_empty() {
-        return snapshot
-            .open_positions
-            .iter()
-            .find(|p| p.symbol == symbol.to_ascii_uppercase() && p.side == Side::Long && p.qty > Decimal::ZERO);
+        return snapshot.open_positions.iter().find(|p| {
+            p.symbol == symbol.to_ascii_uppercase() && p.side == Side::Long && p.qty > Decimal::ZERO
+        });
     }
     None
 }
 
-fn fetch_book(client: &mut dyn LiveClient) -> Result<Vec<Position>, crate::exchange::ExchangeError> {
+fn fetch_book(
+    client: &mut dyn LiveClient,
+) -> Result<Vec<Position>, crate::exchange::ExchangeError> {
     let raw = client.position_risk()?;
     crate::exchange::parse_positions(&raw)
 }
@@ -308,9 +317,7 @@ fn positions_for_flatten(
         }
     }
     for p in &state.positions {
-        if p.qty > Decimal::ZERO
-            && !out.iter().any(|x| x.symbol == p.symbol && x.side == p.side)
-        {
+        if p.qty > Decimal::ZERO && !out.iter().any(|x| x.symbol == p.symbol && x.side == p.side) {
             out.push(p.clone());
         }
     }
@@ -338,7 +345,10 @@ fn flatten_live_short(client: &mut dyn LiveClient, symbol: &str) -> Option<Posit
         return None;
     }
     let book = fetch_book(client).ok()?;
-    let row = book.iter().find(|p| p.symbol == want && p.qty > Decimal::ZERO)?.clone();
+    let row = book
+        .iter()
+        .find(|p| p.symbol == want && p.qty > Decimal::ZERO)?
+        .clone();
     if row.side != Side::Short {
         return None;
     }
@@ -375,7 +385,9 @@ fn place_fill_protectives(
                 Ok(b) => b,
                 Err(_) => return Err(first),
             };
-            let row = book.iter().find(|p| p.symbol == symbol.to_ascii_uppercase() && p.qty > Decimal::ZERO);
+            let row = book
+                .iter()
+                .find(|p| p.symbol == symbol.to_ascii_uppercase() && p.qty > Decimal::ZERO);
             if row.map(|r| r.side) != Some(Side::Long) {
                 return Err(first);
             }
@@ -508,7 +520,11 @@ fn enter_live(
         return err("skip enter: already in position");
     }
     let cap = if let Some(s) = state.filter(|s| crate::engine::is_continuation(s.strategy_id)) {
-        crate::engine::continuation_slot_cap(s.strategy_id, cfg.s4_max_positions, cfg.s5_max_positions)
+        crate::engine::continuation_slot_cap(
+            s.strategy_id,
+            cfg.s4_max_positions,
+            cfg.s5_max_positions,
+        )
     } else {
         cfg.max_positions
     };
@@ -530,7 +546,10 @@ fn enter_live(
     // S4 live path: RISK_PCT of account equity (wallet+uPnL). 0 = fall back to ORDER_NOTIONAL_USDT.
     // Phase-2: Neutral → 0.5×; Bear/Panic should not reach here (skip_new_long) — fail-closed skip.
     // Never bump qty so qty*(entry-SL) exceeds the risk budget — skip the symbol instead.
-    let s4_risk = state.map(|s| crate::engine::is_continuation(s.strategy_id)).unwrap_or(false) && cfg.risk_pct > Decimal::ZERO;
+    let s4_risk = state
+        .map(|s| crate::engine::is_continuation(s.strategy_id))
+        .unwrap_or(false)
+        && cfg.risk_pct > Decimal::ZERO;
     let regime = crate::regime::classify_snapshot(snapshot);
     if s4_risk && regime.blocks_alt_entry() {
         return err(regime.block_reason().unwrap_or("skip enter: btc regime"));
@@ -590,9 +609,9 @@ fn enter_live(
     // fill. Read positionRisk for both successful and timed-out posts; its
     // entryPrice and quantity are the only safe source for protection/accounting.
     let filled_pos = match fetch_book(client) {
-        Ok(book) => book
-            .into_iter()
-            .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.side == Side::Long && p.qty > Decimal::ZERO),
+        Ok(book) => book.into_iter().find(|p| {
+            p.symbol.eq_ignore_ascii_case(symbol) && p.side == Side::Long && p.qty > Decimal::ZERO
+        }),
         Err(e) => {
             if buy_error.is_none() {
                 let _ = client.market_close(symbol, "LONG", qty);
@@ -602,17 +621,25 @@ fn enter_live(
         }
     };
     let Some(filled_pos) = filled_pos else {
-        return err(buy_error.map(|e| e.0).unwrap_or_else(|| "market buy not found in position book".into()));
+        return err(buy_error
+            .map(|e| e.0)
+            .unwrap_or_else(|| "market buy not found in position book".into()));
     };
     qty = filled_pos.qty;
     let entry_price = filled_pos.entry_price;
-    let (take_profit, stop_loss) = match rebase_long_protectives(mark, entry_price, take_profit, stop_loss) {
-        Ok(prices) => prices,
-        Err(detail) => return fail_closed_immediate_trigger(cfg, client, state, symbol, qty, &detail),
-    };
+    let (take_profit, stop_loss) =
+        match rebase_long_protectives(mark, entry_price, take_profit, stop_loss) {
+            Ok(prices) => prices,
+            Err(detail) => {
+                return fail_closed_immediate_trigger(cfg, client, state, symbol, qty, &detail)
+            }
+        };
     if let Some(flipped) = flatten_live_short(client, symbol) {
         return LiveApplyResult {
-            error: Some(format!("вход перевернул в шорт — закрыл {}", flipped.symbol)),
+            error: Some(format!(
+                "вход перевернул в шорт — закрыл {}",
+                flipped.symbol
+            )),
             forget_symbol: flipped.symbol,
             ..Default::default()
         };
@@ -690,7 +717,10 @@ fn amend_live(
         };
         if let Some(flipped) = flatten_live_short(client, &hint) {
             return LiveApplyResult {
-                error: Some(format!("трейл перевернул в шорт — закрыл {}", flipped.symbol)),
+                error: Some(format!(
+                    "трейл перевернул в шорт — закрыл {}",
+                    flipped.symbol
+                )),
                 forget_symbol: flipped.symbol,
                 ..Default::default()
             };
@@ -707,7 +737,10 @@ fn amend_live(
     if pos.side != Side::Long {
         if let Some(flipped) = flatten_live_short(client, &pos.symbol) {
             return LiveApplyResult {
-                error: Some(format!("трейл перевернул в шорт — закрыл {}", flipped.symbol)),
+                error: Some(format!(
+                    "трейл перевернул в шорт — закрыл {}",
+                    flipped.symbol
+                )),
                 forget_symbol: flipped.symbol,
                 ..Default::default()
             };
@@ -745,14 +778,7 @@ fn amend_live(
     }
     if let Err(e) = client.replace_stop(&pos.symbol, stop_loss, Some(tp), Some(pos.qty)) {
         if is_immediate_trigger_error(&e.0) {
-            return fail_closed_immediate_trigger(
-                cfg,
-                client,
-                state,
-                &pos.symbol,
-                pos.qty,
-                &e.0,
-            );
+            return fail_closed_immediate_trigger(cfg, client, state, &pos.symbol, pos.qty, &e.0);
         }
         if reason.contains("безубыток на 1R") {
             let _ = client.cancel_protectives(&pos.symbol);
@@ -786,7 +812,10 @@ fn amend_live(
     }
     if let Some(flipped) = flatten_live_short(client, &pos.symbol) {
         return LiveApplyResult {
-            error: Some(format!("трейл перевернул в шорт — закрыл {}", flipped.symbol)),
+            error: Some(format!(
+                "трейл перевернул в шорт — закрыл {}",
+                flipped.symbol
+            )),
             forget_symbol: flipped.symbol,
             ..Default::default()
         };
@@ -802,7 +831,10 @@ fn exit_live(
 ) -> LiveApplyResult {
     let mut pos = position_for(snapshot, state, symbol).cloned();
     if snapshot.live_book {
-        let hint = pos.as_ref().map(|p| p.symbol.clone()).unwrap_or_else(|| symbol.to_string());
+        let hint = pos
+            .as_ref()
+            .map(|p| p.symbol.clone())
+            .unwrap_or_else(|| symbol.to_string());
         let live = snapshot_row(snapshot, &hint);
         if live.is_none() {
             return LiveApplyResult {
@@ -882,16 +914,24 @@ fn reduce_live(
         || (min_qty > Decimal::ZERO && (close_qty < min_qty || remain < min_qty))
     {
         // Cannot partial — fall through to full BE amend path semantics.
-        return amend_live(cfg, client, snapshot, state, stop_loss, &pos.symbol, "безубыток на 1R");
+        return amend_live(
+            cfg,
+            client,
+            snapshot,
+            state,
+            stop_loss,
+            &pos.symbol,
+            "безубыток на 1R",
+        );
     }
     // Do not cancel protectives first — that would naked the remainder.
     if let Err(e) = client.market_close(&pos.symbol, "LONG", close_qty) {
         return err(e.0);
     }
     let strategy_id = state.map(|s| s.strategy_id).unwrap_or(0);
-    let tp = pos.take_profit.or_else(|| {
-        protective_tp_for_rearm(cfg, strategy_id, pos.entry_price, stop_loss)
-    });
+    let tp = pos
+        .take_profit
+        .or_else(|| protective_tp_for_rearm(cfg, strategy_id, pos.entry_price, stop_loss));
     // BE amend: retry once; if still fail → flatten remain AND keep scaled latch (no reduce spam).
     let be_err = match client.replace_stop(&pos.symbol, stop_loss, tp, Some(remain)) {
         Ok(()) => None,
@@ -918,7 +958,9 @@ fn reduce_live(
         let mark = mark_for_symbol(snapshot, &pos.symbol);
         // filled=true so apply_decision keeps scaled_one_r latch (early + adopt).
         return LiveApplyResult {
-            error: Some(format!("flattened naked fill after reduce: {e}{close_note}")),
+            error: Some(format!(
+                "flattened naked fill after reduce: {e}{close_note}"
+            )),
             filled: true,
             mark,
             qty: Some(close_qty),
@@ -928,7 +970,10 @@ fn reduce_live(
     }
     if let Some(flipped) = flatten_live_short(client, &pos.symbol) {
         return LiveApplyResult {
-            error: Some(format!("reduce перевернул в шорт — закрыл {}", flipped.symbol)),
+            error: Some(format!(
+                "reduce перевернул в шорт — закрыл {}",
+                flipped.symbol
+            )),
             filled: true,
             mark: mark_for_symbol(snapshot, &pos.symbol),
             qty: Some(close_qty),
@@ -965,7 +1010,15 @@ pub fn apply_live(
             take_profit,
             stop_loss,
             ..
-        } => enter_live(cfg, client, snapshot, state, symbol, *take_profit, *stop_loss),
+        } => enter_live(
+            cfg,
+            client,
+            snapshot,
+            state,
+            symbol,
+            *take_profit,
+            *stop_loss,
+        ),
         Decision::AmendStop {
             stop_loss,
             reason,
@@ -979,11 +1032,12 @@ pub fn apply_live(
             stop_loss,
             reason,
             ..
-        } => reduce_live(cfg, client, snapshot, state, symbol, *qty, *stop_loss, reason),
+        } => reduce_live(
+            cfg, client, snapshot, state, symbol, *qty, *stop_loss, reason,
+        ),
         Decision::Hold { .. } => LiveApplyResult::default(),
     }
 }
-
 
 fn adopt_amended_stop(state: &mut EngineState, symbol: &str, stop_loss: Decimal) {
     for p in state.positions.iter_mut() {
@@ -998,7 +1052,12 @@ fn adopt_amended_stop(state: &mut EngineState, symbol: &str, stop_loss: Decimal)
     }
 }
 
-fn adopt_reduced_long(state: &mut EngineState, symbol: &str, closed_qty: Decimal, stop_loss: Decimal) {
+fn adopt_reduced_long(
+    state: &mut EngineState,
+    symbol: &str,
+    closed_qty: Decimal,
+    stop_loss: Decimal,
+) {
     for p in state.positions.iter_mut() {
         if p.symbol.eq_ignore_ascii_case(symbol) {
             p.qty = (p.qty - closed_qty).max(Decimal::ZERO);
@@ -1044,14 +1103,7 @@ pub fn apply_paper_decision(
                 .chain(state.position.iter())
                 .find(|p| p.symbol.eq_ignore_ascii_case(symbol))
                 .and_then(|p| p.take_profit);
-            journal::record_amend(
-                state.strategy_id,
-                symbol,
-                *stop_loss,
-                tp,
-                false,
-                reason,
-            );
+            journal::record_amend(state.strategy_id, symbol, *stop_loss, tp, false, reason);
         }
         Decision::ReduceLong {
             symbol,
@@ -1097,8 +1149,8 @@ pub fn apply_paper_decision(
                 false,
                 pos.stop_loss,
                 pos.take_profit,
-                    true,
-                );
+                true,
+            );
             adopt_reduced_long(state, symbol, close_qty, *stop_loss);
             let tp = state
                 .positions
@@ -1130,8 +1182,8 @@ pub fn apply_paper_decision(
                 false,
                 pos.stop_loss,
                 pos.take_profit,
-                    false,
-                );
+                false,
+            );
             drop_symbol(state, symbol);
         }
         _ => {}
@@ -1175,7 +1227,11 @@ pub fn adopt_live_fill(
     }
 }
 
-pub fn record_flatten(state: &mut EngineState, result: FlattenResult, pause_entries: bool) -> FlattenResult {
+pub fn record_flatten(
+    state: &mut EngineState,
+    result: FlattenResult,
+    pause_entries: bool,
+) -> FlattenResult {
     if !result.closed.is_empty() {
         let closed_syms: std::collections::HashSet<String> = result.symbols().into_iter().collect();
         if pause_entries {
@@ -1188,7 +1244,11 @@ pub fn record_flatten(state: &mut EngineState, result: FlattenResult, pause_entr
             state.positions.retain(|p| !closed_syms.contains(&p.symbol));
             state.position = state.positions.first().cloned();
         }
-        let prefix = if pause_entries { "FLAT " } else { "FLAT хвосты " };
+        let prefix = if pause_entries {
+            "FLAT "
+        } else {
+            "FLAT хвосты "
+        };
         state.push_action(unix_now(), format!("{prefix}{}", result.closed.join(", ")));
     }
     if !result.errors.is_empty() {
@@ -1253,11 +1313,19 @@ pub fn apply_decision(
     decision: &Decision,
 ) -> LiveApplyResult {
     let closing = if let Decision::ExitPosition { symbol, reason } = decision {
-        position_for(snapshot, Some(state), symbol).cloned().map(|p| (p, reason.clone()))
+        position_for(snapshot, Some(state), symbol)
+            .cloned()
+            .map(|p| (p, reason.clone()))
     } else {
         None
     };
-    let reducing = if let Decision::ReduceLong { symbol, reason, qty, .. } = decision {
+    let reducing = if let Decision::ReduceLong {
+        symbol,
+        reason,
+        qty,
+        ..
+    } = decision
+    {
         position_for(snapshot, Some(state), symbol)
             .cloned()
             .map(|p| (p, reason.clone(), *qty))
@@ -1277,7 +1345,8 @@ pub fn apply_decision(
     }
     let result = apply_live(cfg, client, snapshot, decision, Some(state));
     if early_latched {
-        let no_progress = result.error.is_some() && !result.filled && result.forget_symbol.is_empty();
+        let no_progress =
+            result.error.is_some() && !result.filled && result.forget_symbol.is_empty();
         if no_progress {
             if let Decision::ReduceLong { symbol, .. } = decision {
                 state.scaled_one_r.remove(&symbol.to_ascii_uppercase());
@@ -1302,8 +1371,8 @@ pub fn apply_decision(
                 cfg.live,
                 pos.stop_loss,
                 pos.take_profit,
-                    false,
-                );
+                false,
+            );
             let won = journal::long_close_was_win(pos.entry_price, exit_px, pos.take_profit);
             if !won {
                 desk_pause_after_loss(cfg, state, unix_now());
@@ -1331,8 +1400,8 @@ pub fn apply_decision(
                 cfg.live,
                 pos.stop_loss,
                 pos.take_profit,
-                    true,
-                );
+                true,
+            );
         }
     }
     if !result.forget_symbol.is_empty() {
@@ -1345,11 +1414,7 @@ pub fn apply_decision(
             state.scaled_one_r.insert(key.clone());
             crate::openmeta::mark_scaled(&key);
         }
-        if result
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("шорт"))
-        {
+        if result.error.as_deref().is_some_and(|e| e.contains("шорт")) {
             journal::record_flatten(
                 state.strategy_id,
                 &[format!("SHORT {}", result.forget_symbol)],
@@ -1381,13 +1446,19 @@ pub fn apply_decision(
             } else if let Decision::EnterLong { symbol, .. } = decision {
                 if info.action == ACTION_SKIP || info.action == ACTION_COOLDOWN {
                     let up = symbol.to_ascii_uppercase();
-                    if !state.skip_symbols.iter().any(|s| s.eq_ignore_ascii_case(&up)) {
+                    if !state
+                        .skip_symbols
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&up))
+                    {
                         state.skip_symbols.push(up.clone());
                         state.skip_symbols.sort();
                     }
                     state.skip_reasons.insert(
                         up,
-                        info.code.map(|c| c.to_string()).unwrap_or_else(|| info.message.clone()),
+                        info.code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| info.message.clone()),
                     );
                 }
             }
@@ -1411,14 +1482,7 @@ pub fn apply_decision(
                 .chain(state.position.iter())
                 .find(|p| p.symbol.eq_ignore_ascii_case(symbol))
                 .and_then(|p| p.take_profit);
-            journal::record_amend(
-                state.strategy_id,
-                symbol,
-                *stop_loss,
-                tp,
-                cfg.live,
-                reason,
-            );
+            journal::record_amend(state.strategy_id, symbol, *stop_loss, tp, cfg.live, reason);
         }
         if let Decision::ReduceLong {
             stop_loss,
@@ -1480,7 +1544,9 @@ pub fn apply_decision(
                     } = decision
                     {
                         state.sized_stops.insert(symbol.to_ascii_uppercase());
-                        let snap_risk = if crate::engine::is_continuation(state.strategy_id) && cfg.risk_pct > Decimal::ZERO {
+                        let snap_risk = if crate::engine::is_continuation(state.strategy_id)
+                            && cfg.risk_pct > Decimal::ZERO
+                        {
                             crate::regime::effective_risk_pct(cfg.risk_pct, snapshot)
                         } else {
                             cfg.risk_pct
@@ -1521,19 +1587,26 @@ pub fn apply_decision(
         }
     }
     let has_position = snapshot.position.is_some()
-        || snapshot.open_positions.iter().any(|p| p.qty > Decimal::ZERO);
-    let sound_won = closing.as_ref().map(|(pos, reason)| {
-        exit_sound_won(pos, reason, &result, snapshot)
-    });
+        || snapshot
+            .open_positions
+            .iter()
+            .any(|p| p.qty > Decimal::ZERO);
+    let sound_won = closing
+        .as_ref()
+        .map(|(pos, reason)| exit_sound_won(pos, reason, &result, snapshot));
     emit_decision(decision, &result, cfg.live, has_position, sound_won);
     result
 }
 
 fn drop_symbol(state: &mut EngineState, symbol: &str) {
     let want = symbol.to_ascii_uppercase();
-    state.positions.retain(|p| p.symbol.to_ascii_uppercase() != want);
+    state
+        .positions
+        .retain(|p| p.symbol.to_ascii_uppercase() != want);
     state.position = state.positions.first().cloned();
-    state.inflight_symbols.retain(|s| s.to_ascii_uppercase() != want);
+    state
+        .inflight_symbols
+        .retain(|s| s.to_ascii_uppercase() != want);
     state.entry_inflight = !state.inflight_symbols.is_empty() && state.positions.is_empty();
     state.sized_stops.remove(&want);
     state.rearm_miss_since.remove(&want);
@@ -1604,7 +1677,11 @@ pub fn rearm_live_protectives(
                     None => {
                         if note_rearm_failure(state, &key, now) {
                             flatten_missing_protectives(
-                                cfg, client, state, &live, "нет SL/TP для rearm",
+                                cfg,
+                                client,
+                                state,
+                                &live,
+                                "нет SL/TP для rearm",
                             );
                             done.push(live.symbol.clone());
                         }
@@ -1712,8 +1789,8 @@ fn protective_tp_for_rearm(
         let risk = entry - stop_loss;
         if risk > Decimal::ZERO {
             let p = crate::engine::continuation_trade_params(strategy_id, cfg.s4_interval);
-            let tp = (entry + p.reward_r * risk)
-                * (Decimal::ONE + crate::money::round_trip_taker_pct());
+            let tp =
+                (entry + p.reward_r * risk) * (Decimal::ONE + crate::money::round_trip_taker_pct());
             if tp > entry && tp > stop_loss {
                 return Some(tp);
             }
@@ -1722,7 +1799,11 @@ fn protective_tp_for_rearm(
     take_profit_price_net(entry, "LONG", cfg.tp_pct).ok()
 }
 
-fn derive_protectives_from_entry(cfg: &Config, strategy_id: i32, live: &Position) -> Option<(Decimal, Decimal)> {
+fn derive_protectives_from_entry(
+    cfg: &Config,
+    strategy_id: i32,
+    live: &Position,
+) -> Option<(Decimal, Decimal)> {
     if live.entry_price <= Decimal::ZERO {
         return None;
     }
@@ -1770,7 +1851,6 @@ fn flatten_missing_protectives(
     ));
     drop_symbol(state, &live.symbol);
 }
-
 
 fn live_long_keys(snapshot: &MarketSnapshot) -> HashSet<String> {
     let mut live_longs = HashSet::new();
@@ -1878,8 +1958,8 @@ pub fn clear_vanished_longs(
             cfg.live,
             pos.stop_loss,
             pos.take_profit,
-                    false,
-                );
+            false,
+        );
         cool_symbol(state, &pos.symbol, now, won);
         if !won {
             desk_pause_after_loss(cfg, state, now);
@@ -1927,7 +2007,10 @@ pub fn clear_orphan_protectives(
             if live_longs.contains(&symbol) {
                 continue;
             }
-            let algos = client.open_algo_orders(Some(&symbol)).ok().unwrap_or_default();
+            let algos = client
+                .open_algo_orders(Some(&symbol))
+                .ok()
+                .unwrap_or_default();
             let orders = client.open_orders(Some(&symbol)).ok().unwrap_or_default();
             if !algos.is_empty() || !orders.is_empty() {
                 leftover.insert(symbol);

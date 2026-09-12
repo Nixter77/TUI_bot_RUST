@@ -26,7 +26,10 @@ pub struct SnapshotPoller<T> {
 }
 
 impl<T: Send + 'static> SnapshotPoller<T> {
-    pub fn start(interval: Duration, mut pull: impl FnMut() -> Pulled<T> + Send + 'static) -> io::Result<Self> {
+    pub fn start(
+        interval: Duration,
+        mut pull: impl FnMut() -> Pulled<T> + Send + 'static,
+    ) -> io::Result<Self> {
         let (wake_tx, wake_rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
         let panics = Arc::new(AtomicU64::new(0));

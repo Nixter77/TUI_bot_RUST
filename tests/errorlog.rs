@@ -23,6 +23,15 @@ fn redact_strips_api_key_header() {
 }
 
 #[test]
+fn redact_strips_telegram_bot_token() {
+    let token = "123456789:AAFakeTokenForUnitTestsOnly01234567890";
+    let raw = format!("POST https://api.telegram.org/bot{token}/sendMessage failed");
+    let clean = redact_secrets(&raw);
+    assert!(clean.contains("[tg-token]"), "{clean}");
+    assert!(!clean.contains(token), "{clean}");
+}
+
+#[test]
 fn order_symbol_rejects_query_injection() {
     use tui_bot::errors::is_safe_order_symbol;
     assert!(is_safe_order_symbol("BTCUSDT"));
@@ -90,7 +99,13 @@ fn observe_writes_shown_still_and_cleared() {
     let text = fs::read_to_string(&path).unwrap();
     let events: Vec<_> = text.lines().collect();
     assert!(events[0].contains("\"event\":\"shown\""), "{text}");
-    assert!(events.iter().any(|l| l.contains("\"event\":\"still\"")), "{text}");
-    assert!(events.last().unwrap().contains("\"event\":\"cleared\""), "{text}");
+    assert!(
+        events.iter().any(|l| l.contains("\"event\":\"still\"")),
+        "{text}"
+    );
+    assert!(
+        events.last().unwrap().contains("\"event\":\"cleared\""),
+        "{text}"
+    );
     assert!(!text.contains("signature="));
 }

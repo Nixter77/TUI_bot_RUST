@@ -142,7 +142,11 @@ impl TradeJournal {
             if let Some(parent) = self.path.parent() {
                 crate::errors::ensure_private_dir(parent);
             }
-            match OpenOptions::new().create(true).append(true).open(&self.path) {
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
                 Ok(mut f) => {
                     crate::errors::restrict_private_file(&self.path);
                     let line = format!("{json}\n");
@@ -156,6 +160,8 @@ impl TradeJournal {
         };
         if let Some(e) = io_err {
             set_last_error(e);
+        } else {
+            crate::telegram::notify_event(event);
         }
     }
 
@@ -197,9 +203,9 @@ fn lock_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub fn set_active(path: Option<PathBuf>) {
     *lock_poison(&ACTIVE) = path.clone();
-    let meta_path = path.as_ref().and_then(|p| {
-        p.parent().map(|dir| dir.join("open_meta.json"))
-    });
+    let meta_path = path
+        .as_ref()
+        .and_then(|p| p.parent().map(|dir| dir.join("open_meta.json")));
     crate::openmeta::set_active_path(meta_path);
 }
 
@@ -538,7 +544,11 @@ pub fn symbol_cooldown_until_for(strategy_id: i32, now: f64, won: bool, pause_se
 
 /// After a close/flatten, keep the name off the buy list.
 /// Restarts otherwise re-buy the same SL tape (SUPERUSDT three times in 15m).
-pub fn cooldowns_from_events(events: &[TradeEvent], now: f64, pause_sec: f64) -> HashMap<String, f64> {
+pub fn cooldowns_from_events(
+    events: &[TradeEvent],
+    now: f64,
+    pause_sec: f64,
+) -> HashMap<String, f64> {
     cooldowns_from_events_for(events, now, pause_sec, None)
 }
 
@@ -737,20 +747,19 @@ pub fn unmatched_open_positions_from_for(
 }
 
 pub fn seed_cooldowns(state: &mut EngineState, now: f64, pause_sec: f64) {
-    let pause = if pause_sec > 0.0 { pause_sec } else { COOLDOWN_SEC };
+    let pause = if pause_sec > 0.0 {
+        pause_sec
+    } else {
+        COOLDOWN_SEC
+    };
     let events = TradeJournal::new(Some(Path::new(DEFAULT_JOURNAL_PATH))).read_events();
     let sid = Some(state.strategy_id);
     for (sym, until) in cooldowns_from_events_for(&events, now, pause, sid) {
         let cur = state.cooldowns.get(&sym).copied().unwrap_or(0.0);
         state.cooldowns.insert(sym, cur.max(until));
     }
-    let desk = desk_cooldown_from_events_windows_for(
-        &events,
-        now,
-        pause,
-        &DEFAULT_ENTRY_WINDOWS,
-        sid,
-    );
+    let desk =
+        desk_cooldown_from_events_windows_for(&events, now, pause, &DEFAULT_ENTRY_WINDOWS, sid);
     if desk > state.cooldown_until {
         state.cooldown_until = desk;
     }

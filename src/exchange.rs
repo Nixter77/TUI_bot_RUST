@@ -26,12 +26,20 @@ pub struct SymbolFilters {
     pub min_notional: Decimal,
 }
 
-pub fn size_market_order(notional: Decimal, price: Decimal, filters: &SymbolFilters) -> Result<Decimal, ExchangeError> {
+pub fn size_market_order(
+    notional: Decimal,
+    price: Decimal,
+    filters: &SymbolFilters,
+) -> Result<Decimal, ExchangeError> {
     if price <= Decimal::ZERO {
-        return Err(ExchangeError("cannot size order at non-positive price".into()));
+        return Err(ExchangeError(
+            "cannot size order at non-positive price".into(),
+        ));
     }
     if notional <= Decimal::ZERO {
-        return Err(ExchangeError("cannot size order at non-positive notional".into()));
+        return Err(ExchangeError(
+            "cannot size order at non-positive notional".into(),
+        ));
     }
     let target = if notional >= filters.min_notional {
         notional
@@ -137,7 +145,11 @@ pub struct ProtectiveSell {
     pub trigger_price: Decimal,
 }
 
-pub fn sized_long_protectives(qty: Decimal, stop_loss: Decimal, take_profit: Decimal) -> Result<Vec<ProtectiveSell>, ExchangeError> {
+pub fn sized_long_protectives(
+    qty: Decimal,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+) -> Result<Vec<ProtectiveSell>, ExchangeError> {
     if qty <= Decimal::ZERO {
         return Err(ExchangeError("protective qty must be positive".into()));
     }
@@ -163,7 +175,6 @@ pub fn sized_long_protectives(qty: Decimal, stop_loss: Decimal, take_profit: Dec
         },
     ])
 }
-
 
 /// Map position side to the reduce-only order side that closes it.
 /// LONG/BUY → SELL; SHORT/SELL → BUY. Unknown sides refuse (never naked SELL).
@@ -299,7 +310,10 @@ pub fn sell_protectives_are_sized(rows: &[Value]) -> bool {
     if sells.len() < 2 {
         return false;
     }
-    if sells.iter().any(|row| flag_true(row.get("closePosition").unwrap_or(&Value::Null))) {
+    if sells
+        .iter()
+        .any(|row| flag_true(row.get("closePosition").unwrap_or(&Value::Null)))
+    {
         return false;
     }
     let types: Vec<String> = sells
@@ -322,7 +336,11 @@ pub fn sell_protectives_are_sized(rows: &[Value]) -> bool {
     for row in &sells {
         let qty = row
             .get("quantity")
-            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_f64().map(|f| f.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.as_f64().map(|f| f.to_string()))
+            })
             .unwrap_or_else(|| "0".into());
         let ok = dec(&qty).map(|d| d > Decimal::ZERO).unwrap_or(false);
         if !ok {
@@ -445,16 +463,27 @@ pub fn parse_positions(raw: &Value) -> Result<Vec<Position>, ExchangeError> {
         };
         let leverage = obj
             .get("leverage")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .unwrap_or(0) as i32;
         let entry = obj
             .get("entryPrice")
-            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| Some(v.to_string()))
+            })
             .and_then(|s| dec(&s).ok())
             .unwrap_or(Decimal::ZERO);
         let upnl = obj
             .get("unRealizedProfit")
-            .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+            .and_then(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| Some(v.to_string()))
+            })
             .and_then(|s| dec(&s).ok())
             .unwrap_or(Decimal::ZERO);
         out.push(Position {
@@ -510,7 +539,8 @@ pub fn parse_balances(raw: &Value, starting_equity: Decimal) -> Result<Account, 
             .eq_ignore_ascii_case("USDT")
     });
     let usdt = usdt.ok_or_else(|| ExchangeError("USDT balance missing".into()))?;
-    let wallet = json_num(usdt.get("balance")).map_err(|e| ExchangeError(format!("balance fields invalid: {e}")))?;
+    let wallet = json_num(usdt.get("balance"))
+        .map_err(|e| ExchangeError(format!("balance fields invalid: {e}")))?;
     let unreal = json_num(usdt.get("crossUnPnl")).unwrap_or(Decimal::ZERO);
     let available = json_num(usdt.get("availableBalance"))
         .or_else(|_| json_num(usdt.get("balance")))
@@ -534,7 +564,10 @@ fn with_start(account: Account, starting_equity: Option<Decimal>) -> Account {
     }
 }
 
-pub fn load_account(client: &mut dyn SnapshotClient, starting_equity: Option<Decimal>) -> Result<Account, ExchangeError> {
+pub fn load_account(
+    client: &mut dyn SnapshotClient,
+    starting_equity: Option<Decimal>,
+) -> Result<Account, ExchangeError> {
     let fallback = starting_equity.unwrap_or(Decimal::ZERO);
     match client.balances() {
         Ok(raw) => {
@@ -569,7 +602,12 @@ pub fn account_with_position_upnl(account: Account, positions: &[Position]) -> A
 /// Market + signed book for `fetch_snapshot`. Tests implement this; live uses BinanceFutures.
 pub trait SnapshotClient {
     fn ticker_24h(&mut self) -> Result<Vec<Ticker>, ExchangeError>;
-    fn klines(&mut self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Bar>, ExchangeError>;
+    fn klines(
+        &mut self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Bar>, ExchangeError>;
     fn account(&mut self) -> Result<Value, ExchangeError>;
     fn balances(&mut self) -> Result<Value, ExchangeError> {
         Err(ExchangeError("balances not supported".into()))
@@ -582,7 +620,8 @@ pub trait SnapshotClient {
 
 pub trait FlattenClient {
     fn cancel_protectives(&mut self, symbol: &str) -> Result<(), ExchangeError>;
-    fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal) -> Result<(), ExchangeError>;
+    fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal)
+        -> Result<(), ExchangeError>;
     fn position_risk(&mut self) -> Result<Value, ExchangeError>;
 }
 
@@ -612,7 +651,11 @@ pub trait LiveClient: FlattenClient {
     fn set_leverage(&mut self, _symbol: &str, _leverage: i32) -> Result<(), ExchangeError> {
         Ok(())
     }
-    fn max_notional(&mut self, _symbol: &str, _leverage: i32) -> Result<Option<Decimal>, ExchangeError> {
+    fn max_notional(
+        &mut self,
+        _symbol: &str,
+        _leverage: i32,
+    ) -> Result<Option<Decimal>, ExchangeError> {
         Ok(None)
     }
     fn open_algo_orders(&mut self, _symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
@@ -760,15 +803,28 @@ pub fn parse_symbol_filters(raw: &Value, symbol: &str) -> Result<SymbolFilters, 
     for flt in filters {
         let ftype = flt.get("filterType").and_then(|v| v.as_str()).unwrap_or("");
         if ftype == "PRICE_FILTER" {
-            tick = flt.get("tickSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
+            tick = flt
+                .get("tickSize")
+                .and_then(|v| v.as_str())
+                .and_then(|s| dec(s).ok());
         } else if ftype == "LOT_SIZE" {
-            step = flt.get("stepSize").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
-            min_qty = flt.get("minQty").and_then(|v| v.as_str()).and_then(|s| dec(s).ok());
+            step = flt
+                .get("stepSize")
+                .and_then(|v| v.as_str())
+                .and_then(|s| dec(s).ok());
+            min_qty = flt
+                .get("minQty")
+                .and_then(|v| v.as_str())
+                .and_then(|s| dec(s).ok());
         } else if ftype == "MIN_NOTIONAL" || ftype == "NOTIONAL" {
             min_notional = flt
                 .get("notional")
                 .or_else(|| flt.get("minNotional"))
-                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string())))
+                .and_then(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(v.to_string()))
+                })
                 .and_then(|s| dec(&s).ok());
         }
     }
@@ -798,8 +854,17 @@ impl std::fmt::Debug for BinanceFutures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BinanceFutures")
             .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|k| format!("{}…", k.chars().take(4).collect::<String>())))
-            .field("api_secret", &self.api_secret.as_ref().map(|_| "[redacted]"))
+            .field(
+                "api_key",
+                &self
+                    .api_key
+                    .as_ref()
+                    .map(|k| format!("{}…", k.chars().take(4).collect::<String>())),
+            )
+            .field(
+                "api_secret",
+                &self.api_secret.as_ref().map(|_| "[redacted]"),
+            )
             .field("recv_window", &self.recv_window)
             .field("timeout", &self.timeout)
             .finish()
@@ -891,7 +956,8 @@ impl BinanceFutures {
             let _ = self.sync_time();
         }
         let ts = Self::local_ms() + self.time_offset_ms.get();
-        signed_query_string(params, secret, ts, self.recv_window as i64).map_err(|e: SignError| ExchangeError(e.to_string()))
+        signed_query_string(params, secret, ts, self.recv_window as i64)
+            .map_err(|e: SignError| ExchangeError(e.to_string()))
     }
 
     pub fn ticker_24h(&self) -> Result<Vec<Ticker>, ExchangeError> {
@@ -907,7 +973,12 @@ impl BinanceFutures {
         self.signed_request("GET", "/fapi/v2/balance", &BTreeMap::new())
     }
 
-    pub fn klines(&self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<crate::models::Bar>, ExchangeError> {
+    pub fn klines(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::models::Bar>, ExchangeError> {
         if !is_kline_interval(interval) {
             return Err(ExchangeError(format!("bad kline interval {interval}")));
         }
@@ -928,7 +999,12 @@ impl BinanceFutures {
         Ok(bars)
     }
 
-    fn signed_request(&self, method: &str, path: &str, params: &BTreeMap<String, String>) -> Result<Value, ExchangeError> {
+    fn signed_request(
+        &self,
+        method: &str,
+        path: &str,
+        params: &BTreeMap<String, String>,
+    ) -> Result<Value, ExchangeError> {
         self.signed_request_retry(method, path, params, 0)
     }
 
@@ -1002,7 +1078,12 @@ impl FlattenClient for BinanceFutures {
         Ok(())
     }
 
-    fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal) -> Result<(), ExchangeError> {
+    fn market_close(
+        &mut self,
+        symbol: &str,
+        side: &str,
+        qty: Decimal,
+    ) -> Result<(), ExchangeError> {
         if qty <= Decimal::ZERO {
             return Err(ExchangeError("refusing non-positive close qty".into()));
         }
@@ -1011,7 +1092,9 @@ impl FlattenClient for BinanceFutures {
         let qty = quantize_to_step(qty, filters.step_size, false)
             .map_err(|e| ExchangeError(e.to_string()))?;
         if qty <= Decimal::ZERO {
-            return Err(ExchangeError("close qty invalid after step quantize".into()));
+            return Err(ExchangeError(
+                "close qty invalid after step quantize".into(),
+            ));
         }
         let p = market_close_params(symbol, side, qty)?;
         match self.signed_request("POST", "/fapi/v1/order", &p) {
@@ -1089,17 +1172,24 @@ impl LiveClient for BinanceFutures {
         qty: Option<Decimal>,
     ) -> Result<(), ExchangeError> {
         let filters = self.filters_for(symbol)?;
-        let tp = quantize_to_step(take_profit, filters.tick_size, true).map_err(|e| ExchangeError(e.to_string()))?;
-        let sl = quantize_to_step(stop_loss, filters.tick_size, false).map_err(|e| ExchangeError(e.to_string()))?;
+        let tp = quantize_to_step(take_profit, filters.tick_size, true)
+            .map_err(|e| ExchangeError(e.to_string()))?;
+        let sl = quantize_to_step(stop_loss, filters.tick_size, false)
+            .map_err(|e| ExchangeError(e.to_string()))?;
         if sl <= Decimal::ZERO || tp <= Decimal::ZERO || sl >= tp {
-            return Err(ExchangeError("protective prices invalid after quantize".into()));
+            return Err(ExchangeError(
+                "protective prices invalid after quantize".into(),
+            ));
         }
         // Never send closePosition: a naked SELL stop with no long opens a leftover short.
         let qty_s = match qty {
             Some(q) if q > Decimal::ZERO => {
-                let sized = quantize_to_step(q, filters.step_size, false).map_err(|e| ExchangeError(e.to_string()))?;
+                let sized = quantize_to_step(q, filters.step_size, false)
+                    .map_err(|e| ExchangeError(e.to_string()))?;
                 if sized <= Decimal::ZERO {
-                    return Err(ExchangeError("protective qty invalid after quantize".into()));
+                    return Err(ExchangeError(
+                        "protective qty invalid after quantize".into(),
+                    ));
                 }
                 sized.normalize().to_string()
             }
@@ -1131,7 +1221,9 @@ impl LiveClient for BinanceFutures {
                             Ok(_) => {}
                             Err(retry) => {
                                 let rt = retry.0.to_ascii_lowercase();
-                                if rt.contains("-4130") || rt.contains("closeposition in the direction") {
+                                if rt.contains("-4130")
+                                    || rt.contains("closeposition in the direction")
+                                {
                                     return Err(ExchangeError(format!(
                                         "protective blocked by existing closePosition (-4130): {}",
                                         retry.0
@@ -1155,7 +1247,9 @@ impl LiveClient for BinanceFutures {
                             Ok(_) => {}
                             Err(e2) => {
                                 let t2 = e2.0.to_ascii_lowercase();
-                                if t2.contains("-4130") || t2.contains("closeposition in the direction") {
+                                if t2.contains("-4130")
+                                    || t2.contains("closeposition in the direction")
+                                {
                                     cancel_close_position_sells(self, symbol);
                                     match self.signed_request("POST", "/fapi/v1/order", &q) {
                                         Ok(_) => {}
@@ -1236,7 +1330,12 @@ impl SnapshotClient for BinanceFutures {
         BinanceFutures::ticker_24h(self)
     }
 
-    fn klines(&mut self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Bar>, ExchangeError> {
+    fn klines(
+        &mut self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Bar>, ExchangeError> {
         BinanceFutures::klines(self, symbol, interval, limit)
     }
 

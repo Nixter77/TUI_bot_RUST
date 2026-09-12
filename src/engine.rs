@@ -130,7 +130,6 @@ pub fn select_strategy_str(raw: &str) -> Result<i32, String> {
     select_strategy(sid)
 }
 
-
 fn short_usdt(symbol: &str) -> String {
     let t = symbol.to_ascii_uppercase();
     if t.ends_with("USDT") {
@@ -263,7 +262,9 @@ pub fn decide(
             &HashSet::new(),
         );
         return Ok((
-            d.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),
+            d.into_iter()
+                .next()
+                .unwrap_or_else(|| Decision::hold("hold")),
             scan_ts,
         ));
     }
@@ -276,7 +277,10 @@ pub fn decide(
                     last_scan_ts,
                 ));
             }
-            return Ok((trend_decision(bars, Some(pos), &pos.symbol, trend), last_scan_ts));
+            return Ok((
+                trend_decision(bars, Some(pos), &pos.symbol, trend),
+                last_scan_ts,
+            ));
         }
     }
     let (live, cooling) = desk_symbols(snapshot, exclude, cooldowns, now);
@@ -409,10 +413,21 @@ pub fn tick(
     trend: Option<&TrendParams>,
     continuation_override: Option<&ContinuationParams>,
 ) -> (EngineState, Decision) {
-    let (new_state, decisions) = tick_decisions(state, snapshot, now, momentum, scalp, trend, continuation_override);
+    let (new_state, decisions) = tick_decisions(
+        state,
+        snapshot,
+        now,
+        momentum,
+        scalp,
+        trend,
+        continuation_override,
+    );
     (
         new_state,
-        decisions.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),
+        decisions
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Decision::hold("hold")),
     )
 }
 
@@ -424,7 +439,7 @@ pub fn tick_decisions(
     momentum: Option<&MomentumParams>,
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
-    continuation_override: Option<&ContinuationParams>,
+    _continuation_override: Option<&ContinuationParams>,
 ) -> (EngineState, Vec<Decision>) {
     let mut state = state.clone();
     let remembered = remembered_positions(state.position.as_ref(), &state.positions);
@@ -451,7 +466,10 @@ pub fn tick_decisions(
                 coalesce_position(Some(live), rem).unwrap_or_else(|| live.clone())
             })
             .collect();
-        let live_keys: HashSet<String> = merged.iter().map(|p| p.symbol.to_ascii_uppercase()).collect();
+        let live_keys: HashSet<String> = merged
+            .iter()
+            .map(|p| p.symbol.to_ascii_uppercase())
+            .collect();
         let pending = drop_stale_inflight(
             state
                 .inflight_symbols
@@ -491,11 +509,7 @@ pub fn tick_decisions(
     // S4/S5: only manage opens tagged for this strategy_id (foreign → unmanaged).
     if is_continuation(state.strategy_id) {
         merged_list.retain(|p| {
-            crate::openmeta::continuation_owns(
-                &p.symbol,
-                state.strategy_id,
-                &state.s4_inherited,
-            )
+            crate::openmeta::continuation_owns(&p.symbol, state.strategy_id, &state.s4_inherited)
         });
     }
 
@@ -570,14 +584,23 @@ pub fn tick_decisions(
     let now_flat = merged_list.is_empty();
 
     let sid = state.strategy_id;
-    let limit = momentum.map(|m| m.daily_loss_usdt).unwrap_or_else(default_daily_loss_usdt);
-    let limit_r = momentum.map(|m| m.daily_loss_r).unwrap_or_else(default_daily_loss_r);
-    let risk_pct = momentum.map(|m| m.risk_pct).unwrap_or_else(default_risk_pct);
+    let limit = momentum
+        .map(|m| m.daily_loss_usdt)
+        .unwrap_or_else(default_daily_loss_usdt);
+    let limit_r = momentum
+        .map(|m| m.daily_loss_r)
+        .unwrap_or_else(default_daily_loss_r);
+    let risk_pct = momentum
+        .map(|m| m.risk_pct)
+        .unwrap_or_else(default_risk_pct);
     if snapshot.account_ok {
         apply_day_risk(
             &mut state,
             now,
-            current_equity(snapshot.account.wallet_balance, snapshot.account.unrealized_pnl),
+            current_equity(
+                snapshot.account.wallet_balance,
+                snapshot.account.unrealized_pnl,
+            ),
             limit,
             limit_r,
             risk_pct,
@@ -615,7 +638,11 @@ pub fn tick_decisions(
             state.last_scan_ts,
         )
     } else if sid == 1 {
-        let inflight_f: Vec<String> = inflight.iter().filter(|s| s.as_str() != "*").cloned().collect();
+        let inflight_f: Vec<String> = inflight
+            .iter()
+            .filter(|s| s.as_str() != "*")
+            .cloned()
+            .collect();
         momentum_decisions(
             &snapshot.tickers,
             &merged_list,
@@ -632,7 +659,11 @@ pub fn tick_decisions(
         )
     } else if is_continuation(sid) {
         // S4 and S5 share DAILY_LOSS: allow_enter is !daily_halt; flatten/trail still run.
-        let inflight_f: Vec<String> = inflight.iter().filter(|s| s.as_str() != "*").cloned().collect();
+        let inflight_f: Vec<String> = inflight
+            .iter()
+            .filter(|s| s.as_str() != "*")
+            .cloned()
+            .collect();
         let cont = continuation_params(sid, momentum);
         let (d, ts, leaders) = continuation_decisions(
             snapshot,
@@ -732,10 +763,16 @@ pub fn tick_decisions(
             push_recent(&mut actions, now, decision.describe());
         }
     }
-    let book: Vec<Position> = merged_list.into_iter().filter(|p| p.qty > Decimal::ZERO).collect();
+    let book: Vec<Position> = merged_list
+        .into_iter()
+        .filter(|p| p.qty > Decimal::ZERO)
+        .collect();
     let mut last_error = persist_last_error(state.last_error.as_deref(), state.retry_until, now);
     if last_error.is_none() {
         last_error = crate::journal::take_last_error();
+    }
+    if last_error.is_none() {
+        last_error = crate::telegram::take_last_error();
     }
     let new_state = EngineState {
         last_scan_ts: scan_ts,

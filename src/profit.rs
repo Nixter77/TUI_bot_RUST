@@ -12,7 +12,11 @@ pub fn current_equity(wallet_balance: Decimal, unrealized_pnl: Decimal) -> Decim
     wallet_balance + unrealized_pnl
 }
 
-pub fn account_profit(wallet_balance: Decimal, unrealized_pnl: Decimal, starting_equity: Decimal) -> Decimal {
+pub fn account_profit(
+    wallet_balance: Decimal,
+    unrealized_pnl: Decimal,
+    starting_equity: Decimal,
+) -> Decimal {
     current_equity(wallet_balance, unrealized_pnl) - starting_equity
 }
 

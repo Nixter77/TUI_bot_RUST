@@ -9,7 +9,7 @@ use crate::models::MarketSnapshot;
 use crate::monitor::{build_monitor, render_monitor};
 use crate::profit::{current_equity, EquityPin};
 use crate::render::render_frame;
-use crate::snapshot::{pull_snapshot, make_client};
+use crate::snapshot::{make_client, pull_snapshot};
 use crate::view::build_view;
 use clap::Parser;
 use std::collections::HashMap;
@@ -50,7 +50,10 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString>,
 {
-    CliArgs::try_parse_from(std::iter::once(std::ffi::OsString::from("tui-bot")).chain(argv.into_iter().map(Into::into)))
+    CliArgs::try_parse_from(
+        std::iter::once(std::ffi::OsString::from("tui-bot"))
+            .chain(argv.into_iter().map(Into::into)),
+    )
 }
 
 pub fn render_startup_frame(
@@ -73,11 +76,17 @@ pub fn render_startup_frame(
     let snap = if let Some(s) = snapshot {
         s
     } else {
-        let mut client = if offline { None } else { Some(make_client(cfg)) };
+        let mut client = if offline {
+            None
+        } else {
+            Some(make_client(cfg))
+        };
         let mut pin = EquityPin::from_config(cfg.starting_equity);
         owned_snap = pull_snapshot(
             cfg,
-            client.as_mut().map(|c| c as &mut dyn crate::exchange::SnapshotClient),
+            client
+                .as_mut()
+                .map(|c| c as &mut dyn crate::exchange::SnapshotClient),
             &mut state,
             &mut pin,
             offline,
@@ -102,19 +111,32 @@ pub fn render_monitor_startup(
     let cfg = cfg.unwrap_or_else(|| owned.as_ref().unwrap());
     let sid = select_strategy(strategy_id).map_err(ConfigError)?;
     let mut state = EngineState::new(sid);
-    crate::journal::seed_cooldowns(&mut state, crate::sessions::unix_now(), crate::errors::COOLDOWN_SEC);
-    let mut client = if offline { None } else { Some(make_client(cfg)) };
+    crate::journal::seed_cooldowns(
+        &mut state,
+        crate::sessions::unix_now(),
+        crate::errors::COOLDOWN_SEC,
+    );
+    let mut client = if offline {
+        None
+    } else {
+        Some(make_client(cfg))
+    };
     let mut pin = EquityPin::from_config(cfg.starting_equity);
     let snapshot = pull_snapshot(
         cfg,
-        client.as_mut().map(|c| c as &mut dyn crate::exchange::SnapshotClient),
+        client
+            .as_mut()
+            .map(|c| c as &mut dyn crate::exchange::SnapshotClient),
         &mut state,
         &mut pin,
         offline,
         None,
     );
     let now = crate::sessions::unix_now();
-    let equity = current_equity(snapshot.account.wallet_balance, snapshot.account.unrealized_pnl);
+    let equity = current_equity(
+        snapshot.account.wallet_balance,
+        snapshot.account.unrealized_pnl,
+    );
     apply_day_risk(
         &mut state,
         now,
@@ -124,7 +146,9 @@ pub fn render_monitor_startup(
         cfg.risk_pct,
     );
     let events = TradeJournal::new(Some(Path::new(DEFAULT_JOURNAL_PATH))).read_events();
-    Ok(render_monitor(&build_monitor(cfg, &state, &snapshot, &events, now)))
+    Ok(render_monitor(&build_monitor(
+        cfg, &state, &snapshot, &events, now,
+    )))
 }
 
 pub fn run(
@@ -133,7 +157,12 @@ pub fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    let strategy = match args.strategy.parse::<i32>().map_err(|_| "strategy must be 1, 2, 3, 4, or 5".to_string()).and_then(select_strategy) {
+    let strategy = match args
+        .strategy
+        .parse::<i32>()
+        .map_err(|_| "strategy must be 1, 2, 3, 4, or 5".to_string())
+        .and_then(select_strategy)
+    {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(stderr, "config error: {e}");
@@ -191,7 +220,9 @@ pub fn run(
                 let _ = write!(stdout, "{frame}");
             }
             Err(e) => {
-                if let Ok(frame) = render_startup_frame(Some(&cfg), None, strategy, args.live, true, environ) {
+                if let Ok(frame) =
+                    render_startup_frame(Some(&cfg), None, strategy, args.live, true, environ)
+                {
                     let _ = write!(stdout, "{frame}");
                 }
                 let _ = writeln!(stderr, "(render fallback after {e})");
@@ -300,7 +331,10 @@ pub fn live_without_keys_isolated() -> (i32, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run(&args, Some(&env), &mut out, &mut err);
-    (code, String::from_utf8_lossy(&err).into_owned() + &String::from_utf8_lossy(&out))
+    (
+        code,
+        String::from_utf8_lossy(&err).into_owned() + &String::from_utf8_lossy(&out),
+    )
 }
 
 pub fn help_text() -> String {

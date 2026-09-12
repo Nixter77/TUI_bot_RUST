@@ -2,8 +2,8 @@
 
 use crate::config::{Config, DEFAULT_S2_MAX_HOLD_BARS};
 use crate::indicators::{ema_series, last_atr, last_ema, last_rsi, mean_volume, vwap};
-use crate::models::{Decision, Position, Side};
 use crate::models::Bar;
+use crate::models::{Decision, Position, Side};
 use crate::money::round_trip_taker_pct;
 use crate::sessions::{in_entry_window, HourWindow};
 use crate::trail::{long_stop_is_valid, trail_stop_upward};
@@ -210,7 +210,13 @@ fn pulled_into(bars: &[Bar], session_vwap: Decimal, atr: Decimal, p: &ScalpParam
     dipped && tagged
 }
 
-fn entry_stop(bars: &[Bar], mark: Decimal, ema_fast: Decimal, atr: Decimal, p: &ScalpParams) -> Decimal {
+fn entry_stop(
+    bars: &[Bar],
+    mark: Decimal,
+    ema_fast: Decimal,
+    atr: Decimal,
+    p: &ScalpParams,
+) -> Decimal {
     let start = bars.len().saturating_sub(p.pullback_bars + 1);
     let window = &bars[start..];
     let swing = window.iter().map(|b| b.low).min().unwrap_or(mark);

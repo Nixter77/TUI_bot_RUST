@@ -48,7 +48,11 @@ pub fn extract_code(text: &str) -> String {
     }
     if let Some(idx) = text.to_ascii_uppercase().find("HTTP ") {
         let rest = text.get(idx + 5..).unwrap_or("");
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).take(3).collect();
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .take(3)
+            .collect();
         if digits.len() == 3 {
             return format!("HTTP {digits}");
         }
@@ -94,6 +98,9 @@ pub fn guess_source(raw: &str, default: &str) -> String {
         || low.contains("/leverage")
     {
         return "live".into();
+    }
+    if low.contains("telegram") {
+        return "telegram".into();
     }
     default.to_string()
 }
@@ -153,7 +160,11 @@ impl ErrorLog {
         if let Some(parent) = self.path.parent() {
             crate::errors::ensure_private_dir(parent);
         }
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             crate::errors::restrict_private_file(&self.path);
             let line = format!("{json}\n");
             let _ = f.write_all(line.as_bytes()).and_then(|_| f.flush());

@@ -157,7 +157,7 @@ fn tick_and_three_named_strategies() {
     snap.account = account();
     snap.chart_symbol = "BTCUSDT".into();
     let state = EngineState::new(1);
-    let (new_state, decision) = tick(&state, &snap, 10.0, None, None, None);
+    let (new_state, decision) = tick(&state, &snap, 10.0, None, None, None, None);
     assert!(is_enter(&decision));
     assert!(new_state.last_scan_ts > 0.0);
     let empty = HashMap::new();
@@ -230,7 +230,7 @@ fn entry_inflight_blocks_second_buy() {
     let mut state = EngineState::new(1);
     state.entry_inflight = true;
     state.last_scan_ts = 10.0;
-    let (_, decision) = tick(&state, &snap, 10_000.0, None, None, None);
+    let (_, decision) = tick(&state, &snap, 10_000.0, None, None, None, None);
     assert!(is_hold(&decision));
     assert_eq!(decision.reason(), "entry in flight");
 }
@@ -245,7 +245,7 @@ fn live_book_keeps_inflight_and_does_not_repeat_enter() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (filled, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None);
+    let (filled, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
     assert!(decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         filled
@@ -255,7 +255,7 @@ fn live_book_keeps_inflight_and_does_not_repeat_enter() {
         "{:?}",
         filled.inflight_symbols
     );
-    let (_, again) = tick_decisions(&filled, &snap, london_ts() + 5.0, Some(&mom), None, None);
+    let (_, again) = tick_decisions(&filled, &snap, london_ts() + 5.0, Some(&mom), None, None, None);
     assert!(
         !again.iter().any(is_enter),
         "repeat enter on live snapshot lag: {again:?}"
@@ -310,7 +310,7 @@ fn scan_can_enter_three_rising_names() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
     assert!(
@@ -321,7 +321,7 @@ fn scan_can_enter_three_rising_names() {
     let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
     got.insert(enters[0].symbol().to_string());
     for step in 1..3 {
-        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None);
+        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None, None);
         state = ns;
         for d in decs.iter().filter(|d| is_enter(d)) {
             got.insert(d.symbol().to_string());
@@ -355,7 +355,7 @@ fn skips_tradfi_names_and_keeps_skip_list() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
     assert!(["BTCUSDT", "ETHUSDT"].contains(&enters[0].symbol()), "{decisions:?}");
@@ -383,7 +383,7 @@ fn scan_buys_fastest_24h_leader_not_only_majors() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
     assert_eq!(enters[0].symbol(), "MORPHOUSDT");
@@ -401,12 +401,12 @@ fn cooldown_after_position_vanishes() {
     snap.chart_symbol = "BTCUSDT".into();
     snap.live_book = true;
     let london = london_ts();
-    let (new_state, decision) = tick(&state, &snap, london, None, None, None);
+    let (new_state, decision) = tick(&state, &snap, london, None, None, None, None);
     assert!(is_hold(&decision));
     let reason = decision.reason();
     assert!(reason.contains("пауза") || reason.contains("cooling"), "{reason}");
     assert!(new_state.cooldowns.get("BTCUSDT").copied().unwrap_or(0.0) > london);
-    let (_, decision2) = tick(&new_state, &snap, london + 60.0, None, None, None);
+    let (_, decision2) = tick(&new_state, &snap, london + 60.0, None, None, None, None);
     assert!(is_hold(&decision2));
     let r2 = decision2.reason();
     assert!(r2.contains("пауза") || r2.contains("cooling"), "{r2}");
@@ -425,7 +425,7 @@ fn poll_timeout_is_not_sticky() {
         always_enter: true,
         ..MomentumParams::default()
     };
-    let (stuck, _) = tick_decisions(&EngineState::new(1), &snap_timeout, now, Some(&mom), None, None);
+    let (stuck, _) = tick_decisions(&EngineState::new(1), &snap_timeout, now, Some(&mom), None, None, None);
     assert!(stuck.last_error.is_none());
     let mut leftover = EngineState::new(1);
     leftover.last_error = Some(raw.into());
@@ -433,11 +433,11 @@ fn poll_timeout_is_not_sticky() {
     clean.account = account();
     clean.chart_symbol = "BTCUSDT".into();
     clean.account_ok = true;
-    let (cleared, _) = tick_decisions(&leftover, &clean, now + 120.0, Some(&mom), None, None);
+    let (cleared, _) = tick_decisions(&leftover, &clean, now + 120.0, Some(&mom), None, None, None);
     assert!(cleared.last_error.is_none());
     let mut live = EngineState::new(1);
     live.last_error = Some(r#"HTTP 400 /fapi/v1/order: {"code":-2027,"msg":"cap"}"#.into());
-    let (kept, _) = tick_decisions(&live, &clean, now + 240.0, Some(&mom), None, None);
+    let (kept, _) = tick_decisions(&live, &clean, now + 240.0, Some(&mom), None, None, None);
     assert!(kept.last_error.as_deref().unwrap_or("").contains("-2027"));
 }
 
@@ -452,7 +452,7 @@ fn default_is_one_slot() {
         always_enter: true,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
     let enters = decisions.iter().filter(|d| is_enter(d)).count();
     assert_eq!(enters, 1);
 }
@@ -497,7 +497,7 @@ fn red_5m_skips_enter() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions[0].reason().contains("5м"));
 }
@@ -525,7 +525,7 @@ fn daily_halt_blocks_enter_keeps_trail() {
         trail_pct: d("0.006"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt);
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions.iter().any(|d| is_amend(d) || is_hold(d)));
@@ -552,7 +552,7 @@ fn daily_loss_usdt_halt_still_trips_via_equity() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "USDT −20 must still halt under larger R budget");
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
@@ -578,7 +578,7 @@ fn daily_loss_r_halt_blocks_enter_independent_of_usdt() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "R layer must halt at −75 alone");
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
@@ -604,7 +604,7 @@ fn daily_usdt_halt_trips_from_equity_pnl() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "USDT layer must trip");
     assert!(!decisions.iter().any(is_enter));
 }
@@ -629,7 +629,7 @@ fn daily_loss_r_halt_trips_independently() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "day halt must trip at −80");
     assert!(!decisions.iter().any(is_enter));
     assert!(
@@ -666,7 +666,7 @@ fn daily_loss_r_halt_keeps_manage_trail() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt);
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions.iter().any(|d| is_amend(d) || is_hold(d)), "{decisions:?}");
@@ -695,7 +695,7 @@ fn two_red_slots_block_third_major() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -721,7 +721,7 @@ fn red_slot_does_not_open_another() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -748,7 +748,7 @@ fn manages_three_open_longs_independently() {
         trail_pct: d("0.020"),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     let amends: Vec<String> = decisions
         .iter()
@@ -780,14 +780,7 @@ fn leftover_short_blocks_new_entries() {
     snap.chart_symbol = "ETHUSDT".into();
     snap.live_book = true;
     snap.open_positions = vec![short];
-    let (_, decisions) = tick_decisions(
-        &EngineState::new(2),
-        &snap,
-        make_ts(),
-        None,
-        Some(&scalp_loose()),
-        None,
-    );
+    let (_, decisions) = tick_decisions(&EngineState::new(2), &snap, make_ts(), None, Some(&scalp_loose()), None, None);
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions[0].reason().contains("хвост"));
     assert!(decisions[0].reason().contains("SHORT"));
@@ -887,7 +880,7 @@ fn s4_liquid_ticker() -> Ticker {
 fn strategy4_liquid_continuation_enters() {
     let snap = strategy4_ready_snap();
     let state = EngineState::new(4);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(is_enter),
         "{:?}",
@@ -912,7 +905,7 @@ fn strategy4_illiquid_weekly_leader_is_not_chased() {
     snap.bars = vec![green_5m(), green_5m()];
     snap.last_bars = [("GPSUSDT".into(), green_5m())].into_iter().collect();
     let state = EngineState::new(4);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -930,7 +923,7 @@ fn strategy4_15m_interval_names_the_skip() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("15м")),
@@ -946,7 +939,7 @@ fn strategy4_missing_5m_bar_does_not_enter() {
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
     let state = EngineState::new(4);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -968,7 +961,7 @@ fn strategy4_missing_stop_attaches_from_entry_not_mark() {
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     let amend = decisions
         .iter()
         .find(|d| is_amend(d))
@@ -1013,7 +1006,7 @@ fn strategy4_existing_stop_does_not_move_down() {
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_amend), "{decisions:?}");
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
@@ -1070,7 +1063,7 @@ fn strategy4_can_enter_three_liquid_names() {
     };
     let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in 0..3 {
-        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None);
+        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None, None);
         state = ns;
         let entered: Vec<String> = decs
             .iter()
@@ -1129,7 +1122,7 @@ fn strategy4_does_not_chase_green_5m_without_pullback() {
     snap.universe_bars.insert("AVAXUSDT".into(), greens);
     snap.last_bars = [("AVAXUSDT".into(), green_5m())].into_iter().collect();
     snap.htf_bars.insert("AVAXUSDT".into(), htf_up_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("отката")),
@@ -1166,7 +1159,7 @@ fn strategy4_does_not_chase_24h_stretch() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
     let enters: std::collections::HashSet<_> = decisions
         .iter()
         .filter(|d| is_enter(d))
@@ -1202,7 +1195,7 @@ fn strategy4_enters_green_day_off_the_24h_high() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(
         decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
         "pullback of a +8% liquid name off the high must enter: {decisions:?}"
@@ -1229,7 +1222,7 @@ fn strategy4_holds_former_leader_until_stop() {
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
     state.recent_leaders = vec!["AAVEUSDT".into(), "MORPHOUSDT".into(), "GRASSUSDT".into()];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
         "red 5m / dropped tape must not dump a long still above SL: {decisions:?}"
@@ -1257,7 +1250,7 @@ fn strategy4_exits_when_mark_hits_placed_stop() {
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
             && d.symbol() == "AAVEUSDT"
@@ -1283,7 +1276,7 @@ fn does_not_chase_already_pumped_over_12pct() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).map(|d| d.symbol().to_string()).collect();
     assert_eq!(enters, vec!["AVAXUSDT".to_string()], "{decisions:?}");
 }
@@ -1305,7 +1298,7 @@ fn does_not_enter_near_24h_high() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
         !decisions.iter().any(|d| is_enter(d) && d.symbol() == "STORJUSDT"),
         "{decisions:?}"
@@ -1346,7 +1339,7 @@ fn exits_open_long_on_red_5m_instead_of_waiting_for_sl() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
             && d.symbol() == "BTCUSDT"
@@ -1376,7 +1369,7 @@ fn exits_when_name_drops_off_the_growth_book() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
             && d.symbol() == "MORPHOUSDT"
@@ -1412,7 +1405,7 @@ fn strategy4_ready_snap() -> MarketSnapshot {
 fn strategy4_outside_session_does_not_enter_when_always_enter_off() {
     let snap = strategy4_ready_snap();
     let state = EngineState::new(4);
-    let (_, decisions) = tick_decisions(&state, &snap, dead_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, dead_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -1425,7 +1418,7 @@ fn strategy4_does_not_inherit_strategy1_always_enter() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("вне часов старта")),
@@ -1438,7 +1431,7 @@ fn strategy4_enters_in_recommended_utc_windows() {
     let snap = strategy4_ready_snap();
     for hour in [0u32, 7, 13] {
         let ts = tui_bot::sessions::make_utc_ts(2026, 8, 17, hour, 30, 0);
-        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None);
+        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
         assert!(
             decisions.iter().any(is_enter),
             "hour {hour}: {:?}",
@@ -1447,7 +1440,7 @@ fn strategy4_enters_in_recommended_utc_windows() {
     }
     for hour in [2u32, 4, 10, 12, 16, 22] {
         let ts = tui_bot::sessions::make_utc_ts(2026, 8, 17, hour, 0, 0);
-        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None);
+        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
         assert!(!decisions.iter().any(is_enter), "hour {hour}: {decisions:?}");
         assert!(
             decisions.iter().any(|d| d.reason().contains("вне часов старта")),
@@ -1479,7 +1472,7 @@ fn strategy4_vanish_with_inflight_cools_and_does_not_rebuy() {
     state.inflight_symbols = vec!["SUPERUSDT".into()];
     state.entry_inflight = true;
     let london = london_ts();
-    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None);
+    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None, None);
     assert!(
         !decisions
             .iter()
@@ -1499,7 +1492,7 @@ fn strategy4_vanish_with_inflight_cools_and_does_not_rebuy() {
         "{:?}",
         cooled.inflight_symbols
     );
-    let (_, again) = tick_decisions(&cooled, &snap, london + 900.0, None, None, None);
+    let (_, again) = tick_decisions(&cooled, &snap, london + 900.0, None, None, None, None);
     assert!(
         !again
             .iter()
@@ -1529,7 +1522,7 @@ fn strategy4_holds_open_long_on_red_5m_above_stop() {
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
         "red 5m above SL must hold for 2R: {decisions:?}"
@@ -1548,7 +1541,7 @@ fn strategy4_seeded_cooldown_blocks_super_rebuy() {
     state
         .cooldowns
         .insert("SUPERUSDT".into(), london_ts() + 1800.0);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions
             .iter()
@@ -1574,7 +1567,7 @@ fn strategy4_skips_thin_alts_and_pennies() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
         !decisions.iter().any(|d| is_enter(d)
             && ["FARTCOINUSDT", "ZILUSDT", "DOGSUSDT"]
@@ -1602,7 +1595,7 @@ fn strategy4_desk_pause_after_stop_does_not_fill_next_alt() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let london = london_ts();
-    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None);
+    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "rotated into next alt: {decisions:?}");
     let window_end = tui_bot::sessions::window_end_ts(london, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS)
         .expect("london window");
@@ -1611,7 +1604,7 @@ fn strategy4_desk_pause_after_stop_does_not_fill_next_alt() {
         "desk pause until window end {window_end}, got {}",
         cooled.cooldown_until
     );
-    let (_, again) = tick_decisions(&cooled, &snap, london + 60.0, None, None, None);
+    let (_, again) = tick_decisions(&cooled, &snap, london + 60.0, None, None, None, None);
     assert!(!again.iter().any(is_enter), "desk still paused: {again:?}");
 }
 
@@ -1625,7 +1618,7 @@ fn strategy4_always_enter_knob_opens_dead_hours() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(
         decisions.iter().any(is_enter),
         "{:?}",
@@ -1656,7 +1649,7 @@ fn strategy4_win_vanish_allows_next_liquid() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let london = london_ts();
-    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None);
+    let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None, None);
     assert!(
         cooled.cooldown_until <= london,
         "winning vanish must not desk-pause: {}",
@@ -1695,7 +1688,7 @@ fn strategy4_skips_penny_mbox() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(
         !decisions.iter().any(|d| is_enter(d)
             && ["MBOXUSDT", "BEATUSDT"]
@@ -1738,7 +1731,7 @@ fn strategy4_does_not_rebuy_loser_after_desk_pause() {
         ..MomentumParams::default()
     };
     let t0 = dead_ts();
-    let (cooled, first) = tick_decisions(&state, &snap, t0, Some(&mom), None, None);
+    let (cooled, first) = tick_decisions(&state, &snap, t0, Some(&mom), None, None, None);
     assert!(!first.iter().any(is_enter), "desk must pause after loss: {first:?}");
     let eth_until = cooled.cooldowns.get("LINKUSDT").copied().unwrap_or(0.0);
     assert!(
@@ -1746,7 +1739,7 @@ fn strategy4_does_not_rebuy_loser_after_desk_pause() {
         "loser cooldown {eth_until} vs t0 {t0}"
     );
     let later = t0 + 1_860.0;
-    let (_, again) = tick_decisions(&cooled, &snap, later, Some(&mom), None, None);
+    let (_, again) = tick_decisions(&cooled, &snap, later, Some(&mom), None, None, None);
     assert!(
         !again
             .iter()
@@ -1764,7 +1757,7 @@ fn strategy4_does_not_rebuy_loser_after_desk_pause() {
 #[test]
 fn strategy4_stop_is_at_least_one_and_a_half_percent() {
     let snap = strategy4_ready_snap();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     let Decision::EnterLong {
         stop_loss,
         take_profit,
@@ -1792,7 +1785,7 @@ fn strategy4_15m_stop_and_tp_are_wider_than_five_minute() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
     let Decision::EnterLong {
         stop_loss,
         take_profit,
@@ -1830,7 +1823,7 @@ fn strategy4_skips_weak_24h_change() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(
         !decisions
             .iter()
@@ -1848,7 +1841,7 @@ fn strategy4_skips_weak_24h_change() {
     only.chart_symbol = "DOTUSDT".into();
     only.account_ok = true;
     attach_pullback(&mut only, &[("DOTUSDT", 270.50)]);
-    let (_, weak_only) = tick_decisions(&EngineState::new(4), &only, dead_ts(), Some(&mom), None, None);
+    let (_, weak_only) = tick_decisions(&EngineState::new(4), &only, dead_ts(), Some(&mom), None, None, None);
     assert!(
         !weak_only.iter().any(is_enter),
         "weak 24h DOT entered without AVAX in the book: {weak_only:?}"
@@ -1863,7 +1856,7 @@ fn strategy4_skips_24h_dump_with_5m_pullback() {
     snap.chart_symbol = "PROMUSDT".into();
     snap.account_ok = true;
     attach_pullback(&mut snap, &[("PROMUSDT", 10.0)]);
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "24h dump entered as pullback: {decisions:?}");
     assert!(
         !decisions.iter().any(|d| d.reason().contains("откат ликвид")),
@@ -1896,7 +1889,7 @@ fn strategy4_second_slot_opens_while_first_not_green() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, flat) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (_, flat) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
         flat.iter().any(|d| is_enter(d) && d.symbol() == "LINKUSDT"),
         "flat first slot must not block next liquid: {flat:?}"
@@ -1915,7 +1908,7 @@ fn strategy4_skips_bounce_in_one_hour_downtrend() {
     snap.last_bars.insert("AVAXUSDT".into(), seq.last().cloned().unwrap());
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.htf_bars.insert("AVAXUSDT".into(), htf_up_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| {
@@ -1940,7 +1933,7 @@ fn strategy4_moves_stop_to_breakeven_at_one_r() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_reduce(d)) {
         Some(Decision::ReduceLong { qty, stop_loss, reason, .. }) => {
             assert_eq!(*qty, d("0.005"));
@@ -1968,7 +1961,7 @@ fn strategy4_locks_be_from_unrealized_pnl_even_if_last_is_shy() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "shy mark must not scale-out on stale uPnL: {decisions:?}"
@@ -2024,7 +2017,7 @@ fn strategy4_locks_be_if_post_entry_bar_high_hit_one_r() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "1R wick with mark below 1R must not scale-out: {decisions:?}"
@@ -2052,7 +2045,7 @@ fn strategy4_does_not_move_stop_before_one_r() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_amend), "{decisions:?}");
     assert!(!decisions.iter().any(is_reduce), "{decisions:?}");
     assert!(!decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })), "{decisions:?}");
@@ -2066,7 +2059,7 @@ fn strategy4_missing_universe_bars_does_not_enter() {
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
     snap.last_bars = [("AVAXUSDT".into(), pullback_last_at(100.0))].into_iter().collect();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -2075,7 +2068,7 @@ fn strategy4_skips_15m_pullback_in_4h_downtrend() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars
         .insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("4ч")),
@@ -2087,7 +2080,7 @@ fn strategy4_skips_15m_pullback_in_4h_downtrend() {
 fn strategy4_missing_4h_bars_does_not_enter() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars.clear();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -2119,7 +2112,7 @@ fn strategy4_trails_on_5m_low_after_breakeven() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_amend(d)) {
         Some(Decision::AmendStop { stop_loss, reason, .. }) => {
             assert_eq!(*stop_loss, d("101.2"));
@@ -2144,7 +2137,7 @@ fn strategy4_exits_when_4h_closes_below_ema20() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
             && d.symbol() == "AVAXUSDT"
@@ -2168,7 +2161,7 @@ fn strategy4_holds_through_missing_4h_while_above_stop() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
         "missing 4h must not dump a long still above SL: {decisions:?}"
@@ -2189,7 +2182,7 @@ fn retry_until_blocks_new_enter() {
     let now = london_ts();
     let mut blocked = EngineState::new(1);
     blocked.retry_until = now + 20.0;
-    let (_, decisions) = tick_decisions(&blocked, &snap, now, Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&blocked, &snap, now, Some(&mom), None, None, None);
     assert!(decisions.iter().all(|d| !is_enter(d)), "{decisions:?}");
     assert!(
         decisions[0].reason().contains("сеть"),
@@ -2207,7 +2200,7 @@ fn retry_timeout_stays_in_footer_during_backoff() {
     let mut state = EngineState::new(1);
     state.last_error = Some("HTTP 408 /order: timed out".into());
     state.retry_until = now + 20.0;
-    let (next, _) = tick_decisions(&state, &snap, now, None, None, None);
+    let (next, _) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
         next.last_error.as_deref().is_some_and(|e| e.contains("408") || e.contains("timeout") || e.contains("timed")),
         "retry error must remain visible during backoff: {:?}",
@@ -2224,7 +2217,7 @@ fn retry_timeout_clears_from_footer_after_backoff() {
     let mut state = EngineState::new(1);
     state.last_error = Some("HTTP 408 /order: timed out".into());
     state.retry_until = now - 1.0;
-    let (next, _) = tick_decisions(&state, &snap, now, None, None, None);
+    let (next, _) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
         next.last_error.is_none(),
         "stale retry noise must drop after backoff: {:?}",
@@ -2279,7 +2272,7 @@ fn strategy4_vvv_peak_upnl_locks_1r() {
     pos.unrealized_pnl = d("8");
     pos.opened_bar_time = None;
     let (state, snap) = vvv_s4_snap(d("17.40"), pos, vec![]);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_reduce(d)) {
         Some(Decision::ReduceLong { qty, stop_loss, reason, .. }) => {
             assert_eq!(*qty, d("11.30"));
@@ -2312,7 +2305,7 @@ fn strategy4_vvv_bar_high_without_opened_bar_time_locks_1r() {
         volume: d("10"),
     };
     let (state, snap) = vvv_s4_snap(d("17.20"), pos, vec![peak, last]);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "bar-high 1R with mark below 1R must not scale-out: {decisions:?}"
@@ -2338,7 +2331,7 @@ fn strategy4_vvv_dump_after_1r_exits_instead_of_waiting() {
         volume: d("10"),
     };
     let (state, snap) = vvv_s4_snap(d("16.74"), pos, vec![peak]);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d,
@@ -2514,7 +2507,7 @@ fn strategy4_htf_allows_entry_without_4h_higher_low_if_close_above_ema20() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(
         decisions.iter().any(is_enter),
         "close>EMA20 without 4h HL must still enter: {decisions:?}"
@@ -2536,7 +2529,7 @@ fn strategy4_slots_ignore_strategy1_max_positions() {
         max_positions: 1, // S1-only; must not shrink S4 to 1
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None);
+    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
     assert!(decisions.iter().any(is_enter), "{decisions:?}");
     assert_eq!(
         tui_bot::continuation::ContinuationParams::default().max_positions,
@@ -2678,7 +2671,7 @@ fn strategy4_banks_at_1_5r_after_be() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R")
@@ -2704,7 +2697,7 @@ fn strategy4_banks_at_1_5r_while_still_pre_be() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_reduce(d)) {
         Some(Decision::ReduceLong { qty, reason, .. }) => {
             assert_eq!(*qty, d("0.005"));
@@ -2715,7 +2708,7 @@ fn strategy4_banks_at_1_5r_while_still_pre_be() {
     // After latch, same mark banks the remainder.
     state.scaled_one_r.insert("AVAXUSDT".into());
     // Simulate remainder qty after reduce (engine latch alone; qty still full in this unit test).
-    let (_, again) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, again) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         again.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R")
@@ -2752,7 +2745,7 @@ fn strategy4_post_be_1_5r_locks_half_r_after_giveback() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_amend(d)) {
         Some(Decision::AmendStop { stop_loss, reason, .. }) => {
             assert!(reason.contains("замок 0.5R"), "{reason}");
@@ -2791,7 +2784,7 @@ fn strategy4_post_be_1_5r_exits_when_mark_below_lock() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R")
@@ -2827,7 +2820,7 @@ fn strategy4_pre_1r_peak_pullback_exits() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("откат с пика")
@@ -2852,7 +2845,7 @@ fn strategy4_time_stop_exits_after_four_hours() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("тайм-стоп")
@@ -2875,7 +2868,7 @@ fn strategy4_session_end_exits_open_long_outside_window() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, dead_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, dead_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. }
@@ -2949,7 +2942,7 @@ fn strategy4_mark_trail_raises_sl_tighter_than_bar_low() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| matches!(d, Decision::AmendStop { .. })) {
         Some(Decision::AmendStop { stop_loss, reason, .. }) => {
             assert!(*stop_loss > d("101.0"), "mark trail must beat bar low: {stop_loss}");
@@ -2975,7 +2968,7 @@ fn strategy4_reduce_at_1r_latches_once_after_be() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "post-BE must not ReduceLong again: {decisions:?}"
@@ -3005,7 +2998,7 @@ fn strategy4_scaled_latch_blocks_second_reduce() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     state.scaled_one_r.insert("AVAXUSDT".into());
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_reduce), "latched must not Reduce again: {decisions:?}");
     let be_or_exit = decisions.iter().any(|d| match d {
         Decision::AmendStop { reason, .. } => reason.contains("безубыток"),
@@ -3044,7 +3037,7 @@ fn strategy4_post_scale_15r_exits_remainder() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     state.scaled_one_r.insert("AVAXUSDT".into());
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R"))),
         "post-scale 1.5R must exit remainder: {decisions:?}"
@@ -3070,7 +3063,7 @@ fn strategy4_scaled_one_r_latches_reduce() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     state.scaled_one_r.insert("AVAXUSDT".into());
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_reduce), "{decisions:?}");
     match decisions.iter().find(|d| is_amend(d)) {
         Some(Decision::AmendStop { reason, .. }) => {
@@ -3093,7 +3086,7 @@ fn reduce_long_decision_latches_scaled_without_apply() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (filled, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (filled, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
         "expected ReduceLong: {decisions:?}"
@@ -3104,7 +3097,7 @@ fn reduce_long_decision_latches_scaled_without_apply() {
         filled.scaled_one_r
     );
     // Second tick with same pre-BE book: AmendStop BE, not another ReduceLong.
-    let (_, again) = tick_decisions(&filled, &snap, london_ts() + 60.0, None, None, None);
+    let (_, again) = tick_decisions(&filled, &snap, london_ts() + 60.0, None, None, None, None);
     assert!(
         !again.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
         "latched second tick must not ReduceLong: {again:?}"
@@ -3198,19 +3191,12 @@ fn strategy5_allows_4pct_off_24h_high_s4_skips() {
     // last=100, high=104.2 → ~4% off high: outside S5 3% skip, inside S4 5% skip.
     let mut snap = strategy4_ready_snap();
     snap.tickers[0].high_price = d("104.2");
-    let (_, s5) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        london_ts(),
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         s5.iter().any(is_enter),
         "S5 3% near-high must allow 4% off high: {s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(
         !s4.iter().any(is_enter),
         "S4 5% near-high must skip 4% off high: {s4:?}"
@@ -3237,14 +3223,7 @@ fn strategy5_skips_1h_pullback_in_4h_downtrend() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars
         .insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
-    let (_, decisions) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        london_ts(),
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(!decisions.iter().any(is_enter), "S5 must keep 4h close>EMA20: {decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("4ч")),
@@ -3256,14 +3235,7 @@ fn strategy5_skips_1h_pullback_in_4h_downtrend() {
 fn strategy5_missing_4h_bars_does_not_enter() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars.clear();
-    let (_, decisions) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        london_ts(),
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(is_enter),
         "S5 must skip when 4h history is missing: {decisions:?}"
@@ -3274,14 +3246,7 @@ fn strategy5_missing_4h_bars_does_not_enter() {
 fn strategy5_skips_first_three_minutes_of_hour() {
     let snap = strategy4_ready_snap();
     let open = tui_bot::sessions::make_utc_ts(2026, 8, 17, 7, 1, 0);
-    let (_, s5) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        open,
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, open, Some(&s5_params()), None, None, None);
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not enter in the first 3 min of the 1h bar: {s5:?}"
@@ -3290,7 +3255,7 @@ fn strategy5_skips_first_three_minutes_of_hour() {
         s5.iter().any(|d| d.reason().contains("3 мин")),
         "S5 hour-open skip must name 3 мин: {s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, open, None, None, None);
+    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, open, None, None, None, None);
     assert!(
         s4.iter().any(is_enter),
         "S4 soak may still enter at minute 1: {s4:?}"
@@ -3299,7 +3264,7 @@ fn strategy5_skips_first_three_minutes_of_hour() {
 
 #[test]
 fn strategy5_enter_path_shares_continuation_core() {
-    // Same Ready fixture as S4: tick_decisions(sid=5) must EnterLong via continuation.
+    // Same Ready fixture as S4: tick_decisions(sid=5, None, None, None, None, None, None) must EnterLong via continuation.
     use tui_bot::config::TradeInterval;
     let snap = strategy4_ready_snap();
     let state = EngineState::new(5);
@@ -3311,7 +3276,7 @@ fn strategy5_enter_path_shares_continuation_core() {
         ..MomentumParams::default()
     };
     let now = london_ts();
-    let (new_state, decisions) = tick_decisions(&state, &snap, now, Some(&params), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, now, Some(&params), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d,
@@ -3331,14 +3296,7 @@ fn strategy5_skips_live_privacy_cluster() {
     snap.chart_symbol = "ZECUSDT".into();
     snap.account_ok = true;
     attach_pullback(&mut snap, &[("ZECUSDT", 100.0)]);
-    let (_, s5) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        london_ts(),
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !s5.iter().any(is_enter),
         "S5 must skip ZEC privacy cluster: {s5:?}"
@@ -3348,7 +3306,7 @@ fn strategy5_skips_live_privacy_cluster() {
             .any(|d| d.reason().contains("privacy") || d.reason().contains("кластер")),
         "{s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None);
+    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
     assert!(
         !s4.iter().any(is_enter),
         "S4 must skip ZEC privacy cluster too: {s4:?}"
@@ -3385,7 +3343,7 @@ fn strategy5_caps_same_1h_move_at_two() {
     let mut state = EngineState::new(5);
     state.positions = vec![avax.clone(), near.clone()];
     state.position = Some(avax.clone());
-    let (_, s5) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, s5) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not open a 3rd name on the same 1h move: {s5:?}"
@@ -3399,7 +3357,7 @@ fn strategy5_caps_same_1h_move_at_two() {
     let mut s4_state = EngineState::new(4);
     s4_state.positions = vec![avax.clone(), near.clone()];
     s4_state.position = Some(avax.clone());
-    let (_, s4) = tick_decisions(&s4_state, &snap, london_ts(), None, None, None);
+    let (_, s4) = tick_decisions(&s4_state, &snap, london_ts(), None, None, None, None);
     assert!(
         s4.iter().any(|d| is_enter(d) && d.symbol() == "LINKUSDT"),
         "S4 soak may still fill a 3rd slot: {s4:?}"
@@ -3410,7 +3368,7 @@ fn strategy5_caps_same_1h_move_at_two() {
     let mut one_held = EngineState::new(5);
     one_held.positions = vec![avax.clone()];
     one_held.position = Some(avax);
-    let (_, second) = tick_decisions(&one_held, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, second) = tick_decisions(&one_held, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         second.iter().any(is_enter),
         "S5 must still open a 2nd name on the same 1h move: {second:?}"
@@ -3469,7 +3427,7 @@ fn strategy5_daily_halt_blocks_enter_keeps_trail() {
     state.daily_halt = true;
     state.day_utc = "2026-08-17".into();
     state.day_start_equity = Some(d("10000"));
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(is_enter),
         "S5 must not enter under DAILY_LOSS halt: {decisions:?}"
@@ -3512,7 +3470,7 @@ fn strategy5_daily_halt_blocks_enter_keeps_trail() {
     held.daily_halt = true;
     held.position = Some(pos.clone());
     held.positions = vec![pos];
-    let (_, manage_d) = tick_decisions(&held, &manage, london_ts(), Some(&s5_params()), None, None);
+    let (_, manage_d) = tick_decisions(&held, &manage, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !manage_d.iter().any(is_enter),
         "halt must not add a second S5 long: {manage_d:?}"
@@ -3533,7 +3491,7 @@ fn strategy5_daily_loss_usdt_trips_halt() {
     state.day_start_equity = Some(d("10000"));
     let mut mom = s5_params();
     mom.daily_loss_usdt = d("20");
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None);
+    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "S5 must trip DAILY_LOSS_USDT");
     assert!(!decisions.iter().any(is_enter), "S5 halt must block enter: {decisions:?}");
 }
@@ -3558,7 +3516,7 @@ fn strategy5_slot_cap_honors_one() {
     state.positions = vec![pos];
     let mut params = s5_params();
     params.s5_max_positions = 1;
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&params), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&params), None, None, None);
     assert!(
         !decisions.iter().any(is_enter),
         "STRATEGY5_MAX_POSITIONS=1 must not open a second slot: {decisions:?}"
@@ -3584,7 +3542,7 @@ fn strategy5_loss_cools_symbol_twelve_hours() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let t0 = london_ts();
-    let (cooled, _) = tick_decisions(&state, &snap, t0, Some(&s5_params()), None, None);
+    let (cooled, _) = tick_decisions(&state, &snap, t0, Some(&s5_params()), None, None, None);
     let until = cooled.cooldowns.get("ZECUSDT").copied().unwrap_or(0.0);
     assert!(
         until >= t0 + tui_bot::errors::LOSS_SYMBOL_COOLDOWN_SEC,
@@ -3608,13 +3566,13 @@ fn strategy5_inherits_s4_always_enter() {
     let mom = s5_params();
     let night = tui_bot::sessions::make_utc_ts(2026, 9, 6, 21, 0, 0);
     for ts in [dead_ts(), night] {
-        let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, ts, Some(&mom), None, None);
+        let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, ts, Some(&mom), None, None, None);
         assert!(
             decisions.iter().any(is_enter),
             "S5 24/7 from STRATEGY4_ALWAYS_ENTER: {decisions:?}"
         );
     }
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, night, Some(&mom), None, None);
+    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, night, Some(&mom), None, None, None);
     assert!(
         s4.iter().any(is_enter),
         "S4 24/7 soak must stay on: {s4:?}"
@@ -3624,14 +3582,7 @@ fn strategy5_inherits_s4_always_enter() {
 #[test]
 fn strategy5_enters_in_session_windows_when_s4_is_24_7() {
     let snap = strategy4_ready_snap();
-    let (_, decisions) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        london_ts(),
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         decisions.iter().any(is_enter),
         "S5 must still enter in UTC session windows: {decisions:?}"
@@ -3663,14 +3614,7 @@ fn strategy5_pullback_resume_ignores_forming_wick() {
     snap.bars = seq.clone();
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.last_bars.insert("AVAXUSDT".into(), forming);
-    let (_, s5) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        now,
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, now, Some(&s5_params()), None, None, None);
     assert!(
         s5.iter().any(|d| matches!(
             d, Decision::EnterLong { symbol, .. } if symbol == "AVAXUSDT"
@@ -3706,19 +3650,12 @@ fn strategy5_does_not_enter_on_forming_1h_bar() {
     snap.bars = seq.clone();
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.last_bars.insert("AVAXUSDT".into(), forming);
-    let (_, s5) = tick_decisions(
-        &EngineState::new(5),
-        &snap,
-        now,
-        Some(&s5_params()),
-        None,
-        None,
-    );
+    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, now, Some(&s5_params()), None, None, None);
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not enter on a forming 1h bar: {s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, now, None, None, None);
+    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, now, None, None, None, None);
     assert!(
         s4.iter().any(is_enter),
         "S4 soak may still use last_bars: {s4:?}"
@@ -3741,7 +3678,7 @@ fn strategy5_session_end_does_not_flatten_open_long() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let night = tui_bot::sessions::make_utc_ts(2026, 8, 17, 21, 0, 0);
-    let (_, decisions) = tick_decisions(&state, &snap, night, Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, night, Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. }
@@ -3767,7 +3704,7 @@ fn strategy5_does_not_time_stop_at_four_hours() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("тайм-стоп")
@@ -3792,7 +3729,7 @@ fn strategy5_does_not_time_stop_at_eleven_hours() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("тайм-стоп")
@@ -3817,7 +3754,7 @@ fn strategy5_time_stop_after_twelve_hours() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, now, Some(&s5_params()), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("тайм-стоп")
@@ -3873,7 +3810,7 @@ fn strategy5_ignores_stale_1h_history_as_one_r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
         "stale 1h highs must not fire 1R flatten: {decisions:?}"
@@ -3930,7 +3867,7 @@ fn strategy5_adopt_keeps_opened_bar_time_so_1r_scan_is_not_the_book() {
     let mut state = EngineState::new(5);
     state.position = Some(remembered.clone());
     state.positions = vec![remembered];
-    let (out, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (out, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert_eq!(
         out.positions[0].opened_bar_time,
         Some(opened),
@@ -3990,7 +3927,7 @@ fn strategy5_adopt_does_not_hour1_trail_inherited_s4() {
     state.positions = vec![pos];
     state.adopt_strategy(5);
     assert!(state.s4_inherited.contains("AVAXUSDT"));
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     let floor = d("101.4");
     let hour1_trail = decisions.iter().any(|dec| matches!(
         dec,
@@ -4052,7 +3989,7 @@ fn strategy5_stale_peak_does_not_flatten_pullback() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d,
@@ -4103,7 +4040,7 @@ fn strategy5_1r_not_in_hand_does_not_flatten_or_scale() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "S5 must not scale-out when mark < 1R: {decisions:?}"
@@ -4140,7 +4077,7 @@ fn strategy5_does_not_be_at_half_r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("безубыток")
@@ -4163,7 +4100,7 @@ fn strategy4_does_not_be_at_half_r() {
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("безубыток")
@@ -4187,7 +4124,7 @@ fn strategy5_does_not_bank_at_1_5r_before_2r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R")
@@ -4216,7 +4153,7 @@ fn strategy5_full_position_be_at_one_r_no_scale_out() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(is_reduce),
         "Hour1 must not 50% scale-out: {decisions:?}"
@@ -4265,7 +4202,7 @@ fn strategy5_does_not_trail_closed_low_before_be() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("trail")
@@ -4312,7 +4249,7 @@ fn strategy5_trails_1h_bar_low_not_mark_pct() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     match decisions.iter().find(|d| matches!(d, Decision::AmendStop { .. })) {
         Some(Decision::AmendStop { stop_loss, reason, .. }) => {
             assert_eq!(
@@ -4361,7 +4298,7 @@ fn strategy5_trails_once_per_closed_1h_bar() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (state, first) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (state, first) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         first.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("1ч")
@@ -4390,7 +4327,7 @@ fn strategy5_trails_once_per_closed_1h_bar() {
         }
     }
     snap.bars.last_mut().map(|b| *b = forming2);
-    let (_, second) = tick_decisions(&state, &snap, london_ts() + 60.0, Some(&s5_params()), None, None);
+    let (_, second) = tick_decisions(&state, &snap, london_ts() + 60.0, Some(&s5_params()), None, None, None);
     assert!(
         !second.iter().any(is_amend),
         "Hour1 must not trail twice on the same closed 1h bar: {second:?}"
@@ -4422,7 +4359,7 @@ fn strategy5_1h_atr_stop_fits_hour1_band() {
         "fixture 2×ATR {atr_pct} must fit Hour1 8%"
     );
     let state = EngineState::new(5);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None);
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::EnterLong { symbol, .. } if symbol == "AVAXUSDT"

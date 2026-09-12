@@ -8,12 +8,12 @@
 //! S5 does not ratchet a 0.8% mark trail (that sits inside a 1h candle).
 
 use crate::config::TradeInterval;
-use std::env;
 use crate::indicators::{ema_series, last_atr, last_ema, mean_volume, vwap};
-use crate::money::round_trip_taker_pct;
 use crate::models::{
-    bar_is_red, last_closed_bar, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side, Ticker,
+    bar_is_red, last_closed_bar, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side,
+    Ticker,
 };
+use crate::money::round_trip_taker_pct;
 use crate::ranking::{is_junk_symbol, is_major_symbol};
 use crate::sessions::{
     in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS,
@@ -21,9 +21,10 @@ use crate::sessions::{
 use crate::trail::{candidate_stop, long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::{Mutex, OnceLock};
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
 const S5_PRIVACY_SKIP: &str = "кластер privacy — не беру";
@@ -119,8 +120,6 @@ fn log_skip_reason(symbol: &str, reason: &str) {
         let _ = writeln!(f, "{:.0}\t{}\t{}", ts, symbol, reason);
     }
 }
-
-
 
 /// Strategy 4 knobs. `with_interval` sets SL/TP width for 5m / 15m / 30m / 1h.
 #[derive(Debug, Clone, PartialEq)]
@@ -235,9 +234,7 @@ pub fn liquid_universe<'a>(
             {
                 return false;
             }
-            t.last_price > Decimal::ZERO
-                && t.last_price >= p.min_price
-                && t.quote_volume >= floor
+            t.last_price > Decimal::ZERO && t.last_price >= p.min_price && t.quote_volume >= floor
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -250,7 +247,11 @@ pub fn liquid_universe<'a>(
     rows
 }
 
-pub fn liquid_keys(tickers: &[Ticker], exclude: &[String], p: &ContinuationParams) -> HashSet<String> {
+pub fn liquid_keys(
+    tickers: &[Ticker],
+    exclude: &[String],
+    p: &ContinuationParams,
+) -> HashSet<String> {
     liquid_universe(tickers, exclude, p)
         .into_iter()
         .map(|t| t.symbol.to_ascii_uppercase())
@@ -303,7 +304,11 @@ fn signal_bar<'a>(
             }
         }
         let bars = snapshot.bars_for(symbol);
-        if let Some(bar) = bars.iter().rev().find(|b| !bar_is_forming(b, interval, now)) {
+        if let Some(bar) = bars
+            .iter()
+            .rev()
+            .find(|b| !bar_is_forming(b, interval, now))
+        {
             return Some(bar);
         }
         return last_closed_bar(bars);
@@ -354,15 +359,11 @@ pub fn is_reversing(
     if !was_leader {
         return false;
     }
-    let top: HashSet<String> = pick_recent_leaders(
-        &snapshot.tickers,
-        p.max_positions.max(5) as usize,
-        &[],
-        p,
-    )
-    .into_iter()
-    .map(|s| s.to_ascii_uppercase())
-    .collect();
+    let top: HashSet<String> =
+        pick_recent_leaders(&snapshot.tickers, p.max_positions.max(5) as usize, &[], p)
+            .into_iter()
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
     let dropped = !top.contains(&ticker.symbol.to_ascii_uppercase());
     let red = signal_bar(snapshot, &ticker.symbol, p.interval, now)
         .map(|b| bar_is_red(Some(b)))
@@ -581,7 +582,10 @@ pub fn manage_continuation_long(
     };
     if new_sl > sl && long_stop_is_valid(new_sl, mark) {
         let reason = if new_sl > last.low {
-            format!("trail mark {}%", (p.trail_pct * Decimal::from(100)).normalize())
+            format!(
+                "trail mark {}%",
+                (p.trail_pct * Decimal::from(100)).normalize()
+            )
         } else {
             format!("trail по минимуму {}", p.interval.as_ru())
         };
@@ -633,7 +637,6 @@ fn peak_since_entry(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) ->
     peak
 }
 
-
 fn risk_from_take_profit(pos: &Position, reward_r: Decimal) -> Option<Decimal> {
     let tp = pos.take_profit?;
     if reward_r <= Decimal::ZERO || pos.entry_price <= Decimal::ZERO {
@@ -682,7 +685,6 @@ fn time_stop_reason(pos: &Position, now: f64, p: &ContinuationParams) -> Option<
     None
 }
 
-
 fn one_r_price(pos: &Position) -> Option<Decimal> {
     let sl = pos.stop_loss?;
     if sl >= pos.entry_price || pos.entry_price <= Decimal::ZERO {
@@ -717,7 +719,8 @@ fn reached_one_r(pos: &Position, mark: Decimal, snapshot: &MarketSnapshot) -> bo
     // Do not scan the whole 1h book — yesterday's high looks like a 1R wick
     // and S5 then flattens a red slot. Last 8 signal bars ≈ 2h on 15m, 8h on 1h.
     let hit = if let Some(since) = pos.opened_bar_time {
-        bars.iter().any(|b| b.open_time >= since && b.high >= target)
+        bars.iter()
+            .any(|b| b.open_time >= since && b.high >= target)
     } else {
         bars.iter().rev().take(8).any(|b| b.high >= target)
     };
@@ -819,7 +822,11 @@ pub fn skip_no_htf_trend(snapshot: &MarketSnapshot, symbol: &str) -> Option<Stri
 
 /// Skip unless last close is above EMA20 on the signal TF.
 /// Hour1/S5 also requires EMA20 rising (not flat/down). S4 soak stays close>EMA only.
-pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &ContinuationParams) -> Option<String> {
+pub fn skip_no_uptrend(
+    snapshot: &MarketSnapshot,
+    symbol: &str,
+    p: &ContinuationParams,
+) -> Option<String> {
     let tf = p.interval.as_ru();
     let bars = snapshot.bars_for(symbol);
     if bars.len() < 21 {
@@ -844,10 +851,7 @@ pub fn skip_no_uptrend(snapshot: &MarketSnapshot, symbol: &str, p: &Continuation
         let Some(e1) = prior.last().copied().flatten() else {
             return Some(format!("нет {tf} истории — не вхожу"));
         };
-        let Some(e0) = prior
-            .get(prior.len().saturating_sub(2))
-            .and_then(|v| *v)
-        else {
+        let Some(e0) = prior.get(prior.len().saturating_sub(2)).and_then(|v| *v) else {
             return Some(format!("нет {tf} истории — не вхожу"));
         };
         if e1 <= e0 {
@@ -976,10 +980,15 @@ pub fn s4_setup_skip(
         exclude,
         p,
     );
-    skip_new_long(snapshot, ticker, p, &leaders, &liquid, crate::sessions::unix_now())
+    skip_new_long(
+        snapshot,
+        ticker,
+        p,
+        &leaders,
+        &liquid,
+        crate::sessions::unix_now(),
+    )
 }
-
-
 
 pub fn pick_strategy4_book(
     tickers: &[Ticker],
@@ -1026,10 +1035,7 @@ fn pick_recent_leaders(
     if n == 0 {
         return Vec::new();
     }
-    let skip: HashSet<String> = exclude
-        .iter()
-        .map(|s| s.to_ascii_uppercase())
-        .collect();
+    let skip: HashSet<String> = exclude.iter().map(|s| s.to_ascii_uppercase()).collect();
     let mut rows: Vec<&Ticker> = tickers
         .iter()
         .filter(|t| {
@@ -1044,10 +1050,7 @@ fn pick_recent_leaders(
             .then(b.quote_volume.cmp(&a.quote_volume))
             .then(b.symbol.cmp(&a.symbol))
     });
-    rows.into_iter()
-        .take(n)
-        .map(|t| t.symbol.clone())
-        .collect()
+    rows.into_iter().take(n).map(|t| t.symbol.clone()).collect()
 }
 
 pub fn continuation_decision(
@@ -1080,7 +1083,9 @@ pub fn continuation_decision(
         &trail_bar,
         &HashSet::new(),
     );
-    d.into_iter().next().unwrap_or_else(|| Decision::hold("hold"))
+    d.into_iter()
+        .next()
+        .unwrap_or_else(|| Decision::hold("hold"))
 }
 
 /// Final per-ticker gate before entry. 24h tape filters are repeated here so a
@@ -1203,7 +1208,8 @@ fn manage_open_book(
         let already = scaled_one_r
             .iter()
             .any(|s| s.eq_ignore_ascii_case(&pos.symbol));
-        let decision = manage_continuation_long(pos, snapshot, use_p, now, already, hour1_trail_bar);
+        let decision =
+            manage_continuation_long(pos, snapshot, use_p, now, already, hour1_trail_bar);
         if !decision.is_hold() {
             out.push(decision);
         }

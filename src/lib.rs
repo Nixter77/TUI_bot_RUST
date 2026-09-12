@@ -22,13 +22,13 @@ pub mod exchange;
 pub mod flatten;
 pub mod indicators;
 pub mod journal;
-pub mod openmeta;
 pub mod keys;
 pub mod live;
 pub mod models;
-pub mod money;
 pub mod momentum;
+pub mod money;
 pub mod monitor;
+pub mod openmeta;
 pub mod pidlock;
 pub mod poll;
 pub mod profit;
@@ -43,12 +43,15 @@ pub mod signals;
 pub mod signing;
 pub mod sim;
 pub mod snapshot;
+pub mod telegram;
 pub mod trail;
 pub mod trend;
 pub mod tui;
 pub mod view;
 
 pub use app::{main_with_env, parse_args, run, CliArgs};
-pub use config::{load_config, Config, ConfigError, TradeInterval, DEFAULT_TESTNET_BASE, MAINNET_BASE};
+pub use config::{
+    load_config, Config, ConfigError, TradeInterval, DEFAULT_TESTNET_BASE, MAINNET_BASE,
+};
 pub use engine::{decide, momentum_decision, tick, tick_decisions, MomentumParams, STRATEGY_NAMES};
 pub use models::{Decision, EngineState, MarketSnapshot, RecentAction};

@@ -6,23 +6,30 @@
 use crate::config::Config;
 use crate::dayrisk::apply_day_risk;
 use crate::engine::{tick_decisions, MomentumParams};
-use crate::scalp::ScalpParams;
 use crate::errorlog::{note_frame as note_error_frame, set_active as set_error_log, ErrorLog};
 use crate::errors::COOLDOWN_SEC;
 use crate::exchange::{BinanceFutures, LiveClient, SnapshotClient};
-use crate::journal::{seed_cooldowns, set_active as set_journal, TradeJournal, DEFAULT_JOURNAL_PATH};
+use crate::journal::{
+    seed_cooldowns, set_active as set_journal, TradeJournal, DEFAULT_JOURNAL_PATH,
+};
 use crate::keys::{handle_key, KeyAction};
-use crate::live::{apply_decision, apply_flatten, apply_paper_decision, reconcile_live, LiveApplyResult};
+use crate::live::{
+    apply_decision, apply_flatten, apply_paper_decision, reconcile_live, LiveApplyResult,
+};
 use crate::models::{unmanaged_positions, Decision, EngineState, MarketSnapshot};
 use crate::monitor::{build_monitor, render_monitor};
 use crate::pidlock::acquire_live_lock;
 use crate::poll::{Pulled, SnapshotPoller};
 use crate::profit::{current_equity, EquityPin};
-use crate::render::{account_profit_figure, fit_lines, line_tone, render_frame, LineTone, ViewModel};
-use crate::signals::{emit_decision, reason_suggests_win, set_enabled, shutdown as shutdown_signals};
+use crate::render::{
+    account_profit_figure, fit_lines, line_tone, render_frame, LineTone, ViewModel,
+};
+use crate::scalp::ScalpParams;
+use crate::signals::{
+    emit_decision, reason_suggests_win, set_enabled, shutdown as shutdown_signals,
+};
 use crate::snapshot::{apply_tradfi_skip, fetch_snapshot, make_client, pull_snapshot};
 use crate::view::{build_view, view_positions};
-use rust_decimal::Decimal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
@@ -30,6 +37,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{cursor, execute, queue};
+use rust_decimal::Decimal;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -122,8 +130,15 @@ fn tick_once(
     momentum: &MomentumParams,
     scalp: &ScalpParams,
 ) -> Vec<Decision> {
-    let (new_state, decisions) =
-        tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None, None);
+    let (new_state, decisions) = tick_decisions(
+        state,
+        snapshot,
+        now(),
+        Some(momentum),
+        Some(scalp),
+        None,
+        None,
+    );
     *state = new_state;
     *last_text = decisions
         .first()
@@ -150,7 +165,9 @@ fn apply_live_once(
         }
         return;
     }
-    if let Some(rec) = with_live_try(client, |c| reconcile_live(cfg, c, state, snapshot, Some(now()))) {
+    if let Some(rec) = with_live_try(client, |c| {
+        reconcile_live(cfg, c, state, snapshot, Some(now()))
+    }) {
         if !rec.last_text.is_empty() {
             *last_text = rec.last_text;
         }
@@ -195,8 +212,7 @@ fn apply_live_once(
                     .chain(snapshot.position.iter())
                     .chain(state.positions.iter())
                     .find(|p| {
-                        p.symbol.eq_ignore_ascii_case(symbol)
-                            && p.qty > rust_decimal::Decimal::ZERO
+                        p.symbol.eq_ignore_ascii_case(symbol) && p.qty > rust_decimal::Decimal::ZERO
                     })
                     .map(|p| p.unrealized_pnl > rust_decimal::Decimal::ZERO)
             }
@@ -229,12 +245,7 @@ impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(e) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            DisableLineWrap,
-            cursor::Hide
-        ) {
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, DisableLineWrap, cursor::Hide) {
             let _ = disable_raw_mode();
             return Err(e);
         }
@@ -246,12 +257,7 @@ impl TerminalGuard {
             return;
         }
         let mut stdout = io::stdout();
-        let _ = execute!(
-            stdout,
-            EnableLineWrap,
-            cursor::Show,
-            LeaveAlternateScreen
-        );
+        let _ = execute!(stdout, EnableLineWrap, cursor::Show, LeaveAlternateScreen);
         let _ = disable_raw_mode();
         self.restored = true;
     }
@@ -309,38 +315,35 @@ fn spawn_poller(
     offline: bool,
 ) -> Option<SnapshotPoller<MarketSnapshot>> {
     let cfg_p = cfg.clone();
-    SnapshotPoller::start(
-        Duration::from_secs_f64(SNAPSHOT_INTERVAL_SECS),
-        move || {
-            let input = lock_poison(&poll_in).clone();
-            let mut st = input.state;
-            let mut g = lock_poison(&client);
-            let tradfi = if offline {
-                Vec::new()
-            } else {
-                g.as_mut()
-                    .and_then(|c| c.tradfi_symbols().ok())
-                    .unwrap_or_default()
-            };
-            apply_tradfi_skip(&mut st, &tradfi);
-            let overlay = st.positions.clone();
-            let snap = fetch_snapshot(
-                &cfg_p,
-                g.as_mut().map(|c| c as &mut dyn SnapshotClient),
-                &st,
-                offline,
-                input.pin_value,
-                Some(&input.prior),
-                None,
-                &[],
-                &overlay,
-            );
-            Pulled {
-                snapshot: snap,
-                tradfi,
-            }
-        },
-    )
+    SnapshotPoller::start(Duration::from_secs_f64(SNAPSHOT_INTERVAL_SECS), move || {
+        let input = lock_poison(&poll_in).clone();
+        let mut st = input.state;
+        let mut g = lock_poison(&client);
+        let tradfi = if offline {
+            Vec::new()
+        } else {
+            g.as_mut()
+                .and_then(|c| c.tradfi_symbols().ok())
+                .unwrap_or_default()
+        };
+        apply_tradfi_skip(&mut st, &tradfi);
+        let overlay = st.positions.clone();
+        let snap = fetch_snapshot(
+            &cfg_p,
+            g.as_mut().map(|c| c as &mut dyn SnapshotClient),
+            &st,
+            offline,
+            input.pin_value,
+            Some(&input.prior),
+            None,
+            &[],
+            &overlay,
+        );
+        Pulled {
+            snapshot: snap,
+            tradfi,
+        }
+    })
     .ok()
 }
 
@@ -353,6 +356,9 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     set_enabled(true);
     set_journal(Some(std::path::PathBuf::from(DEFAULT_JOURNAL_PATH)));
     set_error_log(Some(ErrorLog::new(None)));
+    if cfg.live && !offline {
+        crate::telegram::notify_startup(state.strategy_id);
+    }
     seed_cooldowns(state, now(), COOLDOWN_SEC);
     {
         let opens = crate::journal::unmatched_open_positions_for(Some(state.strategy_id));
@@ -412,7 +418,15 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
     if let Some(p) = poller.as_ref() {
         p.bump();
     }
-    scan_once(cfg, &client, state, &snapshot, &mut last_text, &momentum, &scalp);
+    scan_once(
+        cfg,
+        &client,
+        state,
+        &snapshot,
+        &mut last_text,
+        &momentum,
+        &scalp,
+    );
     publish_poll(&poll_in, state, &snapshot, &pin);
     let mut last_snap_at = now();
 
@@ -436,7 +450,11 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
                 }
                 // CPU tick first so paint shows waiting criteria before any REST.
                 pending_live = Some(tick_once(
-                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                    state,
+                    &snapshot,
+                    &mut last_text,
+                    &momentum,
+                    &scalp,
                 ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
                 last_snap_at = now();
@@ -444,10 +462,17 @@ pub fn run_tui(cfg: &Config, state: &mut EngineState, offline: bool) -> io::Resu
                 last_snap_at = now();
                 snapshot = pull_locked(cfg, &client, state, &mut pin, offline, Some(&snapshot));
                 pending_live = Some(tick_once(
-                    state, &snapshot, &mut last_text, &momentum, &scalp,
+                    state,
+                    &snapshot,
+                    &mut last_text,
+                    &momentum,
+                    &scalp,
                 ));
                 publish_poll(&poll_in, state, &snapshot, &pin);
-            } else if poller.is_some() && snapshot_stale(now(), last_snap_at) && state.last_error.is_none() {
+            } else if poller.is_some()
+                && snapshot_stale(now(), last_snap_at)
+                && state.last_error.is_none()
+            {
                 state.last_error = Some(SNAPSHOT_STALE_MSG.into());
             }
 
@@ -623,7 +648,8 @@ pub fn run_monitor(cfg: &Config, state: &mut EngineState, offline: bool) -> io::
                 state.last_error = Some(SNAPSHOT_STALE_MSG.into());
             }
 
-            let events = TradeJournal::new(Some(std::path::Path::new(DEFAULT_JOURNAL_PATH))).read_events();
+            let events =
+                TradeJournal::new(Some(std::path::Path::new(DEFAULT_JOURNAL_PATH))).read_events();
             let view = build_monitor(cfg, state, &snapshot, &events, now());
             let frame = render_monitor(&view);
             paint_frame(&mut stdout, &frame, view.account_profit)?;
