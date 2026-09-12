@@ -641,7 +641,7 @@ pub fn tick_decisions(
             state.last_scan_ts,
             &inflight_f,
             &cooldowns,
-            cont_ref,
+            Some(&cont),
             &state.skip_symbols,
             !state.daily_halt,
             &state.recent_leaders,

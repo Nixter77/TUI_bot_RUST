@@ -123,7 +123,7 @@ fn tick_once(
     scalp: &ScalpParams,
 ) -> Vec<Decision> {
     let (new_state, decisions) =
-        tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None);
+        tick_decisions(state, snapshot, now(), Some(momentum), Some(scalp), None, None);
     *state = new_state;
     *last_text = decisions
         .first()

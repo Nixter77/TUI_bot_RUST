@@ -5,6 +5,7 @@ use crate::journal::{long_pnl, taker_fee};
 use crate::models::{Account, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker};
 use crate::scalp::ScalpParams;
 use crate::trend::TrendParams;
+use crate::continuation::ContinuationParams;
 use crate::openmeta::initial_risk_usdt;
 use crate::config::default_risk_pct;
 use rust_decimal::Decimal;
