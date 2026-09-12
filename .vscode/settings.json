@@ -1,0 +1,10 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/Users/nikolay/gemini_projekts/TUI_bot_RUST/target/debug/tui-bot": true,
+        "/^python3 - <<'PY'\nimport json,math,sys\nfrom decimal import Decimal\np='/\\.state/trades\\.jsonl'\nimport pathlib\nbase=pathlib\\.Path\\('/Users/nikolay/gemini_projekts/TUI_bot_RUST'\\)\npath=base/\\('\\.state/trades\\.jsonl'\\)\nif not path\\.exists\\(\\):\n    print\\('no trades\\.jsonl at',path\\)\n    sys\\.exit\\(0\\)\nrs=\\[\\]\nps=\\[\\]\nwins=0\nfor line in path\\.read_text\\(\\)\\.splitlines\\(\\):\n    if not line\\.strip\\(\\):\n        continue\n    try:\n        ev=json\\.loads\\(line\\)\n    except Exception as e:\n        continue\n    # try final_r, else compute from pnl/initial_risk_usdt\n    final_r=None\n    try:\n        if ev\\.get\\('final_r'\\):\n            final_r=float\\(ev\\['final_r'\\]\\)\n        elif ev\\.get\\('pnl'\\) and ev\\.get\\('initial_risk_usdt'\\):\n            pnl=float\\(ev\\['pnl'\\]\\)\n            ir=float\\(ev\\['initial_risk_usdt'\\]\\)\n            if ir!=0:\n                final_r=pnl/ir\n    except:\n        final_r=None\n    if final_r is None:\n        continue\n    rs\\.append\\(final_r\\)\n    ps\\.append\\(float\\(ev\\.get\\('pnl'\\) or 0\\.0\\)\\)\n    if final_r>0:\n        wins\\+=1\nn=len\\(rs\\)\nif n==0:\n    print\\('no R values found in journal'\\)\n    sys\\.exit\\(0\\)\nmean=sum\\(rs\\)/n\nstd=\\(sum\\(\\(x-mean\\)\\*\\*2 for x in rs\\)/n\\)\\*\\*0\\.5\nsqn=\\(n\\*\\*0\\.5\\)\\*\\(mean/std\\) if std>0 else float\\('inf'\\)\nwinrate=wins/n\nprint\\(f'N=\\{n\\}  meanR=\\{mean:\\.4f\\}  stdR=\\{std:\\.4f\\}  SQN=\\{sqn:\\.3f\\}  WR=\\{winrate:\\.2%\\}'\\)\nprint\\('PnL total=',sum\\(ps\\)\\)\n# basic percentiles\nrs_sorted=sorted\\(rs\\)\nfor q in \\[0\\.1,0\\.25,0\\.5,0\\.75,0\\.9\\]:\n    i=int\\(q\\*\\(n-1\\)\\)\n    print\\(f'p\\{int\\(q\\*100\\)\\}=\\{rs_sorted\\[i\\]:\\.4f\\}'\\)\nPY$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "cargo build": true
+    }
+}

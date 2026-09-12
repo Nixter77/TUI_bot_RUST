@@ -5,6 +5,8 @@ use crate::journal::{long_pnl, taker_fee};
 use crate::models::{Account, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker};
 use crate::scalp::ScalpParams;
 use crate::trend::TrendParams;
+use crate::openmeta::initial_risk_usdt;
+use crate::config::default_risk_pct;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -173,6 +175,7 @@ pub fn simulate_bars(
         scalp,
         trend,
         SimOpts::default(),
+        None,
     )
 }
 
@@ -190,6 +193,7 @@ pub fn simulate_bars_opts(
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
     opts: SimOpts<'_>,
+    continuation_override: Option<&ContinuationParams>,
 ) -> SimResult {
     let warmup = warmup.unwrap_or(if strategy_id == 2 {
         80
@@ -248,7 +252,22 @@ pub fn simulate_bars_opts(
             }) = pending.take()
             {
                 let px = apply_slip(bar.open, true, slip);
-                let qty = notional / px;
+                let mut qty = notional / px;
+                // Apply risk-% sizing cap: desired risk = equity * default_risk_pct().
+                // If the initial risk (entry - stop) * qty exceeds desired, scale qty down.
+                if let Some(desired_risk) = (Some(start_equity)).and_then(|e| {
+                    let pct = default_risk_pct();
+                    if pct > Decimal::ZERO { Some(e * pct) } else { None }
+                }) {
+                    let stop_dist = (px - stop_loss).abs();
+                    if stop_dist > Decimal::ZERO {
+                        let initial_risk = initial_risk_usdt(px, stop_loss, qty).unwrap_or(Decimal::ZERO);
+                        if initial_risk > desired_risk && initial_risk > Decimal::ZERO {
+                            // scale qty to hit desired_risk
+                            qty = qty * (desired_risk / initial_risk);
+                        }
+                    }
+                }
                 pos = Some(Position {
                     symbol: s,
                     side: Side::Long,
@@ -341,7 +360,7 @@ pub fn simulate_bars_opts(
                 snap.htf_bars.insert("BTCUSDT".into(), closed);
             }
         }
-        let (new_state, decision) = tick(&state, &snap, now, momentum, scalp, trend);
+        let (new_state, decision) = tick(&state, &snap, now, momentum, scalp, trend, continuation_override);
         state = new_state;
         match decision {
             Decision::EnterLong { .. } if pos.is_none() => pending = Some(decision),

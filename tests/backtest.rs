@@ -115,6 +115,7 @@ fn s5_cached_1h_sim_metric_if_present() {
             None,
             None,
             opts,
+            None,
         );
         n += row.trades.len();
         wins += row.wins();

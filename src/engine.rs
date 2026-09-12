@@ -407,8 +407,9 @@ pub fn tick(
     momentum: Option<&MomentumParams>,
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
+    continuation_override: Option<&ContinuationParams>,
 ) -> (EngineState, Decision) {
-    let (new_state, decisions) = tick_decisions(state, snapshot, now, momentum, scalp, trend);
+    let (new_state, decisions) = tick_decisions(state, snapshot, now, momentum, scalp, trend, continuation_override);
     (
         new_state,
         decisions.into_iter().next().unwrap_or_else(|| Decision::hold("hold")),
@@ -423,6 +424,7 @@ pub fn tick_decisions(
     momentum: Option<&MomentumParams>,
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
+    continuation_override: Option<&ContinuationParams>,
 ) -> (EngineState, Vec<Decision>) {
     let mut state = state.clone();
     let remembered = remembered_positions(state.position.as_ref(), &state.positions);
@@ -639,7 +641,7 @@ pub fn tick_decisions(
             state.last_scan_ts,
             &inflight_f,
             &cooldowns,
-            Some(&cont),
+            cont_ref,
             &state.skip_symbols,
             !state.daily_halt,
             &state.recent_leaders,

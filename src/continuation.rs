@@ -8,6 +8,7 @@
 //! S5 does not ratchet a 0.8% mark trail (that sits inside a 1h candle).
 
 use crate::config::TradeInterval;
+use std::env;
 use crate::indicators::{ema_series, last_atr, last_ema, mean_volume, vwap};
 use crate::money::round_trip_taker_pct;
 use crate::models::{
@@ -21,6 +22,8 @@ use crate::trail::{candidate_stop, long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
+use std::fs::OpenOptions;
+use std::io::Write;
 
 const NEAR_HIGH_SKIP: &str = "у 24h high — не догоняю";
 const S5_PRIVACY_SKIP: &str = "кластер privacy — не беру";
@@ -103,6 +106,18 @@ pub fn s4_skip_stats_top(n: usize) -> Vec<(String, u64)> {
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     rows.truncate(n);
     rows
+}
+
+/// Append a human-readable skip reason for `symbol` to `.state/sweep-skip-reasons.txt`.
+fn log_skip_reason(symbol: &str, reason: &str) {
+    let ts = crate::sessions::unix_now();
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(".state/sweep-skip-reasons.txt")
+    {
+        let _ = writeln!(f, "{:.0}\t{}\t{}", ts, symbol, reason);
+    }
 }
 
 
@@ -964,6 +979,8 @@ pub fn s4_setup_skip(
     skip_new_long(snapshot, ticker, p, &leaders, &liquid, crate::sessions::unix_now())
 }
 
+
+
 pub fn pick_strategy4_book(
     tickers: &[Ticker],
     n: usize,
@@ -1078,14 +1095,19 @@ fn skip_new_long(
 ) -> Option<String> {
     // Phase-2 BTC regime: same path as monitor Ready (s4_setup_skip).
     if let Some(reason) = crate::regime::block_alt_entry(snapshot) {
+        log_skip_reason(&ticker.symbol, &reason);
         return Some(reason);
     }
     if is_major_symbol(&ticker.symbol) {
-        return Some("мажор — не беру".into());
+        let r = "мажор — не беру".into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     // ZEC+DASH+ZEN/XMR dump as one book on live (S5 2026-09-06); block on S4 too.
     if s5_skip_symbol(&ticker.symbol) {
-        return Some(S5_PRIVACY_SKIP.into());
+        let r = S5_PRIVACY_SKIP.into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     // Live: first 3 min of the 1h bar — wait for the closed kline to settle.
     // Exact hour-open (into == 0) is the sim tick on a completed bar; do not skip.
@@ -1096,32 +1118,44 @@ fn skip_new_long(
         }
     }
     if is_junk_symbol(&ticker.symbol) || ticker.last_price < p.min_price {
-        return Some("мелочь — не гоняю".into());
+        let r = "мелочь — не гоняю".into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     if !liquid.contains(&ticker.symbol.to_ascii_uppercase()) {
-        return Some("тонкий стакан — не гоняю".into());
+        let r = "тонкий стакан — не гоняю".into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     if let Some(reason) = skip_24h_tape(ticker, p) {
+        log_skip_reason(&ticker.symbol, &reason);
         return Some(reason);
     }
     // Same gate as monitor Ready: near-high must fail s4_setup_skip, not only the book.
     if near_24h_high(ticker, p.near_high_frac) {
-        return Some(NEAR_HIGH_SKIP.into());
+        let r = NEAR_HIGH_SKIP.into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     let Some(bar) = signal_bar(snapshot, &ticker.symbol, p.interval, now) else {
         return Some(format!("нет {} бара — не вхожу", p.interval.as_ru()));
     };
     if let Some(reason) = skip_no_htf_trend(snapshot, &ticker.symbol) {
+        log_skip_reason(&ticker.symbol, &reason);
         return Some(reason);
     }
     if let Some(reason) = skip_no_pullback(snapshot, &ticker.symbol, bar, p) {
+        log_skip_reason(&ticker.symbol, &reason);
         return Some(reason);
     }
     if let Some(reason) = skip_no_uptrend(snapshot, &ticker.symbol, p) {
+        log_skip_reason(&ticker.symbol, &reason);
         return Some(reason);
     }
     if is_reversing(snapshot, ticker, recent_leaders, p, now) {
-        return Some("разворот бывшего лидера — не гоняю".into());
+        let r = "разворот бывшего лидера — не гоняю".into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     let bars = snapshot.bars_for(&ticker.symbol);
     if !bars.is_empty() {
@@ -1132,7 +1166,9 @@ fn skip_new_long(
         }
     }
     if structure_stop(snapshot, &ticker.symbol, bar, ticker.last_price, p).is_none() {
-        return Some("стоп слишком широкий — не вхожу".into());
+        let r = "стоп слишком широкий — не вхожу".into();
+        log_skip_reason(&ticker.symbol, &r);
+        return Some(r);
     }
     None
 }
@@ -1219,6 +1255,7 @@ fn maybe_enter(
             continue;
         }
         if let Some(reason) = skip_new_long(snapshot, ticker, p, recent_leaders, &liquid, now) {
+            log_skip_reason(&ticker.symbol, &reason);
             note_s4_skip(&reason);
             last_skip = Some(reason);
             continue;
@@ -1227,6 +1264,7 @@ fn maybe_enter(
         if p.interval == TradeInterval::Hour1
             && s5_same_move_held(snapshot, positions, &ticker.symbol, now) >= S5_CORR_CAP
         {
+            log_skip_reason(&ticker.symbol, S5_CORR_SKIP);
             note_s4_skip(S5_CORR_SKIP);
             last_skip = Some(S5_CORR_SKIP.into());
             continue;
