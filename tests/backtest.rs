@@ -68,16 +68,8 @@ fn s5_cached_1h_sim_metric_if_present() {
     use tui_bot::sim::{simulate_bars_opts, SimOpts};
     // Core desk + crate-report alts already on disk (no fapi fetch). Skip ZEC/DASH privacy.
     let names = [
-        "LINKUSDT",
-        "AVAXUSDT",
-        "DOGEUSDT",
-        "ADAUSDT",
-        "NEARUSDT",
-        "AAVEUSDT",
-        "SUIUSDT",
-        "UNIUSDT",
-        "LTCUSDT",
-        "TAOUSDT",
+        "LINKUSDT", "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "NEARUSDT", "AAVEUSDT", "SUIUSDT",
+        "UNIUSDT", "LTCUSDT", "TAOUSDT",
     ];
     let mut n = 0usize;
     let mut wins = 0usize;

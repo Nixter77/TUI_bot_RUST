@@ -85,7 +85,12 @@ impl SnapshotClient for FakeSnap {
         }
         Ok(self.tickers.clone())
     }
-    fn klines(&mut self, symbol: &str, interval: &str, limit: usize) -> Result<Vec<Bar>, ExchangeError> {
+    fn klines(
+        &mut self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Bar>, ExchangeError> {
         self.kline_calls
             .push((symbol.to_string(), interval.to_string(), limit));
         Ok(self
@@ -155,8 +160,14 @@ fn pull_snapshot_loads_account_pins_once_and_fills_universe() {
     let equity = current_equity(wallet, upnl);
     assert_eq!(snap.account.starting_equity, equity);
     assert_eq!(pin.value, Some(equity));
-    assert_eq!(account_profit(wallet, upnl, pin.value.unwrap()), Decimal::ZERO);
-    assert!(snap.open_positions.iter().any(|p| p.side == Side::Short && p.symbol == "ETHUSDT"));
+    assert_eq!(
+        account_profit(wallet, upnl, pin.value.unwrap()),
+        Decimal::ZERO
+    );
+    assert!(snap
+        .open_positions
+        .iter()
+        .any(|p| p.side == Side::Short && p.symbol == "ETHUSDT"));
     for major in ["BTCUSDT", "ETHUSDT", "SOLUSDT"] {
         assert!(
             snap.universe_bars.contains_key(major),
@@ -170,8 +181,19 @@ fn pull_snapshot_loads_account_pins_once_and_fills_universe() {
     client.upnl = "93.9810".into();
     let later_wallet = d("3039.8808");
     let later_upnl = d("93.9810");
-    let snap2 = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, Some(&snap));
-    assert_eq!(pin.value, Some(equity), "pin must not rebase on later polls");
+    let snap2 = pull_snapshot(
+        &cfg,
+        Some(&mut client),
+        &mut state,
+        &mut pin,
+        false,
+        Some(&snap),
+    );
+    assert_eq!(
+        pin.value,
+        Some(equity),
+        "pin must not rebase on later polls"
+    );
     assert_eq!(snap2.account.starting_equity, equity);
     assert!(account_profit(later_wallet, later_upnl, pin.value.unwrap()) > Decimal::ONE);
 }
@@ -297,7 +319,11 @@ fn ticker_fetch_error_keeps_prior_tape() {
     );
     assert!(second.last_error.is_some());
     assert!(!second.fetched);
-    assert_eq!(second.tickers.len(), 2, "stale tape must remain until the next good 24h fetch");
+    assert_eq!(
+        second.tickers.len(),
+        2,
+        "stale tape must remain until the next good 24h fetch"
+    );
     assert_eq!(second.tickers[0].symbol, "SKRUSDT");
 }
 
@@ -310,7 +336,13 @@ fn position_risk_error_keeps_prior_live_book() {
         json!([long_row("ETHUSDT", "0.01", "3000", "1")]),
     );
     let mut state = EngineState::new(4);
-    let saved = Position::long("ETHUSDT", d("0.01"), d("3000"), Some(d("2940")), Some(d("3120")));
+    let saved = Position::long(
+        "ETHUSDT",
+        d("0.01"),
+        d("3000"),
+        Some(d("2940")),
+        Some(d("3120")),
+    );
     state.positions = vec![saved.clone()];
     let mut pin = EquityPin {
         value: None,
@@ -390,7 +422,12 @@ fn s4_fetches_liquid_universe_not_only_entry_book() {
     tickers.push(Ticker::new("BTCUSDT", d("50000"), d("1"), d("100000000")));
     for i in 0..20 {
         let sym = format!("LIQ{i}USDT");
-        let mut t = Ticker::new(&sym, d("10"), d("3"), d("5000000") - Decimal::from(i * 1000));
+        let mut t = Ticker::new(
+            &sym,
+            d("10"),
+            d("3"),
+            d("5000000") - Decimal::from(i * 1000),
+        );
         t.high_price = d("12"); // last well off high
         tickers.push(t);
         client.klines.insert(sym, bars(50, 10.0));
@@ -419,7 +456,11 @@ fn s4_fetches_liquid_universe_not_only_entry_book() {
         "near-high liquid name must have last bar"
     );
     assert!(
-        snap.htf_bars.get("NEARHIUSDT").map(|b| b.len()).unwrap_or(0) >= 21
+        snap.htf_bars
+            .get("NEARHIUSDT")
+            .map(|b| b.len())
+            .unwrap_or(0)
+            >= 21
             || client
                 .kline_calls
                 .iter()
@@ -451,13 +492,12 @@ fn pull_snapshot_live_does_not_consume_scan_cadence() {
     let mut cfg = cfg_with_keys();
     cfg.live = true;
     let mut client = FakeSnap::book("3000", "0", json!([]));
-    client.tickers.push(Ticker::new("AAAUSDT", d("10"), d("3"), d("5000000")));
+    client
+        .tickers
+        .push(Ticker::new("AAAUSDT", d("10"), d("3"), d("5000000")));
     client.klines.insert("AAAUSDT".into(), bars(50, 10.0));
     let mut state = EngineState::new(4);
-    assert!(
-        state.last_scan_ts <= 0.0,
-        "fresh S4 state is scan-due"
-    );
+    assert!(state.last_scan_ts <= 0.0, "fresh S4 state is scan-due");
     let mut pin = EquityPin {
         value: None,
         persist: false,

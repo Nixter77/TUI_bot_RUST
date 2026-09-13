@@ -49,7 +49,10 @@ fn report_filter_by_strategy() {
     .unwrap();
     let text_all = tui_bot::report::format_report(Some(&trades), None);
     let text_s4 = tui_bot::report::format_report_filtered(Some(&trades), None, Some(4));
-    assert!(text_all.contains("AAAUSDT") && text_all.contains("BBBUSDT"), "{text_all}");
+    assert!(
+        text_all.contains("AAAUSDT") && text_all.contains("BBBUSDT"),
+        "{text_all}"
+    );
     assert!(text_s4.contains("AAAUSDT"), "{text_s4}");
     assert!(!text_s4.contains("BBBUSDT"), "{text_s4}");
     assert!(text_s4.contains("strategy 4"), "{text_s4}");

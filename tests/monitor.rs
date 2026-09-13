@@ -112,7 +112,10 @@ fn waiting_and_growth_and_pnl() {
         waiting.iter().all(|w| w.symbol != "SKRUSDT"),
         "24h leader must stay on tape, not in S4 book: {waiting:?}"
     );
-    let apt = waiting.iter().find(|w| w.symbol == "APTUSDT").expect("APT in wait");
+    let apt = waiting
+        .iter()
+        .find(|w| w.symbol == "APTUSDT")
+        .expect("APT in wait");
     assert_eq!(apt.kind, WaitKind::Setup, "{apt:?}");
     // +20% is inside max_change 35% — stretch_pct only dumps; wait is bars/HTF, not «улетело».
     assert!(
@@ -132,17 +135,29 @@ fn waiting_and_growth_and_pnl() {
     let view = build_monitor(&cfg, &state, &snap, &events, now);
     let wait_syms: Vec<_> = view.waiting.iter().map(|w| w.symbol.as_str()).collect();
     let rise_syms: Vec<_> = view.rising.iter().map(|t| t.symbol.as_str()).collect();
-    assert_ne!(wait_syms, rise_syms, "wait book must not clone the 24h tape");
+    assert_ne!(
+        wait_syms, rise_syms,
+        "wait book must not clone the 24h tape"
+    );
     let frame = render_monitor(&view);
     assert!(frame.contains("Топ роста"), "{frame}");
-    assert!(frame.contains("не список покупок") || frame.contains("не топ 24h"), "{frame}");
+    assert!(
+        frame.contains("не список покупок") || frame.contains("не топ 24h"),
+        "{frame}"
+    );
     assert!(frame.contains("SKRUSDT"), "{frame}");
     assert!(frame.contains("+82.1%"), "{frame}");
     assert!(frame.contains("LINKUSDT"), "{frame}");
     assert!(frame.contains("[в плюсе]"), "{frame}");
-    assert!(frame.contains("uPnL=+8.0000") || frame.contains("uPnL=+8"), "{frame}");
+    assert!(
+        frame.contains("uPnL=+8.0000") || frame.contains("uPnL=+8"),
+        "{frame}"
+    );
     assert!(frame.contains("VVVUSDT"), "{frame}");
-    assert!(frame.contains("нетто=-8.0500") || frame.contains("нетто=-8.05"), "{frame}");
+    assert!(
+        frame.contains("нетто=-8.0500") || frame.contains("нетто=-8.05"),
+        "{frame}"
+    );
     assert!(frame.contains("APTUSDT"), "{frame}");
     assert!(frame.contains("[сетап]"), "{frame}");
     assert!(frame.contains("до входа:"), "{frame}");
@@ -167,12 +182,14 @@ fn s1_wait_lists_book_not_held() {
     let now = make_utc_ts(2026, 9, 2, 10, 0, 0);
     let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
     assert!(
-        waiting.iter().any(|w| w.symbol == "LINKUSDT" || w.symbol == "AAVEUSDT" || w.symbol == "BTCUSDT"),
-        "S1 book is eligible rising names, not the 24h blow-off: {waiting:?}"
+        waiting.iter().any(|w| w.symbol == "BTCUSDT"),
+        "S1 book is BTC/ETH/SOL, not 24h alts: {waiting:?}"
     );
     assert!(
-        waiting.iter().all(|w| w.symbol != "SKRUSDT"),
-        "S1 max-change filter must drop SKR from the wait book: {waiting:?}"
+        waiting
+            .iter()
+            .all(|w| w.symbol != "SKRUSDT" && w.symbol != "LINKUSDT" && w.symbol != "AAVEUSDT"),
+        "S1 must not wait on alt junk or liquid alts (those are S4): {waiting:?}"
     );
 }
 

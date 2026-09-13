@@ -10,8 +10,9 @@ use tui_bot::flatten::FlattenResult;
 use tui_bot::live::{apply_decision, LiveApplyResult};
 use tui_bot::models::{Decision, EngineState, MarketSnapshot, Position, Ticker};
 use tui_bot::signals::{
-    chime_paths, emit_decision, emit_flatten, kind_for_decision, kind_for_flatten, play, set_enabled,
-    set_sink, signals_enabled, write_chime, TradeSignal, BUY_HZ, SELL_LOSS_HZ, SELL_WIN_HZ,
+    chime_paths, emit_decision, emit_flatten, kind_for_decision, kind_for_flatten, play,
+    set_enabled, set_sink, signals_enabled, write_chime, TradeSignal, BUY_HZ, SELL_LOSS_HZ,
+    SELL_WIN_HZ,
 };
 
 fn d(s: &str) -> Decimal {
@@ -35,7 +36,12 @@ impl FlattenClient for FakeClient {
     fn cancel_protectives(&mut self, _symbol: &str) -> Result<(), ExchangeError> {
         Ok(())
     }
-    fn market_close(&mut self, _symbol: &str, _side: &str, _qty: Decimal) -> Result<(), ExchangeError> {
+    fn market_close(
+        &mut self,
+        _symbol: &str,
+        _side: &str,
+        _qty: Decimal,
+    ) -> Result<(), ExchangeError> {
         Ok(())
     }
     fn position_risk(&mut self) -> Result<Value, ExchangeError> {
@@ -168,7 +174,13 @@ fn exit_stop_is_sell_loss() {
         symbol: "BTCUSDT".into(),
     };
     assert_eq!(
-        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, true, Some(false)),
+        kind_for_decision(
+            &exit_d,
+            &LiveApplyResult::default(),
+            true,
+            true,
+            Some(false)
+        ),
         Some(TradeSignal::SellLoss)
     );
     assert_eq!(
@@ -176,7 +188,13 @@ fn exit_stop_is_sell_loss() {
         Some(TradeSignal::SellLoss)
     );
     assert_eq!(
-        kind_for_decision(&exit_d, &LiveApplyResult::default(), true, false, Some(false)),
+        kind_for_decision(
+            &exit_d,
+            &LiveApplyResult::default(),
+            true,
+            false,
+            Some(false)
+        ),
         None
     );
     assert_eq!(
@@ -193,7 +211,13 @@ fn exit_stop_is_sell_loss() {
         None
     );
     assert_eq!(
-        kind_for_decision(&Decision::hold("wait"), &LiveApplyResult::default(), false, false, None),
+        kind_for_decision(
+            &Decision::hold("wait"),
+            &LiveApplyResult::default(),
+            false,
+            false,
+            None
+        ),
         None
     );
     assert_eq!(
@@ -221,8 +245,14 @@ fn flatten_unknown_is_sell_loss() {
         errors: vec![],
     };
     assert_eq!(kind_for_flatten(&closed, None), Some(TradeSignal::SellLoss));
-    assert_eq!(kind_for_flatten(&closed, Some(false)), Some(TradeSignal::SellLoss));
-    assert_eq!(kind_for_flatten(&closed, Some(true)), Some(TradeSignal::SellWin));
+    assert_eq!(
+        kind_for_flatten(&closed, Some(false)),
+        Some(TradeSignal::SellLoss)
+    );
+    assert_eq!(
+        kind_for_flatten(&closed, Some(true)),
+        Some(TradeSignal::SellWin)
+    );
     assert_eq!(kind_for_flatten(&FlattenResult::default(), None), None);
 }
 
@@ -298,7 +328,11 @@ fn play_uses_sink_when_enabled_and_is_silent_by_default() {
     assert!(play(TradeSignal::SellLoss, None));
     assert_eq!(
         *heard.lock().unwrap(),
-        vec![TradeSignal::Buy, TradeSignal::SellWin, TradeSignal::SellLoss]
+        vec![
+            TradeSignal::Buy,
+            TradeSignal::SellWin,
+            TradeSignal::SellLoss
+        ]
     );
     reset();
 }
@@ -316,7 +350,13 @@ fn apply_decision_emits_buy_on_fill() {
     apply_decision(&cfg, &mut FakeClient, &mut state, &snap(None), &enter());
     assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Buy]);
     heard.lock().unwrap().clear();
-    let mut green = Position::long("BTCUSDT", d("0.01"), d("1000"), Some(d("990")), Some(d("1020")));
+    let mut green = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("1000"),
+        Some(d("990")),
+        Some(d("1020")),
+    );
     green.unrealized_pnl = d("5");
     apply_decision(
         &cfg,
@@ -330,7 +370,13 @@ fn apply_decision_emits_buy_on_fill() {
     );
     assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::SellWin]);
     heard.lock().unwrap().clear();
-    let mut red = Position::long("ETHUSDT", d("0.01"), d("1000"), Some(d("990")), Some(d("1020")));
+    let mut red = Position::long(
+        "ETHUSDT",
+        d("0.01"),
+        d("1000"),
+        Some(d("990")),
+        Some(d("1020")),
+    );
     red.unrealized_pnl = d("-4");
     let mut red_snap = snap(Some(red));
     red_snap.tickers = vec![Ticker::new("ETHUSDT", d("990"), d("-1"), d("10"))];

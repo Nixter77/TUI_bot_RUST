@@ -23,7 +23,7 @@ fn flatten_is_x_then_x_other_cancels() {
     let (armed2, confirmed2) = apply_flatten_key(true, 'x');
     assert!(!armed2 && confirmed2);
     let (armed3, confirmed3) = apply_flatten_key(true, 'r');
-    // r while armed is refresh in handle_key, not cancel — flatten cancel is any other non-bound? 
+    // r while armed is refresh in handle_key, not cancel — flatten cancel is any other non-bound?
     // Spec: any other key cancels. Our handle_key maps r to Refresh even when armed.
     // Confirm path: second x confirms. Unrelated letter cancels.
     assert_eq!(handle_key('z', true), KeyAction::FlattenCancel);

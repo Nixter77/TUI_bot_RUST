@@ -2,7 +2,9 @@
 use rust_decimal::Decimal;
 use tui_bot::continuation::{s4_setup_skip, ContinuationParams};
 use tui_bot::models::{Bar, MarketSnapshot, Ticker};
-use tui_bot::regime::{block_alt_entry, classify_btc, classify_snapshot, effective_risk_pct, BtcRegime};
+use tui_bot::regime::{
+    block_alt_entry, classify_btc, classify_snapshot, effective_risk_pct, BtcRegime,
+};
 
 fn d(s: &str) -> Decimal {
     s.parse().unwrap()
@@ -53,11 +55,17 @@ fn bear_htf_blocks_s4_setup_skip() {
     let htf = falling(40);
     let px = htf.last().unwrap().close;
     snap.htf_bars.insert("BTCUSDT".into(), htf);
-    snap.tickers.push(Ticker::new("BTCUSDT", px, d("-3"), d("1e9")));
+    snap.tickers
+        .push(Ticker::new("BTCUSDT", px, d("-3"), d("1e9")));
     // Dummy liquid alt so setup_skip has something to evaluate past regime.
-    snap.tickers.push(Ticker::new("AVAXUSDT", d("100"), d("4"), d("5e8")));
+    snap.tickers
+        .push(Ticker::new("AVAXUSDT", d("100"), d("4"), d("5e8")));
     let p = ContinuationParams::default();
-    let alt = snap.tickers.iter().find(|t| t.symbol == "AVAXUSDT").unwrap();
+    let alt = snap
+        .tickers
+        .iter()
+        .find(|t| t.symbol == "AVAXUSDT")
+        .unwrap();
     let skip = s4_setup_skip(&snap, alt, &p, &[]);
     assert!(
         skip.as_deref() == Some("BTC regime bear — не вхожу"),
@@ -71,11 +79,15 @@ fn bull_htf_does_not_regime_block() {
     let htf = rising(40);
     let px = htf.last().unwrap().close;
     snap.htf_bars.insert("BTCUSDT".into(), htf);
-    snap.tickers.push(Ticker::new("BTCUSDT", px, d("2"), d("1e9")));
+    snap.tickers
+        .push(Ticker::new("BTCUSDT", px, d("2"), d("1e9")));
     assert!(block_alt_entry(&snap).is_none());
     let reg = classify_snapshot(&snap);
     assert!(
-        matches!(reg, BtcRegime::Bull | BtcRegime::StrongBull | BtcRegime::Neutral),
+        matches!(
+            reg,
+            BtcRegime::Bull | BtcRegime::StrongBull | BtcRegime::Neutral
+        ),
         "{reg:?}"
     );
     assert_eq!(effective_risk_pct(d("0.01"), &snap), d("0.01"));

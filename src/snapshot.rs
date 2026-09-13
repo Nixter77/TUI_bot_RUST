@@ -12,7 +12,7 @@ use crate::models::{
 };
 use crate::profit::EquityPin;
 use crate::ranking::{
-    iter_liquid_majors, pick_chart_ticker, pick_strategy1_book, rank_most_rising,
+    iter_liquid_majors, pick_chart_ticker, pick_strategy1_book, rank_most_rising, LIQUID_MAJORS,
 };
 use crate::sessions::unix_now;
 use crate::trend::{CHART_INTERVAL, CHART_LIMIT};
@@ -663,6 +663,20 @@ pub fn fetch_snapshot(
         if let Some(prev) = prior {
             if htf_bars.is_empty() {
                 htf_bars = prev.htf_bars.clone();
+            }
+        }
+        if state.strategy_id == 1 {
+            for sym in LIQUID_MAJORS {
+                let have = htf_bars.get(sym).map(|b| b.len() >= 21).unwrap_or(false);
+                if have && !scan_due {
+                    continue;
+                }
+                match closed_klines(client, sym, "4h", 50) {
+                    Ok(extra) if !extra.is_empty() => {
+                        htf_bars.insert(sym.to_string(), extra);
+                    }
+                    _ => {}
+                }
             }
         }
     }

@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use tui_bot::continuation::{
     liquid_universe, pick_strategy4_book, s4_skip_stats_top, ContinuationParams,
 };
-use tui_bot::s4stats::flush_s4_skip_stats;
 use tui_bot::models::{near_24h_high, Ticker};
+use tui_bot::s4stats::flush_s4_skip_stats;
 
 fn mk(sym: &str, last: &str, chg: &str, vol: &str, high: &str) -> Ticker {
     let mut t = Ticker::new(
@@ -183,7 +183,15 @@ fn measure_near_high_skip_rate_from_public_tape_if_reachable() {
          near_high/(uni-tape)={:.1}% near_high/uni={:.1}% reasons={reasons:?}",
         tickers.len(),
         book.len(),
-        if denom == 0 { 0.0 } else { near_high_skip as f64 / denom as f64 * 100.0 },
-        if n_uni == 0 { 0.0 } else { near_high_skip as f64 / n_uni as f64 * 100.0 },
+        if denom == 0 {
+            0.0
+        } else {
+            near_high_skip as f64 / denom as f64 * 100.0
+        },
+        if n_uni == 0 {
+            0.0
+        } else {
+            near_high_skip as f64 / n_uni as f64 * 100.0
+        },
     );
 }

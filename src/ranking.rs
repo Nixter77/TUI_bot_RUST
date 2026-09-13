@@ -14,9 +14,14 @@ pub fn is_major_symbol(symbol: &str) -> bool {
     matches!(base, "BTC" | "ETH" | "BNB" | "XRP" | "SOL" | "BCH")
 }
 
-/// Strategy 1 buys names with at least this 24h % (same ranking as «Топ роста»).
+/// Strategy 1 buys majors with at least this 24h %.
 pub fn momentum_min_change_percent() -> Decimal {
     Decimal::new(4, 1) // +0.4%
+}
+
+pub fn is_s1_symbol(symbol: &str) -> bool {
+    let up = symbol.trim().to_ascii_uppercase();
+    LIQUID_MAJORS.contains(&up.as_str())
 }
 
 fn usdt_re() -> &'static Regex {
@@ -205,9 +210,10 @@ pub fn pick_momentum_book(
     rows
 }
 
-/// Strategy 1 book: top 24h % among tradable USDT-M, not BTC/ETH/SOL only.
+/// Strategy 1 book: BTC/ETH/SOL only, +0.4%…+12% 24h, not sitting on the day's high.
+/// TestNet 24h alt leaders (MORPHO/SPK/GIGGLE) are a noise incinerator — alts belong to S4.
 pub fn pick_strategy1_book(tickers: &[Ticker], n: usize, exclude: &[String]) -> Vec<Ticker> {
-    pick_momentum_book(
+    pick_strategy1_book_with(
         tickers,
         n,
         Decimal::from(50_000),
@@ -215,8 +221,40 @@ pub fn pick_strategy1_book(tickers: &[Ticker], n: usize, exclude: &[String]) -> 
         momentum_min_change_percent(),
         Some(Decimal::from(12)),
         exclude,
-        true,
     )
+}
+
+pub fn pick_strategy1_book_with(
+    tickers: &[Ticker],
+    n: usize,
+    min_quote_volume: Decimal,
+    min_price: Decimal,
+    min_change_percent: Decimal,
+    max_change_percent: Option<Decimal>,
+    exclude: &[String],
+) -> Vec<Ticker> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let majors: Vec<Ticker> = tickers
+        .iter()
+        .filter(|t| is_s1_symbol(&t.symbol))
+        .cloned()
+        .collect();
+    let book = pick_momentum_book(
+        &majors,
+        n.max(majors.len()).max(1),
+        min_quote_volume,
+        min_price,
+        min_change_percent,
+        max_change_percent,
+        exclude,
+        false,
+    );
+    // Liquid majors near the 24h high are the trend, not a chase. Fičura: near-high
+    // continues for large/liquid; the live 0/9 WR was alt-junk, not BTC at the high.
+    let floored = apply_liquidity_floor(&book, Decimal::new(5, 2));
+    floored.into_iter().take(n).collect()
 }
 
 pub fn pick_momentum_ticker(

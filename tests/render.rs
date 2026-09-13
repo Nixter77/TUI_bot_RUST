@@ -13,7 +13,8 @@ use tui_bot::sessions::make_utc_ts;
 
 #[test]
 fn startup_frame_has_required_surfaces() {
-    let frame = render_startup_frame(None, None, 1, false, true, Some(&Default::default())).unwrap();
+    let frame =
+        render_startup_frame(None, None, 1, false, true, Some(&Default::default())).unwrap();
     assert!(frame.contains("Прибыль счета"));
     assert!(frame.contains("Сумма счета"));
     assert!(frame.contains("Позиции / сделки"));
@@ -52,17 +53,36 @@ fn profit_line_uses_shipped_account_profit() {
             "BUY BTCUSDT",
         )],
         tickers: vec![
-            Ticker::new("BTCUSDT", Decimal::from(51000), "2.5".parse().unwrap(), Decimal::from(10)),
-            Ticker::new("ETHUSDT", Decimal::from(3000), "-1.2".parse().unwrap(), Decimal::from(8)),
+            Ticker::new(
+                "BTCUSDT",
+                Decimal::from(51000),
+                "2.5".parse().unwrap(),
+                Decimal::from(10),
+            ),
+            Ticker::new(
+                "ETHUSDT",
+                Decimal::from(3000),
+                "-1.2".parse().unwrap(),
+                Decimal::from(8),
+            ),
         ],
         chart_symbol: "BTCUSDT".into(),
-        chart_closes: vec![Decimal::ONE, Decimal::from(2), Decimal::from(3), Decimal::from(2)],
+        chart_closes: vec![
+            Decimal::ONE,
+            Decimal::from(2),
+            Decimal::from(3),
+            Decimal::from(2),
+        ],
         last_decision: "hold".into(),
         poll_seconds: 60,
         ..ViewModel::default()
     };
     let frame = render_frame(&view);
-    let expected = account_profit(view.wallet_balance, view.unrealized_pnl, view.starting_equity);
+    let expected = account_profit(
+        view.wallet_balance,
+        view.unrealized_pnl,
+        view.starting_equity,
+    );
     assert_eq!(account_profit_figure(&view), expected);
     assert!(frame.contains(&format!("{:.4}", expected)));
     assert!(frame.contains("Прибыль счета"));
@@ -131,7 +151,10 @@ fn pause_after_trade_is_a_vertical_list_once() {
     let pos = frame.find("=== Позиции / сделки ===").expect("pos");
     let foot = frame.find("Стратегия (выбор").expect("footer");
     let pause = frame.find("Пауза после сделки:").expect("pause");
-    assert!(pause > pos && pause < foot, "pause belongs in the positions block:\n{frame}");
+    assert!(
+        pause > pos && pause < foot,
+        "pause belongs in the positions block:\n{frame}"
+    );
 }
 
 #[test]
@@ -250,7 +273,10 @@ fn profit_and_loss_lines_get_green_or_red_tone() {
         Some(LineTone::Loss)
     );
     assert_eq!(line_tone("=== Счёт ===", Decimal::from(10)), None);
-    assert_eq!(line_tone("Баланс кошелька:     3102.8974 USDT", Decimal::from(10)), None);
+    assert_eq!(
+        line_tone("Баланс кошелька:     3102.8974 USDT", Decimal::from(10)),
+        None
+    );
     assert_eq!(
         line_tone("  до 1R: ещё 0.0110 USDT (осталось 73.3%)", Decimal::ZERO),
         Some(LineTone::Loss)
@@ -283,14 +309,54 @@ fn fit_lines_starts_each_logical_line_at_column_zero() {
 fn top_growth_is_a_live_slice_of_the_full_tape() {
     assert_eq!(TOP_MOVERS_N, 5);
     let tickers = vec![
-        Ticker::new("SKRUSDT", Decimal::new(21907, 6), "82.194".parse().unwrap(), Decimal::from(1)),
-        Ticker::new("XYZUSDT", Decimal::from(125), "56.238".parse().unwrap(), Decimal::from(2)),
-        Ticker::new("HEMIUSDT", Decimal::new(14090, 6), "23.272".parse().unwrap(), Decimal::from(1)),
-        Ticker::new("ANIMEUSDT", Decimal::new(3104, 6), "18.113".parse().unwrap(), Decimal::from(1)),
-        Ticker::new("AUCTIONUSDT", Decimal::new(3648, 3), "15.589".parse().unwrap(), Decimal::from(3)),
-        Ticker::new("BTCUSDT", Decimal::from(50000), "2.000".parse().unwrap(), Decimal::from(9)),
-        Ticker::new("ETHUSDT", Decimal::from(3000), "-1.200".parse().unwrap(), Decimal::from(8)),
-        Ticker::new("SOLUSDT", Decimal::from(140), "-4.000".parse().unwrap(), Decimal::from(7)),
+        Ticker::new(
+            "SKRUSDT",
+            Decimal::new(21907, 6),
+            "82.194".parse().unwrap(),
+            Decimal::from(1),
+        ),
+        Ticker::new(
+            "XYZUSDT",
+            Decimal::from(125),
+            "56.238".parse().unwrap(),
+            Decimal::from(2),
+        ),
+        Ticker::new(
+            "HEMIUSDT",
+            Decimal::new(14090, 6),
+            "23.272".parse().unwrap(),
+            Decimal::from(1),
+        ),
+        Ticker::new(
+            "ANIMEUSDT",
+            Decimal::new(3104, 6),
+            "18.113".parse().unwrap(),
+            Decimal::from(1),
+        ),
+        Ticker::new(
+            "AUCTIONUSDT",
+            Decimal::new(3648, 3),
+            "15.589".parse().unwrap(),
+            Decimal::from(3),
+        ),
+        Ticker::new(
+            "BTCUSDT",
+            Decimal::from(50000),
+            "2.000".parse().unwrap(),
+            Decimal::from(9),
+        ),
+        Ticker::new(
+            "ETHUSDT",
+            Decimal::from(3000),
+            "-1.200".parse().unwrap(),
+            Decimal::from(8),
+        ),
+        Ticker::new(
+            "SOLUSDT",
+            Decimal::from(140),
+            "-4.000".parse().unwrap(),
+            Decimal::from(7),
+        ),
     ];
     let (rising, falling) = top_movers(&tickers, TOP_MOVERS_N);
     assert_eq!(rising.len(), 5);
@@ -330,7 +396,6 @@ fn top_growth_is_a_live_slice_of_the_full_tape() {
     assert!(growth[0].contains("BTCUSDT"), "{frame2}");
     assert!(!growth.iter().any(|l| l.contains("SOLUSDT")), "{frame2}");
 }
-
 
 #[test]
 fn strategy4_book_shows_risk_pct_not_order_notional() {
@@ -390,8 +455,14 @@ fn d(s: &str) -> Decimal {
 fn recent_decisions_show_utc_time() {
     let view = ViewModel {
         recent_actions: vec![
-            RecentAction::new(make_utc_ts(2026, 9, 1, 7, 4, 9), "BUY ETHUSDT TP=1 SL=1 (pullback)"),
-            RecentAction::new(make_utc_ts(2026, 9, 1, 7, 5, 11), "SL ETHUSDT -> 1.0008 (безубыток на 1R)"),
+            RecentAction::new(
+                make_utc_ts(2026, 9, 1, 7, 4, 9),
+                "BUY ETHUSDT TP=1 SL=1 (pullback)",
+            ),
+            RecentAction::new(
+                make_utc_ts(2026, 9, 1, 7, 5, 11),
+                "SL ETHUSDT -> 1.0008 (безубыток на 1R)",
+            ),
         ],
         ..ViewModel::default()
     };
@@ -403,9 +474,27 @@ fn recent_decisions_show_utc_time() {
 
 #[test]
 fn position_block_shows_remaining_to_one_r() {
-    let far = Position::long("BTCUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
-    let close = Position::long("ETHUSDT", d("0.1"), d("100"), Some(d("98.5")), Some(d("103.1")));
-    let locked = Position::long("SOLUSDT", d("1"), d("100"), Some(d("100.08")), Some(d("103.1")));
+    let far = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
+    let close = Position::long(
+        "ETHUSDT",
+        d("0.1"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
+    let locked = Position::long(
+        "SOLUSDT",
+        d("1"),
+        d("100"),
+        Some(d("100.08")),
+        Some(d("103.1")),
+    );
     let naked = Position::long("XRPUSDT", d("10"), d("100"), None, Some(d("103.1")));
     let short = Position {
         symbol: "DOGEUSDT".into(),

@@ -6,9 +6,12 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tui_bot::config::STRATEGY1_POLL_SECONDS;
 use tui_bot::engine::{
-    decide, momentum_decision, select_strategy_str, tick, tick_decisions, MomentumParams, STRATEGY_NAMES,
+    decide, momentum_decision, select_strategy_str, tick, tick_decisions, MomentumParams,
+    STRATEGY_NAMES,
 };
-use tui_bot::models::{coalesce_position, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker};
+use tui_bot::models::{
+    coalesce_position, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker,
+};
 use tui_bot::ranking::rank_most_rising;
 use tui_bot::trail::{candidate_stop, take_profit_price_net, trail_stop_upward};
 
@@ -142,7 +145,10 @@ fn trails_stop_up_and_never_down() {
 #[test]
 fn tick_and_three_named_strategies() {
     assert_eq!(STRATEGY_NAMES.len(), 5);
-    assert_eq!(STRATEGY_NAMES[0].1, "Momentum rider (растущий + TP + SL вверх)");
+    assert_eq!(
+        STRATEGY_NAMES[0].1,
+        "Momentum rider (растущий + TP + SL вверх)"
+    );
     assert_eq!(STRATEGY_NAMES[1].1, "Скальп: откат к VWAP/EMA9");
     assert_eq!(STRATEGY_NAMES[2].1, "Тренд: пробой Donchian 20/10 (день)");
     assert!(STRATEGY_NAMES[3].1.contains("Continuation"));
@@ -186,7 +192,7 @@ fn short_position_is_not_managed_as_long() {
 }
 
 #[test]
-fn missing_stop_attaches_below_mark_and_does_not_exit() {
+fn missing_stop_attaches_from_entry_not_mark() {
     let params = MomentumParams {
         poll_seconds: 120,
         trail_pct: d("0.006"),
@@ -207,9 +213,10 @@ fn missing_stop_attaches_below_mark_and_does_not_exit() {
     let (decision, _) = momentum_decision(&dropped, Some(&pos), 50.0, 1.0, Some(&params));
     match decision {
         Decision::AmendStop { stop_loss, .. } => {
-            let cand = candidate_stop(d("99.5"), "LONG", params.trail_pct).unwrap();
+            let cand = candidate_stop(d("100"), "LONG", params.trail_pct).unwrap();
             assert_eq!(stop_loss, cand);
             assert!(stop_loss < d("99.5"));
+            assert!(stop_loss > candidate_stop(d("99.5"), "LONG", params.trail_pct).unwrap());
         }
         other => panic!("{other:?}"),
     }
@@ -217,7 +224,13 @@ fn missing_stop_attaches_below_mark_and_does_not_exit() {
 
 #[test]
 fn coalesce_does_not_resurrect_when_live_is_none() {
-    let remembered = Position::long("BTCUSDT", Decimal::ONE, d("100"), Some(d("99")), Some(d("102")));
+    let remembered = Position::long(
+        "BTCUSDT",
+        Decimal::ONE,
+        d("100"),
+        Some(d("99")),
+        Some(d("102")),
+    );
     assert!(coalesce_position(None, Some(&remembered)).is_none());
 }
 
@@ -245,7 +258,15 @@ fn live_book_keeps_inflight_and_does_not_repeat_enter() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (filled, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
+    let (filled, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         filled
@@ -255,7 +276,15 @@ fn live_book_keeps_inflight_and_does_not_repeat_enter() {
         "{:?}",
         filled.inflight_symbols
     );
-    let (_, again) = tick_decisions(&filled, &snap, london_ts() + 5.0, Some(&mom), None, None, None);
+    let (_, again) = tick_decisions(
+        &filled,
+        &snap,
+        london_ts() + 5.0,
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         !again.iter().any(is_enter),
         "repeat enter on live snapshot lag: {again:?}"
@@ -274,7 +303,13 @@ fn skips_new_entries_outside_start_hours_but_trails_open_long() {
     assert_eq!(scan_ts, 0.0);
     let (opened, _) = momentum_decision(&tickers(), None, london_ts(), 0.0, Some(&params));
     assert!(is_enter(&opened));
-    let pos = Position::long("BTCUSDT", d("0.01"), d("100"), Some(d("90")), Some(d("200")));
+    let pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("90")),
+        Some(d("200")),
+    );
     let trail_p = MomentumParams {
         poll_seconds: 60,
         trail_pct: d("0.006"),
@@ -310,7 +345,8 @@ fn scan_can_enter_three_rising_names() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
     assert!(
@@ -321,7 +357,15 @@ fn scan_can_enter_three_rising_names() {
     let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
     got.insert(enters[0].symbol().to_string());
     for step in 1..3 {
-        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None, None);
+        let (ns, decs) = tick_decisions(
+            &state,
+            &snap,
+            london_ts() + (step as f64) * 60.0,
+            Some(&mom),
+            None,
+            None,
+            None,
+        );
         state = ns;
         for d in decs.iter().filter(|d| is_enter(d)) {
             got.insert(d.symbol().to_string());
@@ -355,15 +399,19 @@ fn skips_tradfi_names_and_keeps_skip_list() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
-    assert!(["BTCUSDT", "ETHUSDT"].contains(&enters[0].symbol()), "{decisions:?}");
+    assert!(
+        ["BTCUSDT", "ETHUSDT"].contains(&enters[0].symbol()),
+        "{decisions:?}"
+    );
     assert_eq!(new_state.skip_symbols, vec!["XAUUSDT", "TSLAUSDT"]);
 }
 
 #[test]
-fn scan_buys_fastest_24h_leader_not_only_majors() {
+fn scan_buys_fastest_major_not_alt_junk() {
     let tickers = vec![
         Ticker::new("MORPHOUSDT", d("2.87"), d("9.8"), d("300000")),
         Ticker::new("SPKUSDT", d("0.0225"), d("8.4"), d("200000")),
@@ -383,15 +431,29 @@ fn scan_buys_fastest_24h_leader_not_only_majors() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).collect();
     assert_eq!(enters.len(), 1, "{decisions:?}");
-    assert_eq!(enters[0].symbol(), "MORPHOUSDT");
+    assert_eq!(enters[0].symbol(), "SOLUSDT");
 }
 
 #[test]
 fn cooldown_after_position_vanishes() {
-    let pos = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+    let pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     let mut state = EngineState::new(1);
     state.position = Some(pos.clone());
     state.last_scan_ts = 0.0;
@@ -404,7 +466,10 @@ fn cooldown_after_position_vanishes() {
     let (new_state, decision) = tick(&state, &snap, london, None, None, None, None);
     assert!(is_hold(&decision));
     let reason = decision.reason();
-    assert!(reason.contains("пауза") || reason.contains("cooling"), "{reason}");
+    assert!(
+        reason.contains("пауза") || reason.contains("cooling"),
+        "{reason}"
+    );
     assert!(new_state.cooldowns.get("BTCUSDT").copied().unwrap_or(0.0) > london);
     let (_, decision2) = tick(&new_state, &snap, london + 60.0, None, None, None, None);
     assert!(is_hold(&decision2));
@@ -425,7 +490,15 @@ fn poll_timeout_is_not_sticky() {
         always_enter: true,
         ..MomentumParams::default()
     };
-    let (stuck, _) = tick_decisions(&EngineState::new(1), &snap_timeout, now, Some(&mom), None, None, None);
+    let (stuck, _) = tick_decisions(
+        &EngineState::new(1),
+        &snap_timeout,
+        now,
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(stuck.last_error.is_none());
     let mut leftover = EngineState::new(1);
     leftover.last_error = Some(raw.into());
@@ -452,7 +525,15 @@ fn default_is_one_slot() {
         always_enter: true,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     let enters = decisions.iter().filter(|d| is_enter(d)).count();
     assert_eq!(enters, 1);
 }
@@ -497,14 +578,28 @@ fn red_5m_skips_enter() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions[0].reason().contains("5м"));
 }
 
 #[test]
 fn daily_halt_blocks_enter_keeps_trail() {
-    let mut pos = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+    let mut pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     pos.unrealized_pnl = d("10");
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("BTCUSDT", d("50500"), d("1"), d("8000"))];
@@ -525,7 +620,8 @@ fn daily_halt_blocks_enter_keeps_trail() {
         trail_pct: d("0.006"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt);
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions.iter().any(|d| is_amend(d) || is_hold(d)));
@@ -552,8 +648,12 @@ fn daily_loss_usdt_halt_still_trips_via_equity() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
-    assert!(new_state.daily_halt, "USDT −20 must still halt under larger R budget");
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    assert!(
+        new_state.daily_halt,
+        "USDT −20 must still halt under larger R budget"
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -578,11 +678,11 @@ fn daily_loss_r_halt_blocks_enter_independent_of_usdt() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "R layer must halt at −75 alone");
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
-
 
 #[test]
 fn daily_usdt_halt_trips_from_equity_pnl() {
@@ -604,7 +704,8 @@ fn daily_usdt_halt_trips_from_equity_pnl() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "USDT layer must trip");
     assert!(!decisions.iter().any(is_enter));
 }
@@ -629,18 +730,27 @@ fn daily_loss_r_halt_trips_independently() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "day halt must trip at −80");
     assert!(!decisions.iter().any(is_enter));
     assert!(
-        decisions.iter().any(|d| d.reason().contains("стоп дня") || is_hold(d)),
+        decisions
+            .iter()
+            .any(|d| d.reason().contains("стоп дня") || is_hold(d)),
         "{decisions:?}"
     );
 }
 
 #[test]
 fn daily_loss_r_halt_keeps_manage_trail() {
-    let mut pos = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+    let mut pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     pos.unrealized_pnl = d("10");
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("BTCUSDT", d("50500"), d("1"), d("8000"))];
@@ -666,17 +776,33 @@ fn daily_loss_r_halt_keeps_manage_trail() {
         risk_pct: d("0.0025"),
         ..MomentumParams::default()
     };
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt);
     assert!(!decisions.iter().any(is_enter));
-    assert!(decisions.iter().any(|d| is_amend(d) || is_hold(d)), "{decisions:?}");
+    assert!(
+        decisions.iter().any(|d| is_amend(d) || is_hold(d)),
+        "{decisions:?}"
+    );
 }
 
 #[test]
 fn two_red_slots_block_third_major() {
-    let mut btc = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+    let mut btc = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     btc.unrealized_pnl = d("-1");
-    let mut eth = Position::long("ETHUSDT", d("0.1"), d("3000"), Some(d("2940")), Some(d("3100")));
+    let mut eth = Position::long(
+        "ETHUSDT",
+        d("0.1"),
+        d("3000"),
+        Some(d("2940")),
+        Some(d("3100")),
+    );
     eth.unrealized_pnl = d("-2");
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = tickers();
@@ -701,9 +827,21 @@ fn two_red_slots_block_third_major() {
 
 #[test]
 fn red_slot_does_not_open_another() {
-    let mut btc = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+    let mut btc = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     btc.unrealized_pnl = d("-1");
-    let eth = Position::long("ETHUSDT", d("0.1"), d("3000"), Some(d("2940")), Some(d("3100")));
+    let eth = Position::long(
+        "ETHUSDT",
+        d("0.1"),
+        d("3000"),
+        Some(d("2940")),
+        Some(d("3100")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = tickers();
     snap.account = account();
@@ -727,9 +865,27 @@ fn red_slot_does_not_open_another() {
 
 #[test]
 fn manages_three_open_longs_independently() {
-    let btc = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("48000")), Some(d("53000")));
-    let eth = Position::long("ETHUSDT", d("0.1"), d("3000"), Some(d("2800")), Some(d("3200")));
-    let sol = Position::long("SOLUSDT", d("0.4"), d("140"), Some(d("130")), Some(d("150")));
+    let btc = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("48000")),
+        Some(d("53000")),
+    );
+    let eth = Position::long(
+        "ETHUSDT",
+        d("0.1"),
+        d("3000"),
+        Some(d("2800")),
+        Some(d("3200")),
+    );
+    let sol = Position::long(
+        "SOLUSDT",
+        d("0.4"),
+        d("140"),
+        Some(d("130")),
+        Some(d("150")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = tickers();
     snap.account = account();
@@ -780,7 +936,15 @@ fn leftover_short_blocks_new_entries() {
     snap.chart_symbol = "ETHUSDT".into();
     snap.live_book = true;
     snap.open_positions = vec![short];
-    let (_, decisions) = tick_decisions(&EngineState::new(2), &snap, make_ts(), None, Some(&scalp_loose()), None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(2),
+        &snap,
+        make_ts(),
+        None,
+        Some(&scalp_loose()),
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter));
     assert!(decisions[0].reason().contains("хвост"));
     assert!(decisions[0].reason().contains("SHORT"));
@@ -843,7 +1007,19 @@ fn trend_leaves_dead_btc_for_eth_breakout() {
     .into_iter()
     .collect();
     let empty = HashMap::new();
-    let (decision, _) = decide(3, &snap, 1.0, 0.0, None, None, Some(&trend_loose()), None, &[], &empty).unwrap();
+    let (decision, _) = decide(
+        3,
+        &snap,
+        1.0,
+        0.0,
+        None,
+        None,
+        Some(&trend_loose()),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
     match decision {
         Decision::EnterLong { symbol, .. } => assert_eq!(symbol, "ETHUSDT"),
         other => panic!("expected enter, got {other:?} {}", other.reason()),
@@ -884,7 +1060,10 @@ fn strategy4_liquid_continuation_enters() {
     assert!(
         decisions.iter().any(is_enter),
         "{:?}",
-        decisions.iter().map(|d| d.reason().to_string()).collect::<Vec<_>>()
+        decisions
+            .iter()
+            .map(|d| d.reason().to_string())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         decisions.iter().find(|d| is_enter(d)).unwrap().symbol(),
@@ -923,7 +1102,15 @@ fn strategy4_15m_interval_names_the_skip() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("15м")),
@@ -980,7 +1167,13 @@ fn strategy4_missing_stop_attaches_from_entry_not_mark() {
 
 #[test]
 fn strategy4_existing_stop_does_not_move_down() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("99")), Some(d("200")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("99")),
+        Some(d("200")),
+    );
     pos.opened_bar_time = Some(london_ms());
     let mut ticker = s4_liquid_ticker();
     ticker.last_price = d("99.5");
@@ -1001,7 +1194,8 @@ fn strategy4_existing_stop_does_not_move_down() {
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos);
     snap.bars = vec![quiet.clone()];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![quiet.clone()]);
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), vec![quiet.clone()]);
     snap.last_bars = [("AVAXUSDT".into(), quiet)].into_iter().collect();
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
@@ -1018,12 +1212,20 @@ fn adopt_green_s4_fill(state: &mut EngineState, snap: &mut MarketSnapshot, symbo
         .find(|t| t.symbol == symbol)
         .map(|t| t.last_price)
         .unwrap_or(d("100"));
-    let mut pos = Position::long(symbol, d("0.01"), mark, Some(mark * d("0.985")), Some(mark * d("1.03")));
+    let mut pos = Position::long(
+        symbol,
+        d("0.01"),
+        mark,
+        Some(mark * d("0.985")),
+        Some(mark * d("1.03")),
+    );
     pos.unrealized_pnl = d("0.001");
     state.positions.retain(|p| p.symbol != symbol);
     state.positions.push(pos.clone());
     state.position = state.positions.first().cloned();
-    state.inflight_symbols.retain(|s| !s.eq_ignore_ascii_case(symbol));
+    state
+        .inflight_symbols
+        .retain(|s| !s.eq_ignore_ascii_case(symbol));
     snap.live_book = true;
     snap.open_positions = state.positions.clone();
     snap.position = state.position.clone();
@@ -1063,7 +1265,15 @@ fn strategy4_can_enter_three_liquid_names() {
     };
     let mut got: std::collections::HashSet<String> = std::collections::HashSet::new();
     for step in 0..3 {
-        let (ns, decs) = tick_decisions(&state, &snap, london_ts() + (step as f64) * 60.0, Some(&mom), None, None, None);
+        let (ns, decs) = tick_decisions(
+            &state,
+            &snap,
+            london_ts() + (step as f64) * 60.0,
+            Some(&mom),
+            None,
+            None,
+            None,
+        );
         state = ns;
         let entered: Vec<String> = decs
             .iter()
@@ -1101,7 +1311,8 @@ fn strategy4_prefers_liquid_volume_over_hottest_percent() {
     let uni = liquid_universe(&tickers, &[], &ContinuationParams::default());
     assert!(!uni.is_empty());
     assert_eq!(
-        uni[0].symbol, "AVAXUSDT",
+        uni[0].symbol,
+        "AVAXUSDT",
         "highest non-major volume first: {:?}",
         uni.iter().map(|t| t.symbol.as_str()).collect::<Vec<_>>()
     );
@@ -1122,7 +1333,15 @@ fn strategy4_does_not_chase_green_5m_without_pullback() {
     snap.universe_bars.insert("AVAXUSDT".into(), greens);
     snap.last_bars = [("AVAXUSDT".into(), green_5m())].into_iter().collect();
     snap.htf_bars.insert("AVAXUSDT".into(), htf_up_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("отката")),
@@ -1148,18 +1367,22 @@ fn strategy4_does_not_chase_24h_stretch() {
     snap.account_ok = true;
     attach_pullback(
         &mut snap,
-        &[
-            ("AVAXUSDT", 100.0),
-            ("LINKUSDT", 14.0),
-            ("ADAUSDT", 0.55),
-        ],
+        &[("AVAXUSDT", 100.0), ("LINKUSDT", 14.0), ("ADAUSDT", 0.55)],
     );
     let mom = MomentumParams {
         max_positions: 3,
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     let enters: std::collections::HashSet<_> = decisions
         .iter()
         .filter(|d| is_enter(d))
@@ -1195,16 +1418,32 @@ fn strategy4_enters_green_day_off_the_24h_high() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
-        decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
         "pullback of a +8% liquid name off the high must enter: {decisions:?}"
     );
 }
 
 #[test]
 fn strategy4_holds_former_leader_until_stop() {
-    let pos = Position::long("AAVEUSDT", d("0.2"), d("140"), Some(d("137")), Some(d("146")));
+    let pos = Position::long(
+        "AAVEUSDT",
+        d("0.2"),
+        d("140"),
+        Some(d("137")),
+        Some(d("146")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![
         Ticker::new("MORPHOUSDT", d("2.87"), d("26.3"), d("300000")),
@@ -1224,7 +1463,9 @@ fn strategy4_holds_former_leader_until_stop() {
     state.recent_leaders = vec!["AAVEUSDT".into(), "MORPHOUSDT".into(), "GRASSUSDT".into()];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "red 5m / dropped tape must not dump a long still above SL: {decisions:?}"
     );
 }
@@ -1246,15 +1487,19 @@ fn strategy4_exits_when_mark_hits_placed_stop() {
     snap.live_book = true;
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
-    snap.last_bars = [("AAVEUSDT".into(), pullback_last_at(140.0))].into_iter().collect();
+    snap.last_bars = [("AAVEUSDT".into(), pullback_last_at(140.0))]
+        .into_iter()
+        .collect();
     let mut state = EngineState::new(4);
     state.position = snap.position.clone();
     state.positions = snap.open_positions.clone();
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
-            && d.symbol() == "AAVEUSDT"
-            && d.reason().contains("stop")),
+        decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })
+                && d.symbol() == "AAVEUSDT"
+                && d.reason().contains("stop")),
         "{decisions:?}"
     );
 }
@@ -1263,12 +1508,13 @@ fn strategy4_exits_when_mark_hits_placed_stop() {
 fn does_not_chase_already_pumped_over_12pct() {
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![
+        Ticker::new("ETHUSDT", d("3000"), d("15.0"), d("700000")),
+        Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("800000")),
+        Ticker::new("SOLUSDT", d("140"), d("4.0"), d("200000")),
         Ticker::new("MORPHOUSDT", d("2.87"), d("26.3"), d("300000")),
-        Ticker::new("SPKUSDT", d("0.022"), d("25.4"), d("200000")),
-        Ticker::new("AVAXUSDT", d("50000"), d("9.5"), d("800000")),
     ];
     snap.account = account();
-    snap.chart_symbol = "AVAXUSDT".into();
+    snap.chart_symbol = "BTCUSDT".into();
     snap.account_ok = true;
     let mom = MomentumParams {
         always_enter: true,
@@ -1276,39 +1522,109 @@ fn does_not_chase_already_pumped_over_12pct() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
-    let enters: Vec<_> = decisions.iter().filter(|d| is_enter(d)).map(|d| d.symbol().to_string()).collect();
-    assert_eq!(enters, vec!["AVAXUSDT".to_string()], "{decisions:?}");
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    let enters: Vec<_> = decisions
+        .iter()
+        .filter(|d| is_enter(d))
+        .map(|d| d.symbol().to_string())
+        .collect();
+    assert_eq!(enters, vec!["BTCUSDT".to_string()], "{decisions:?}");
 }
 
 #[test]
-fn does_not_enter_near_24h_high() {
-    let mut pumped = Ticker::new("STORJUSDT", d("0.048"), d("9.5"), d("200000"));
-    pumped.high_price = d("0.0482");
+fn enters_leading_major_even_near_24h_high() {
+    let mut pumped = Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("800000"));
+    pumped.high_price = d("50100");
+    let mut eth = Ticker::new("ETHUSDT", d("3000"), d("2.0"), d("700000"));
+    eth.high_price = d("3300");
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![
-        pumped,
-        Ticker::new("AVAXUSDT", d("50000"), d("2.0"), d("800000")),
-    ];
+    snap.tickers = vec![pumped, eth];
     snap.account = account();
-    snap.chart_symbol = "AVAXUSDT".into();
+    snap.chart_symbol = "BTCUSDT".into();
     let mom = MomentumParams {
         always_enter: true,
         max_positions: 3,
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(1), &snap, london_ts(), Some(&mom), None, None, None);
-    assert!(
-        !decisions.iter().any(|d| is_enter(d) && d.symbol() == "STORJUSDT"),
-        "{decisions:?}"
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
     );
-    assert!(decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"), "{decisions:?}");
+    assert!(
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "BTCUSDT"),
+        "liquid major at the 24h high is the trend: {decisions:?}"
+    );
 }
 
 #[test]
-fn exits_open_long_on_red_5m_instead_of_waiting_for_sl() {
-    let pos = Position::long("BTCUSDT", d("0.01"), d("50000"), Some(d("49000")), Some(d("52000")));
+fn s1_skips_major_when_4h_below_ema20() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("800000"))];
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.account_ok = true;
+    snap.htf_bars
+        .insert("BTCUSDT".into(), htf_down_4h_at(50_000.0));
+    let mom = MomentumParams {
+        always_enter: true,
+        max_positions: 1,
+        ..MomentumParams::default()
+    };
+    let (_, down) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !down.iter().any(|d| is_enter(d) && d.symbol() == "BTCUSDT"),
+        "4h downtrend must skip BTC: {down:?}"
+    );
+    snap.htf_bars
+        .insert("BTCUSDT".into(), htf_up_4h_at(50_000.0));
+    let (_, up) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        up.iter().any(|d| is_enter(d) && d.symbol() == "BTCUSDT"),
+        "4h uptrend may enter BTC: {up:?}"
+    );
+}
+
+#[test]
+fn holds_open_long_on_red_5m_above_stop() {
+    let pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = tickers();
     snap.account = account();
@@ -1316,7 +1632,6 @@ fn exits_open_long_on_red_5m_instead_of_waiting_for_sl() {
     snap.live_book = true;
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos);
-    // Red 5m at BTC scale so S1 red-exit path sees the symbol bar.
     snap.last_bars = [(
         "BTCUSDT".into(),
         Bar {
@@ -1341,22 +1656,30 @@ fn exits_open_long_on_red_5m_instead_of_waiting_for_sl() {
     };
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
-            && d.symbol() == "BTCUSDT"
-            && d.reason().contains("5м")),
-        "{decisions:?}"
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
+        "red 5m must not flatten above SL: {decisions:?}"
     );
 }
 
 #[test]
-fn exits_when_name_drops_off_the_growth_book() {
-    let pos = Position::long("MORPHOUSDT", d("13.8"), d("2.9"), Some(d("2.8")), Some(d("3.1")));
+fn holds_when_name_drops_off_the_growth_book() {
+    let pos = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
-    let mut tickers = tickers();
-    tickers.push(Ticker::new("MORPHOUSDT", d("2.9"), d("0.2"), d("300000")));
-    snap.tickers = tickers;
+    snap.tickers = vec![
+        Ticker::new("ETHUSDT", d("3000"), d("9.5"), d("700000")),
+        Ticker::new("SOLUSDT", d("140"), d("4.0"), d("200000")),
+        Ticker::new("BTCUSDT", d("50000"), d("0.2"), d("800000")),
+    ];
     snap.account = account();
-    snap.chart_symbol = "AVAXUSDT".into();
+    snap.chart_symbol = "ETHUSDT".into();
     snap.live_book = true;
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos);
@@ -1371,10 +1694,10 @@ fn exits_when_name_drops_off_the_growth_book() {
     };
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
-            && d.symbol() == "MORPHOUSDT"
-            && d.reason().contains("топа")),
-        "{decisions:?}"
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
+        "rank drop must not flatten: {decisions:?}"
     );
 }
 
@@ -1418,10 +1741,20 @@ fn strategy4_does_not_inherit_strategy1_always_enter() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
-        decisions.iter().any(|d| d.reason().contains("вне часов старта")),
+        decisions
+            .iter()
+            .any(|d| d.reason().contains("вне часов старта")),
         "{decisions:?}"
     );
 }
@@ -1431,19 +1764,29 @@ fn strategy4_enters_in_recommended_utc_windows() {
     let snap = strategy4_ready_snap();
     for hour in [0u32, 7, 13] {
         let ts = tui_bot::sessions::make_utc_ts(2026, 8, 17, hour, 30, 0);
-        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
+        let (_, decisions) =
+            tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
         assert!(
             decisions.iter().any(is_enter),
             "hour {hour}: {:?}",
-            decisions.iter().map(|d| d.reason().to_string()).collect::<Vec<_>>()
+            decisions
+                .iter()
+                .map(|d| d.reason().to_string())
+                .collect::<Vec<_>>()
         );
     }
     for hour in [2u32, 4, 10, 12, 16, 22] {
         let ts = tui_bot::sessions::make_utc_ts(2026, 8, 17, hour, 0, 0);
-        let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
-        assert!(!decisions.iter().any(is_enter), "hour {hour}: {decisions:?}");
+        let (_, decisions) =
+            tick_decisions(&EngineState::new(4), &snap, ts, None, None, None, None);
         assert!(
-            decisions.iter().any(|d| d.reason().contains("вне часов старта")),
+            !decisions.iter().any(is_enter),
+            "hour {hour}: {decisions:?}"
+        );
+        assert!(
+            decisions
+                .iter()
+                .any(|d| d.reason().contains("вне часов старта")),
             "hour {hour}: {decisions:?}"
         );
     }
@@ -1524,7 +1867,9 @@ fn strategy4_holds_open_long_on_red_5m_above_stop() {
     state.positions = snap.open_positions.clone();
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "red 5m above SL must hold for 2R: {decisions:?}"
     );
 }
@@ -1567,7 +1912,15 @@ fn strategy4_skips_thin_alts_and_pennies() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| is_enter(d)
             && ["FARTCOINUSDT", "ZILUSDT", "DOGSUSDT"]
@@ -1576,14 +1929,22 @@ fn strategy4_skips_thin_alts_and_pennies() {
         "{decisions:?}"
     );
     assert!(
-        decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
         "{decisions:?}"
     );
 }
 
 #[test]
 fn strategy4_desk_pause_after_stop_does_not_fill_next_alt() {
-    let pos = Position::long("LAUSDT", d("100"), d("0.06"), Some(d("0.058")), Some(d("0.062")));
+    let pos = Position::long(
+        "LAUSDT",
+        d("100"),
+        d("0.06"),
+        Some(d("0.058")),
+        Some(d("0.062")),
+    );
     let mut snap = strategy4_ready_snap();
     snap.live_book = true;
     snap.tickers = vec![
@@ -1596,9 +1957,13 @@ fn strategy4_desk_pause_after_stop_does_not_fill_next_alt() {
     state.positions = vec![pos];
     let london = london_ts();
     let (cooled, decisions) = tick_decisions(&state, &snap, london, None, None, None, None);
-    assert!(!decisions.iter().any(is_enter), "rotated into next alt: {decisions:?}");
-    let window_end = tui_bot::sessions::window_end_ts(london, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS)
-        .expect("london window");
+    assert!(
+        !decisions.iter().any(is_enter),
+        "rotated into next alt: {decisions:?}"
+    );
+    let window_end =
+        tui_bot::sessions::window_end_ts(london, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS)
+            .expect("london window");
     assert!(
         cooled.cooldown_until >= window_end,
         "desk pause until window end {window_end}, got {}",
@@ -1618,11 +1983,22 @@ fn strategy4_always_enter_knob_opens_dead_hours() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         decisions.iter().any(is_enter),
         "{:?}",
-        decisions.iter().map(|d| d.reason().to_string()).collect::<Vec<_>>()
+        decisions
+            .iter()
+            .map(|d| d.reason().to_string())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1679,7 +2055,11 @@ fn strategy4_skips_penny_mbox() {
     ];
     attach_pullback(
         &mut snap,
-        &[("MBOXUSDT", 0.00062), ("BEATUSDT", 0.1279), ("AVAXUSDT", 100.0)],
+        &[
+            ("MBOXUSDT", 0.00062),
+            ("BEATUSDT", 0.1279),
+            ("AVAXUSDT", 100.0),
+        ],
     );
     let mom = MomentumParams {
         max_positions: 3,
@@ -1688,7 +2068,15 @@ fn strategy4_skips_penny_mbox() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| is_enter(d)
             && ["MBOXUSDT", "BEATUSDT"]
@@ -1697,7 +2085,9 @@ fn strategy4_skips_penny_mbox() {
         "{decisions:?}"
     );
     assert!(
-        decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
         "{decisions:?}"
     );
 }
@@ -1732,7 +2122,10 @@ fn strategy4_does_not_rebuy_loser_after_desk_pause() {
     };
     let t0 = dead_ts();
     let (cooled, first) = tick_decisions(&state, &snap, t0, Some(&mom), None, None, None);
-    assert!(!first.iter().any(is_enter), "desk must pause after loss: {first:?}");
+    assert!(
+        !first.iter().any(is_enter),
+        "desk must pause after loss: {first:?}"
+    );
     let eth_until = cooled.cooldowns.get("LINKUSDT").copied().unwrap_or(0.0);
     assert!(
         eth_until >= t0 + tui_bot::errors::LOSS_SYMBOL_COOLDOWN_SEC,
@@ -1757,12 +2150,23 @@ fn strategy4_does_not_rebuy_loser_after_desk_pause() {
 #[test]
 fn strategy4_stop_is_at_least_one_and_a_half_percent() {
     let snap = strategy4_ready_snap();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     let Decision::EnterLong {
         stop_loss,
         take_profit,
         ..
-    } = decisions.iter().find(|d| is_enter(d)).unwrap_or_else(|| panic!("{decisions:?}"))
+    } = decisions
+        .iter()
+        .find(|d| is_enter(d))
+        .unwrap_or_else(|| panic!("{decisions:?}"))
     else {
         panic!("{decisions:?}");
     };
@@ -1785,12 +2189,23 @@ fn strategy4_15m_stop_and_tp_are_wider_than_five_minute() {
         s4_entry_windows: Vec::new(),
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     let Decision::EnterLong {
         stop_loss,
         take_profit,
         ..
-    } = decisions.iter().find(|d| is_enter(d)).unwrap_or_else(|| panic!("{decisions:?}"))
+    } = decisions
+        .iter()
+        .find(|d| is_enter(d))
+        .unwrap_or_else(|| panic!("{decisions:?}"))
     else {
         panic!("{decisions:?}");
     };
@@ -1800,7 +2215,10 @@ fn strategy4_15m_stop_and_tp_are_wider_than_five_minute() {
         risk >= d("0.020"),
         "15m SL {stop_loss} risk {risk} must be >= 2%"
     );
-    assert!(risk <= d("0.050"), "15m SL {stop_loss} risk {risk} must be <= 5%");
+    assert!(
+        risk <= d("0.050"),
+        "15m SL {stop_loss} risk {risk} must be <= 5%"
+    );
     let r = mark - *stop_loss;
     assert!(
         *take_profit >= mark + d("2") * r,
@@ -1823,7 +2241,15 @@ fn strategy4_skips_weak_24h_change() {
         s4_max_positions: 1,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions
             .iter()
@@ -1831,17 +2257,32 @@ fn strategy4_skips_weak_24h_change() {
         "{decisions:?}"
     );
     assert!(
-        decisions.iter().any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "AVAXUSDT"),
         "{decisions:?}"
     );
 
     let mut only = MarketSnapshot::empty(d("10000"));
-    only.tickers = vec![Ticker::new("DOTUSDT", d("270.50"), d("0.446"), d("40000000"))];
+    only.tickers = vec![Ticker::new(
+        "DOTUSDT",
+        d("270.50"),
+        d("0.446"),
+        d("40000000"),
+    )];
     only.account = account();
     only.chart_symbol = "DOTUSDT".into();
     only.account_ok = true;
     attach_pullback(&mut only, &[("DOTUSDT", 270.50)]);
-    let (_, weak_only) = tick_decisions(&EngineState::new(4), &only, dead_ts(), Some(&mom), None, None, None);
+    let (_, weak_only) = tick_decisions(
+        &EngineState::new(4),
+        &only,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         !weak_only.iter().any(is_enter),
         "weak 24h DOT entered without AVAX in the book: {weak_only:?}"
@@ -1856,10 +2297,23 @@ fn strategy4_skips_24h_dump_with_5m_pullback() {
     snap.chart_symbol = "PROMUSDT".into();
     snap.account_ok = true;
     attach_pullback(&mut snap, &[("PROMUSDT", 10.0)]);
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
-    assert!(!decisions.iter().any(is_enter), "24h dump entered as pullback: {decisions:?}");
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(
-        !decisions.iter().any(|d| d.reason().contains("откат ликвид")),
+        !decisions.iter().any(is_enter),
+        "24h dump entered as pullback: {decisions:?}"
+    );
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| d.reason().contains("откат ликвид")),
         "{decisions:?}"
     );
 }
@@ -1874,7 +2328,13 @@ fn strategy4_second_slot_opens_while_first_not_green() {
         Ticker::new("LINKUSDT", d("100"), d("1.8"), d("40000000")),
     ];
     attach_pullback(&mut snap, &[("AVAXUSDT", 100.0), ("LINKUSDT", 100.0)]);
-    let mut avax = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103")));
+    let mut avax = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103")),
+    );
     avax.unrealized_pnl = Decimal::ZERO;
     avax.opened_bar_time = Some(london_ms());
     snap.open_positions = vec![avax.clone()];
@@ -1905,10 +2365,19 @@ fn strategy4_skips_bounce_in_one_hour_downtrend() {
     snap.account_ok = true;
     let seq = downtrend_then_bounce_5m_at(100.0);
     snap.bars = seq.clone();
-    snap.last_bars.insert("AVAXUSDT".into(), seq.last().cloned().unwrap());
+    snap.last_bars
+        .insert("AVAXUSDT".into(), seq.last().cloned().unwrap());
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.htf_bars.insert("AVAXUSDT".into(), htf_up_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| {
@@ -1921,7 +2390,13 @@ fn strategy4_skips_bounce_in_one_hour_downtrend() {
 
 #[test]
 fn strategy4_moves_stop_to_breakeven_at_one_r() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.5"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -1935,11 +2410,19 @@ fn strategy4_moves_stop_to_breakeven_at_one_r() {
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_reduce(d)) {
-        Some(Decision::ReduceLong { qty, stop_loss, reason, .. }) => {
+        Some(Decision::ReduceLong {
+            qty,
+            stop_loss,
+            reason,
+            ..
+        }) => {
             assert_eq!(*qty, d("0.005"));
             assert!(*stop_loss >= d("100"), "BE {stop_loss}");
             assert!(*stop_loss < d("101.5"));
-            assert!(reason.contains("частичная фиксация") && reason.contains("1R"), "{reason}");
+            assert!(
+                reason.contains("частичная фиксация") && reason.contains("1R"),
+                "{reason}"
+            );
         }
         other => panic!("{other:?} {decisions:?}"),
     }
@@ -1948,7 +2431,13 @@ fn strategy4_moves_stop_to_breakeven_at_one_r() {
 #[test]
 fn strategy4_locks_be_from_unrealized_pnl_even_if_last_is_shy() {
     // Stale uPnL at 1R while mark is 0.8R must not scale-out / flatten.
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     pos.unrealized_pnl = d("0.015");
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.2"), d("2.0"), d("50000000"))];
@@ -1984,7 +2473,13 @@ fn strategy4_locks_be_from_unrealized_pnl_even_if_last_is_shy() {
 
 #[test]
 fn strategy4_locks_be_if_post_entry_bar_high_hit_one_r() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let now = london_ts();
     let opened_ms = (now * 1000.0) as i64;
     pos.opened_bar_time = Some(opened_ms);
@@ -2011,7 +2506,8 @@ fn strategy4_locks_be_if_post_entry_bar_high_hit_one_r() {
     snap.account_ok = true;
     snap.live_book = true;
     snap.bars = vec![peak.clone(), last.clone()];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![peak, last]);
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), vec![peak, last]);
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     let mut state = EngineState::new(4);
@@ -2033,7 +2529,13 @@ fn strategy4_locks_be_if_post_entry_bar_high_hit_one_r() {
 
 #[test]
 fn strategy4_does_not_move_stop_before_one_r() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -2048,7 +2550,12 @@ fn strategy4_does_not_move_stop_before_one_r() {
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(!decisions.iter().any(is_amend), "{decisions:?}");
     assert!(!decisions.iter().any(is_reduce), "{decisions:?}");
-    assert!(!decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })), "{decisions:?}");
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
+        "{decisions:?}"
+    );
 }
 
 #[test]
@@ -2058,8 +2565,18 @@ fn strategy4_missing_universe_bars_does_not_enter() {
     snap.account = account();
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
-    snap.last_bars = [("AVAXUSDT".into(), pullback_last_at(100.0))].into_iter().collect();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    snap.last_bars = [("AVAXUSDT".into(), pullback_last_at(100.0))]
+        .into_iter()
+        .collect();
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -2068,7 +2585,15 @@ fn strategy4_skips_15m_pullback_in_4h_downtrend() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars
         .insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
     assert!(
         decisions.iter().any(|d| d.reason().contains("4ч")),
@@ -2080,7 +2605,15 @@ fn strategy4_skips_15m_pullback_in_4h_downtrend() {
 fn strategy4_missing_4h_bars_does_not_enter() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars.clear();
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(!decisions.iter().any(is_enter), "{decisions:?}");
 }
 
@@ -2114,7 +2647,9 @@ fn strategy4_trails_on_5m_low_after_breakeven() {
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_amend(d)) {
-        Some(Decision::AmendStop { stop_loss, reason, .. }) => {
+        Some(Decision::AmendStop {
+            stop_loss, reason, ..
+        }) => {
             assert_eq!(*stop_loss, d("101.2"));
             assert!(reason.contains("5м"), "{reason}");
         }
@@ -2124,7 +2659,13 @@ fn strategy4_trails_on_5m_low_after_breakeven() {
 
 #[test]
 fn strategy4_exits_when_4h_closes_below_ema20() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -2133,22 +2674,31 @@ fn strategy4_exits_when_4h_closes_below_ema20() {
     snap.live_book = true;
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
-    snap.htf_bars.insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
+    snap.htf_bars
+        .insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
     let mut state = EngineState::new(4);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })
-            && d.symbol() == "AVAXUSDT"
-            && d.reason() == "4ч сломал тренд"),
+        decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })
+                && d.symbol() == "AVAXUSDT"
+                && d.reason() == "4ч сломал тренд"),
         "{decisions:?}"
     );
 }
 
 #[test]
 fn strategy4_holds_through_missing_4h_while_above_stop() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -2163,7 +2713,9 @@ fn strategy4_holds_through_missing_4h_while_above_stop() {
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "missing 4h must not dump a long still above SL: {decisions:?}"
     );
 }
@@ -2202,7 +2754,9 @@ fn retry_timeout_stays_in_footer_during_backoff() {
     state.retry_until = now + 20.0;
     let (next, _) = tick_decisions(&state, &snap, now, None, None, None, None);
     assert!(
-        next.last_error.as_deref().is_some_and(|e| e.contains("408") || e.contains("timeout") || e.contains("timed")),
+        next.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("408") || e.contains("timeout") || e.contains("timed")),
         "retry error must remain visible during backoff: {:?}",
         next.last_error
     );
@@ -2258,12 +2812,19 @@ fn assert_s4_1r_lock_not_wait(decisions: &[Decision]) {
         "must not hold жду 1R after 1R: {decisions:?}"
     );
     let locked = decisions.iter().any(|d| match d {
-        Decision::ReduceLong { reason, .. } => reason.contains("частичная фиксация") || reason.contains("1R"),
+        Decision::ReduceLong { reason, .. } => {
+            reason.contains("частичная фиксация") || reason.contains("1R")
+        }
         Decision::AmendStop { reason, .. } => reason.contains("безубыток"),
-        Decision::ExitPosition { reason, .. } => reason.contains("1R был") || reason.contains("фиксирую"),
+        Decision::ExitPosition { reason, .. } => {
+            reason.contains("1R был") || reason.contains("фиксирую")
+        }
         _ => false,
     });
-    assert!(locked, "expected ReduceLong/AmendStop BE or Exit after 1R: {decisions:?}");
+    assert!(
+        locked,
+        "expected ReduceLong/AmendStop BE or Exit after 1R: {decisions:?}"
+    );
 }
 
 #[test]
@@ -2274,7 +2835,12 @@ fn strategy4_vvv_peak_upnl_locks_1r() {
     let (state, snap) = vvv_s4_snap(d("17.40"), pos, vec![]);
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_reduce(d)) {
-        Some(Decision::ReduceLong { qty, stop_loss, reason, .. }) => {
+        Some(Decision::ReduceLong {
+            qty,
+            stop_loss,
+            reason,
+            ..
+        }) => {
             assert_eq!(*qty, d("11.30"));
             assert!(*stop_loss >= d("17.055"), "BE {stop_loss}");
             assert!(reason.contains("частичная фиксация"), "{reason}");
@@ -2311,7 +2877,9 @@ fn strategy4_vvv_bar_high_without_opened_bar_time_locks_1r() {
         "bar-high 1R with mark below 1R must not scale-out: {decisions:?}"
     );
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "bar-high 1R with mark below 1R must not flatten: {decisions:?}"
     );
 }
@@ -2348,18 +2916,29 @@ fn strategy4_vvv_dump_after_1r_exits_instead_of_waiting() {
 
 #[test]
 fn coalesce_overlay_does_not_lower_live_stop() {
-    let live = Position::long("VVVUSDT", d("22.60"), d("17.055"), Some(d("17.068")), Some(d("17.751")));
-    let journal = Position::long("VVVUSDT", d("22.60"), d("17.055"), Some(d("16.7139")), Some(d("17.751")));
+    let live = Position::long(
+        "VVVUSDT",
+        d("22.60"),
+        d("17.055"),
+        Some(d("17.068")),
+        Some(d("17.751")),
+    );
+    let journal = Position::long(
+        "VVVUSDT",
+        d("22.60"),
+        d("17.055"),
+        Some(d("16.7139")),
+        Some(d("17.751")),
+    );
     let out = coalesce_position(Some(&live), Some(&journal)).unwrap();
     assert_eq!(out.stop_loss, Some(d("17.068")));
 }
 
-
-
-
 #[test]
 fn strategy4_book_uses_liquid_n_not_max_plus_four() {
-    use tui_bot::continuation::{liquid_universe, pick_strategy4_book, s4_setup_skip, ContinuationParams};
+    use tui_bot::continuation::{
+        liquid_universe, pick_strategy4_book, s4_setup_skip, ContinuationParams,
+    };
     use tui_bot::models::near_24h_high;
     let mut tickers = Vec::new();
     for i in 0..40 {
@@ -2384,7 +2963,11 @@ fn strategy4_book_uses_liquid_n_not_max_plus_four() {
     let uni = liquid_universe(&tickers, &[], &p);
     assert_eq!(uni.len(), 20, "liquid_n caps universe");
     let book = pick_strategy4_book(&tickers, p.liquid_n, &[], Some(&p));
-    assert!(book.len() > 7, "entry book should exceed old max_positions+4; got {}", book.len());
+    assert!(
+        book.len() > 7,
+        "entry book should exceed old max_positions+4; got {}",
+        book.len()
+    );
     assert!(book.len() <= 20);
     assert!(!book.iter().any(|t| t.symbol == "DUMPUSDT"));
     // Chase gate is s4_setup_skip / skip_new_long (near_high), not the volume book.
@@ -2507,13 +3090,23 @@ fn strategy4_htf_allows_entry_without_4h_higher_low_if_close_above_ema20() {
         s4_max_positions: 3,
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(
         decisions.iter().any(is_enter),
         "close>EMA20 without 4h HL must still enter: {decisions:?}"
     );
     assert!(
-        !decisions.iter().any(|d| d.reason().contains("4ч нет higher low")),
+        !decisions
+            .iter()
+            .any(|d| d.reason().contains("4ч нет higher low")),
         "{decisions:?}"
     );
 }
@@ -2529,7 +3122,15 @@ fn strategy4_slots_ignore_strategy1_max_positions() {
         max_positions: 1, // S1-only; must not shrink S4 to 1
         ..MomentumParams::default()
     };
-    let (_, decisions) = tick_decisions(&EngineState::new(4), &snap, dead_ts(), Some(&mom), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        dead_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
     assert!(decisions.iter().any(is_enter), "{decisions:?}");
     assert_eq!(
         tui_bot::continuation::ContinuationParams::default().max_positions,
@@ -2541,7 +3142,10 @@ fn strategy4_slots_ignore_strategy1_max_positions() {
 fn strategy4_default_s4_max_positions_is_three() {
     assert_eq!(tui_bot::config::DEFAULT_S4_MAX_POSITIONS, 3);
     assert_eq!(MomentumParams::default().s4_max_positions, 3);
-    assert_eq!(tui_bot::continuation::ContinuationParams::default().max_positions, 3);
+    assert_eq!(
+        tui_bot::continuation::ContinuationParams::default().max_positions,
+        3
+    );
 }
 
 #[test]
@@ -2595,7 +3199,10 @@ fn skip_no_uptrend_hour1_requires_ema20_rising() {
     let prior_ema = ema_series(&prior, 20);
     let e1 = prior_ema.last().copied().flatten().unwrap();
     let e0 = prior_ema[prior_ema.len() - 2].unwrap();
-    assert!(e1 <= e0, "fixture prior EMA must not be rising: {e1} vs {e0}");
+    assert!(
+        e1 <= e0,
+        "fixture prior EMA must not be rising: {e1} vs {e0}"
+    );
     snap.universe_bars.insert("AVAXUSDT".into(), bars.clone());
     snap.bars = bars.clone();
     snap.last_bars
@@ -2603,7 +3210,8 @@ fn skip_no_uptrend_hour1_requires_ema20_rising() {
     let p = ContinuationParams::default().with_interval(TradeInterval::Hour1);
     let skip = skip_no_uptrend(&snap, "AVAXUSDT", &p);
     assert!(
-        skip.as_deref().is_some_and(|s| s.contains("EMA20") && s.contains("растёт")),
+        skip.as_deref()
+            .is_some_and(|s| s.contains("EMA20") && s.contains("растёт")),
         "Hour1 must skip when EMA20 is not rising into the signal bar: {skip:?}"
     );
     let p4 = ContinuationParams::default();
@@ -2653,15 +3261,17 @@ fn skip_no_htf_trend_only_requires_close_above_ema20() {
     );
 }
 
-
-
-
 #[test]
 fn strategy4_banks_at_1_5r_after_be() {
     let be = d("100.08");
     let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(be), Some(d("103.1")));
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![Ticker::new("AVAXUSDT", d("102.40"), d("2.0"), d("50000000"))];
+    snap.tickers = vec![Ticker::new(
+        "AVAXUSDT",
+        d("102.40"),
+        d("2.0"),
+        d("50000000"),
+    )];
     snap.account = account();
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
@@ -2684,10 +3294,21 @@ fn strategy4_banks_at_1_5r_after_be() {
 #[test]
 fn strategy4_banks_at_1_5r_while_still_pre_be() {
     // Scale-first: even at ≥1.5R on first touch, ReduceLong half + BE; remainder banks next tick.
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     pos.opened_bar_time = Some(london_ms());
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![Ticker::new("AVAXUSDT", d("102.40"), d("2.0"), d("50000000"))];
+    snap.tickers = vec![Ticker::new(
+        "AVAXUSDT",
+        d("102.40"),
+        d("2.0"),
+        d("50000000"),
+    )];
     snap.account = account();
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
@@ -2701,7 +3322,10 @@ fn strategy4_banks_at_1_5r_while_still_pre_be() {
     match decisions.iter().find(|d| is_reduce(d)) {
         Some(Decision::ReduceLong { qty, reason, .. }) => {
             assert_eq!(*qty, d("0.005"));
-            assert!(reason.contains("частичная фиксация") && reason.contains("1R"), "{reason}");
+            assert!(
+                reason.contains("частичная фиксация") && reason.contains("1R"),
+                "{reason}"
+            );
         }
         other => panic!("expected scale-out at first 1.5R touch, got {other:?} {decisions:?}"),
     }
@@ -2747,10 +3371,15 @@ fn strategy4_post_be_1_5r_locks_half_r_after_giveback() {
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     match decisions.iter().find(|d| is_amend(d)) {
-        Some(Decision::AmendStop { stop_loss, reason, .. }) => {
+        Some(Decision::AmendStop {
+            stop_loss, reason, ..
+        }) => {
             assert!(reason.contains("замок 0.5R"), "{reason}");
             assert!(*stop_loss > be && *stop_loss < d("101.0"));
-            assert!(*stop_loss > d("100.5") && *stop_loss < d("101.0"), "{stop_loss}");
+            assert!(
+                *stop_loss > d("100.5") && *stop_loss < d("101.0"),
+                "{stop_loss}"
+            );
         }
         other => panic!("expected 0.5R lock, got {other:?} {decisions:?}"),
     }
@@ -2772,7 +3401,12 @@ fn strategy4_post_be_1_5r_exits_when_mark_below_lock() {
         volume: d("10"),
     };
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.40"), d("2.0"), d("50000000"))];
+    snap.tickers = vec![Ticker::new(
+        "AVAXUSDT",
+        d("100.40"),
+        d("2.0"),
+        d("50000000"),
+    )];
     snap.account = account();
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
@@ -2795,7 +3429,13 @@ fn strategy4_post_be_1_5r_exits_when_mark_below_lock() {
 
 #[test]
 fn strategy4_pre_1r_peak_pullback_exits() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let now = london_ts();
     let opened_ms = (now * 1000.0) as i64;
     pos.opened_bar_time = Some(opened_ms);
@@ -2808,7 +3448,12 @@ fn strategy4_pre_1r_peak_pullback_exits() {
         volume: d("10"),
     };
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.20"), d("2.0"), d("50000000"))];
+    snap.tickers = vec![Ticker::new(
+        "AVAXUSDT",
+        d("100.20"),
+        d("2.0"),
+        d("50000000"),
+    )];
     snap.account = account();
     snap.chart_symbol = "AVAXUSDT".into();
     snap.account_ok = true;
@@ -2831,7 +3476,13 @@ fn strategy4_pre_1r_peak_pullback_exits() {
 
 #[test]
 fn strategy4_time_stop_exits_after_four_hours() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let now = london_ts();
     pos.opened_bar_time = Some(((now - 14_401.0) * 1000.0) as i64);
     let mut snap = MarketSnapshot::empty(d("10000"));
@@ -2856,7 +3507,13 @@ fn strategy4_time_stop_exits_after_four_hours() {
 
 #[test]
 fn strategy4_session_end_exits_open_long_outside_window() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -2904,15 +3561,15 @@ fn strategy4_excludes_majors_from_liquid_universe() {
     let p = ContinuationParams::default();
     let uni = liquid_universe(&tickers, &[], &p);
     assert_eq!(uni.len(), 20);
-    for maj in ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "BCHUSDT"] {
+    for maj in [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "BCHUSDT",
+    ] {
         assert!(
             !uni.iter().any(|t| t.symbol == maj),
             "{maj} must be excluded from S4 liquid_universe"
         );
     }
 }
-
-
 
 #[test]
 fn strategy4_mark_trail_raises_sl_tighter_than_bar_low() {
@@ -2943,9 +3600,17 @@ fn strategy4_mark_trail_raises_sl_tighter_than_bar_low() {
     state.position = Some(pos.clone());
     state.positions = vec![pos];
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
-    match decisions.iter().find(|d| matches!(d, Decision::AmendStop { .. })) {
-        Some(Decision::AmendStop { stop_loss, reason, .. }) => {
-            assert!(*stop_loss > d("101.0"), "mark trail must beat bar low: {stop_loss}");
+    match decisions
+        .iter()
+        .find(|d| matches!(d, Decision::AmendStop { .. }))
+    {
+        Some(Decision::AmendStop {
+            stop_loss, reason, ..
+        }) => {
+            assert!(
+                *stop_loss > d("101.0"),
+                "mark trail must beat bar low: {stop_loss}"
+            );
             assert!(reason.contains("trail mark"), "{reason}");
         }
         other => panic!("expected mark trail AmendStop, got {other:?} {decisions:?}"),
@@ -2975,7 +3640,6 @@ fn strategy4_reduce_at_1r_latches_once_after_be() {
     );
 }
 
-
 #[test]
 fn strategy4_scaled_latch_blocks_second_reduce() {
     // sl still below entry (BE not on book yet) but latch set → no second ReduceLong.
@@ -2999,7 +3663,10 @@ fn strategy4_scaled_latch_blocks_second_reduce() {
     state.positions = vec![pos];
     state.scaled_one_r.insert("AVAXUSDT".into());
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
-    assert!(!decisions.iter().any(is_reduce), "latched must not Reduce again: {decisions:?}");
+    assert!(
+        !decisions.iter().any(is_reduce),
+        "latched must not Reduce again: {decisions:?}"
+    );
     let be_or_exit = decisions.iter().any(|d| match d {
         Decision::AmendStop { reason, .. } => reason.contains("безубыток"),
         Decision::ExitPosition { reason, .. } => {
@@ -3007,7 +3674,10 @@ fn strategy4_scaled_latch_blocks_second_reduce() {
         }
         _ => false,
     });
-    assert!(be_or_exit, "expected BE amend or exit after latch: {decisions:?}");
+    assert!(
+        be_or_exit,
+        "expected BE amend or exit after latch: {decisions:?}"
+    );
 }
 
 #[test]
@@ -3039,18 +3709,25 @@ fn strategy4_post_scale_15r_exits_remainder() {
     state.scaled_one_r.insert("AVAXUSDT".into());
     let (_, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R"))),
+        decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R"))),
         "post-scale 1.5R must exit remainder: {decisions:?}"
     );
     assert!(!decisions.iter().any(is_reduce), "{decisions:?}");
 }
 
-
 #[test]
 fn strategy4_scaled_one_r_latches_reduce() {
     // Explicit latch: even with SL still below entry, scaled_one_r skips ReduceLong
     // and falls through to BE AmendStop.
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.5"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -3076,7 +3753,13 @@ fn strategy4_scaled_one_r_latches_reduce() {
 #[test]
 fn reduce_long_decision_latches_scaled_without_apply() {
     // tick_decisions alone must latch scaled_one_r so a skipped apply cannot re-Reduce.
-    let pos = Position::long("AVAXUSDT", d("0.02"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.02"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.5"), d("2.0"), d("50000000"))];
     snap.account_ok = true;
@@ -3088,7 +3771,9 @@ fn reduce_long_decision_latches_scaled_without_apply() {
     state.positions = vec![pos];
     let (filled, decisions) = tick_decisions(&state, &snap, london_ts(), None, None, None, None);
     assert!(
-        decisions.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
+        decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ReduceLong { .. })),
         "expected ReduceLong: {decisions:?}"
     );
     assert!(
@@ -3099,7 +3784,9 @@ fn reduce_long_decision_latches_scaled_without_apply() {
     // Second tick with same pre-BE book: AmendStop BE, not another ReduceLong.
     let (_, again) = tick_decisions(&filled, &snap, london_ts() + 60.0, None, None, None, None);
     assert!(
-        !again.iter().any(|d| matches!(d, Decision::ReduceLong { .. })),
+        !again
+            .iter()
+            .any(|d| matches!(d, Decision::ReduceLong { .. })),
         "latched second tick must not ReduceLong: {again:?}"
     );
     let be_or_exit = again.iter().any(|d| match d {
@@ -3107,14 +3794,18 @@ fn reduce_long_decision_latches_scaled_without_apply() {
         Decision::ExitPosition { .. } => true,
         _ => false,
     });
-    assert!(be_or_exit, "expected BE amend or exit after latch: {again:?}");
+    assert!(
+        be_or_exit,
+        "expected BE amend or exit after latch: {again:?}"
+    );
 }
-
 
 #[test]
 fn strategy5_verify_name_and_1h_interval() {
     use tui_bot::config::TradeInterval;
-    use tui_bot::engine::{continuation_interval, is_continuation, select_strategy, strategy_title};
+    use tui_bot::engine::{
+        continuation_interval, is_continuation, select_strategy, strategy_title,
+    };
     assert!(is_continuation(4));
     assert!(is_continuation(5));
     assert!(!is_continuation(1));
@@ -3131,21 +3822,37 @@ fn strategy5_verify_name_and_1h_interval() {
     );
 }
 
-
 #[test]
 fn strategy5_uses_hour1_stop_band() {
     use tui_bot::config::TradeInterval;
-    use tui_bot::engine::{continuation_interval, continuation_slot_cap, continuation_stop_band, continuation_trade_params};
-    assert_eq!(continuation_interval(5, TradeInterval::Minute15), TradeInterval::Hour1);
-    assert_eq!(continuation_stop_band(5, TradeInterval::Minute15), TradeInterval::Hour1);
+    use tui_bot::engine::{
+        continuation_interval, continuation_slot_cap, continuation_stop_band,
+        continuation_trade_params,
+    };
+    assert_eq!(
+        continuation_interval(5, TradeInterval::Minute15),
+        TradeInterval::Hour1
+    );
+    assert_eq!(
+        continuation_stop_band(5, TradeInterval::Minute15),
+        TradeInterval::Hour1
+    );
     let p = continuation_trade_params(5, TradeInterval::Minute15);
     assert_eq!(p.interval, TradeInterval::Hour1);
     assert_eq!(p.min_stop_pct, Decimal::new(30, 3), "S5 Hour1 SL floor 3%");
     assert_eq!(p.max_stop_pct, Decimal::new(80, 3), "S5 Hour1 SL cap 8%");
-    assert_eq!(p.min_pullback_pct, Decimal::new(15, 3), "S5 Hour1 pullback 1.5%");
+    assert_eq!(
+        p.min_pullback_pct,
+        Decimal::new(15, 3),
+        "S5 Hour1 pullback 1.5%"
+    );
     assert_eq!(p.liquid_n, 20, "S5 liquid_n stays 20");
     assert_eq!(p.near_high_frac, Decimal::new(3, 2), "S5 near-high 3%");
-    assert_eq!(p.min_quote_volume, Decimal::from(100_000), "S5 Hour1 vol floor one step");
+    assert_eq!(
+        p.min_quote_volume,
+        Decimal::from(100_000),
+        "S5 Hour1 vol floor one step"
+    );
     assert_eq!(p.stop_lookback, 2, "S5 Hour1 structure lookback 2");
     assert_eq!(p.atr_k, Decimal::from(2), "S5 Hour1 ATR stop 2×");
     assert_eq!(p.bank_r, Decimal::from(2), "S5 Exit A 2R");
@@ -3158,7 +3865,11 @@ fn strategy5_uses_hour1_stop_band() {
     assert_eq!(p4.interval, TradeInterval::Minute15);
     assert_eq!(p4.min_stop_pct, TradeInterval::Minute15.min_stop_pct());
     assert_eq!(p4.near_high_frac, Decimal::new(5, 2), "S4 soak stays 5%");
-    assert_eq!(p4.min_quote_volume, Decimal::from(50_000), "S4 soak stays 50k");
+    assert_eq!(
+        p4.min_quote_volume,
+        Decimal::from(50_000),
+        "S4 soak stays 50k"
+    );
     assert_eq!(p4.stop_lookback, 3, "S4 soak stays lookback 3");
     assert_eq!(p4.atr_k, Decimal::from(2), "S4 soak stays 2×ATR");
     assert_eq!(p4.bank_r, Decimal::new(15, 1), "S4 soak stays 1.5R bank");
@@ -3191,20 +3902,33 @@ fn strategy5_allows_4pct_off_24h_high_s4_skips() {
     // last=100, high=104.2 → ~4% off high: outside S5 3% skip, inside S4 5% skip.
     let mut snap = strategy4_ready_snap();
     snap.tickers[0].high_price = d("104.2");
-    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         s5.iter().any(is_enter),
         "S5 3% near-high must allow 4% off high: {s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, s4) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(
         !s4.iter().any(is_enter),
         "S4 5% near-high must skip 4% off high: {s4:?}"
     );
-    assert!(
-        s4.iter().any(|d| d.reason().contains("24h high")),
-        "{s4:?}"
-    );
+    assert!(s4.iter().any(|d| d.reason().contains("24h high")), "{s4:?}");
 }
 
 #[test]
@@ -3223,8 +3947,19 @@ fn strategy5_skips_1h_pullback_in_4h_downtrend() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars
         .insert("AVAXUSDT".into(), htf_down_4h_at(100.0));
-    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
-    assert!(!decisions.iter().any(is_enter), "S5 must keep 4h close>EMA20: {decisions:?}");
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !decisions.iter().any(is_enter),
+        "S5 must keep 4h close>EMA20: {decisions:?}"
+    );
     assert!(
         decisions.iter().any(|d| d.reason().contains("4ч")),
         "S5 4h skip must name 4ч: {decisions:?}"
@@ -3235,7 +3970,15 @@ fn strategy5_skips_1h_pullback_in_4h_downtrend() {
 fn strategy5_missing_4h_bars_does_not_enter() {
     let mut snap = strategy4_ready_snap();
     snap.htf_bars.clear();
-    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(is_enter),
         "S5 must skip when 4h history is missing: {decisions:?}"
@@ -3246,7 +3989,15 @@ fn strategy5_missing_4h_bars_does_not_enter() {
 fn strategy5_skips_first_three_minutes_of_hour() {
     let snap = strategy4_ready_snap();
     let open = tui_bot::sessions::make_utc_ts(2026, 8, 17, 7, 1, 0);
-    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, open, Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        open,
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not enter in the first 3 min of the 1h bar: {s5:?}"
@@ -3276,7 +4027,8 @@ fn strategy5_enter_path_shares_continuation_core() {
         ..MomentumParams::default()
     };
     let now = london_ts();
-    let (new_state, decisions) = tick_decisions(&state, &snap, now, Some(&params), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, now, Some(&params), None, None, None);
     assert!(
         decisions.iter().any(|d| matches!(
             d,
@@ -3296,7 +4048,15 @@ fn strategy5_skips_live_privacy_cluster() {
     snap.chart_symbol = "ZECUSDT".into();
     snap.account_ok = true;
     attach_pullback(&mut snap, &[("ZECUSDT", 100.0)]);
-    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !s5.iter().any(is_enter),
         "S5 must skip ZEC privacy cluster: {s5:?}"
@@ -3306,7 +4066,15 @@ fn strategy5_skips_live_privacy_cluster() {
             .any(|d| d.reason().contains("privacy") || d.reason().contains("кластер")),
         "{s5:?}"
     );
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, london_ts(), None, None, None, None);
+    let (_, s4) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        london_ts(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(
         !s4.iter().any(is_enter),
         "S4 must skip ZEC privacy cluster too: {s4:?}"
@@ -3322,8 +4090,20 @@ fn strategy5_skips_live_privacy_cluster() {
 fn strategy5_caps_same_1h_move_at_two() {
     // Cluster cap without a coin skip: 2 open Hour1 names on the same green 1h
     // impulse block a 3rd. S4 soak may still fill the slot. Cap is 2, not 1.
-    let avax = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("97")), Some(d("106")));
-    let near = Position::long("NEARUSDT", d("0.01"), d("100"), Some(d("97")), Some(d("106")));
+    let avax = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
+    let near = Position::long(
+        "NEARUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![
         Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000")),
@@ -3336,14 +4116,26 @@ fn strategy5_caps_same_1h_move_at_two() {
     snap.live_book = true;
     attach_pullback(
         &mut snap,
-        &[("AVAXUSDT", 100.4), ("NEARUSDT", 100.4), ("LINKUSDT", 100.0)],
+        &[
+            ("AVAXUSDT", 100.4),
+            ("NEARUSDT", 100.4),
+            ("LINKUSDT", 100.0),
+        ],
     );
     snap.open_positions = vec![avax.clone(), near.clone()];
     snap.position = Some(avax.clone());
     let mut state = EngineState::new(5);
     state.positions = vec![avax.clone(), near.clone()];
     state.position = Some(avax.clone());
-    let (_, s5) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not open a 3rd name on the same 1h move: {s5:?}"
@@ -3368,7 +4160,15 @@ fn strategy5_caps_same_1h_move_at_two() {
     let mut one_held = EngineState::new(5);
     one_held.positions = vec![avax.clone()];
     one_held.position = Some(avax);
-    let (_, second) = tick_decisions(&one_held, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, second) = tick_decisions(
+        &one_held,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         second.iter().any(is_enter),
         "S5 must still open a 2nd name on the same 1h move: {second:?}"
@@ -3427,13 +4227,23 @@ fn strategy5_daily_halt_blocks_enter_keeps_trail() {
     state.daily_halt = true;
     state.day_utc = "2026-08-17".into();
     state.day_start_equity = Some(d("10000"));
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(is_enter),
         "S5 must not enter under DAILY_LOSS halt: {decisions:?}"
     );
     assert!(
-        decisions.iter().any(|d| d.reason().contains("стоп дня") || is_hold(d)),
+        decisions
+            .iter()
+            .any(|d| d.reason().contains("стоп дня") || is_hold(d)),
         "S5 halt should hold new entries: {decisions:?}"
     );
 
@@ -3464,19 +4274,31 @@ fn strategy5_daily_halt_blocks_enter_keeps_trail() {
     manage.open_positions = vec![pos.clone()];
     manage.position = Some(pos.clone());
     manage.bars = vec![closed.clone(), forming.clone()];
-    manage.universe_bars.insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
+    manage
+        .universe_bars
+        .insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
     manage.last_bars = [("AVAXUSDT".into(), forming)].into_iter().collect();
     let mut held = EngineState::new(5);
     held.daily_halt = true;
     held.position = Some(pos.clone());
     held.positions = vec![pos];
-    let (_, manage_d) = tick_decisions(&held, &manage, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, manage_d) = tick_decisions(
+        &held,
+        &manage,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !manage_d.iter().any(is_enter),
         "halt must not add a second S5 long: {manage_d:?}"
     );
     assert!(
-        manage_d.iter().any(|d| is_amend(d) || is_hold(d) || matches!(d, Decision::ExitPosition { .. })),
+        manage_d
+            .iter()
+            .any(|d| is_amend(d) || is_hold(d) || matches!(d, Decision::ExitPosition { .. })),
         "S5 flatten/trail must keep running under halt: {manage_d:?}"
     );
 }
@@ -3491,14 +4313,24 @@ fn strategy5_daily_loss_usdt_trips_halt() {
     state.day_start_equity = Some(d("10000"));
     let mut mom = s5_params();
     mom.daily_loss_usdt = d("20");
-    let (new_state, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    let (new_state, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
     assert!(new_state.daily_halt, "S5 must trip DAILY_LOSS_USDT");
-    assert!(!decisions.iter().any(is_enter), "S5 halt must block enter: {decisions:?}");
+    assert!(
+        !decisions.iter().any(is_enter),
+        "S5 halt must block enter: {decisions:?}"
+    );
 }
 
 #[test]
 fn strategy5_slot_cap_honors_one() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("97")), Some(d("106")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![
         Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000")),
@@ -3516,7 +4348,8 @@ fn strategy5_slot_cap_honors_one() {
     state.positions = vec![pos];
     let mut params = s5_params();
     params.s5_max_positions = 1;
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&params), None, None, None);
+    let (_, decisions) =
+        tick_decisions(&state, &snap, london_ts(), Some(&params), None, None, None);
     assert!(
         !decisions.iter().any(is_enter),
         "STRATEGY5_MAX_POSITIONS=1 must not open a second slot: {decisions:?}"
@@ -3549,7 +4382,10 @@ fn strategy5_loss_cools_symbol_twelve_hours() {
         "S5 net-red scratch must 12h-cool, got {until} vs t0 {t0}"
     );
     let plus_13h = t0 + 13.0 * 3600.0;
-    assert!(until <= plus_13h, "S5 cooldown is 12h not 24h: until={until}");
+    assert!(
+        until <= plus_13h,
+        "S5 cooldown is 12h not 24h: until={until}"
+    );
 }
 
 #[test]
@@ -3566,23 +4402,44 @@ fn strategy5_inherits_s4_always_enter() {
     let mom = s5_params();
     let night = tui_bot::sessions::make_utc_ts(2026, 9, 6, 21, 0, 0);
     for ts in [dead_ts(), night] {
-        let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, ts, Some(&mom), None, None, None);
+        let (_, decisions) = tick_decisions(
+            &EngineState::new(5),
+            &snap,
+            ts,
+            Some(&mom),
+            None,
+            None,
+            None,
+        );
         assert!(
             decisions.iter().any(is_enter),
             "S5 24/7 from STRATEGY4_ALWAYS_ENTER: {decisions:?}"
         );
     }
-    let (_, s4) = tick_decisions(&EngineState::new(4), &snap, night, Some(&mom), None, None, None);
-    assert!(
-        s4.iter().any(is_enter),
-        "S4 24/7 soak must stay on: {s4:?}"
+    let (_, s4) = tick_decisions(
+        &EngineState::new(4),
+        &snap,
+        night,
+        Some(&mom),
+        None,
+        None,
+        None,
     );
+    assert!(s4.iter().any(is_enter), "S4 24/7 soak must stay on: {s4:?}");
 }
 
 #[test]
 fn strategy5_enters_in_session_windows_when_s4_is_24_7() {
     let snap = strategy4_ready_snap();
-    let (_, decisions) = tick_decisions(&EngineState::new(5), &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         decisions.iter().any(is_enter),
         "S5 must still enter in UTC session windows: {decisions:?}"
@@ -3614,7 +4471,15 @@ fn strategy5_pullback_resume_ignores_forming_wick() {
     snap.bars = seq.clone();
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.last_bars.insert("AVAXUSDT".into(), forming);
-    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, now, Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        now,
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         s5.iter().any(|d| matches!(
             d, Decision::EnterLong { symbol, .. } if symbol == "AVAXUSDT"
@@ -3650,7 +4515,15 @@ fn strategy5_does_not_enter_on_forming_1h_bar() {
     snap.bars = seq.clone();
     snap.universe_bars.insert("AVAXUSDT".into(), seq);
     snap.last_bars.insert("AVAXUSDT".into(), forming);
-    let (_, s5) = tick_decisions(&EngineState::new(5), &snap, now, Some(&s5_params()), None, None, None);
+    let (_, s5) = tick_decisions(
+        &EngineState::new(5),
+        &snap,
+        now,
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !s5.iter().any(is_enter),
         "S5 must not enter on a forming 1h bar: {s5:?}"
@@ -3664,7 +4537,13 @@ fn strategy5_does_not_enter_on_forming_1h_bar() {
 
 #[test]
 fn strategy5_session_end_does_not_flatten_open_long() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("96.5")), Some(d("107")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("96.5")),
+        Some(d("107")),
+    );
     pos.opened_bar_time = Some(london_ms());
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
@@ -3690,7 +4569,13 @@ fn strategy5_session_end_does_not_flatten_open_long() {
 
 #[test]
 fn strategy5_does_not_time_stop_at_four_hours() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("96.5")), Some(d("107")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("96.5")),
+        Some(d("107")),
+    );
     let now = london_ts();
     pos.opened_bar_time = Some(((now - 14_401.0) * 1000.0) as i64);
     let mut snap = MarketSnapshot::empty(d("10000"));
@@ -3715,7 +4600,13 @@ fn strategy5_does_not_time_stop_at_four_hours() {
 
 #[test]
 fn strategy5_does_not_time_stop_at_eleven_hours() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("96.5")), Some(d("107")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("96.5")),
+        Some(d("107")),
+    );
     let now = london_ts();
     pos.opened_bar_time = Some(((now - 11.0 * 3600.0) * 1000.0) as i64);
     let mut snap = MarketSnapshot::empty(d("10000"));
@@ -3740,7 +4631,13 @@ fn strategy5_does_not_time_stop_at_eleven_hours() {
 
 #[test]
 fn strategy5_time_stop_after_twelve_hours() {
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("96.5")), Some(d("107")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("96.5")),
+        Some(d("107")),
+    );
     let now = london_ts();
     pos.opened_bar_time = Some(((now - 12.0 * 3600.0 - 1.0) * 1000.0) as i64);
     let mut snap = MarketSnapshot::empty(d("10000"));
@@ -3810,9 +4707,19 @@ fn strategy5_ignores_stale_1h_history_as_one_r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "stale 1h highs must not fire 1R flatten: {decisions:?}"
     );
 }
@@ -3867,14 +4774,24 @@ fn strategy5_adopt_keeps_opened_bar_time_so_1r_scan_is_not_the_book() {
     let mut state = EngineState::new(5);
     state.position = Some(remembered.clone());
     state.positions = vec![remembered];
-    let (out, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (out, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert_eq!(
         out.positions[0].opened_bar_time,
         Some(opened),
         "adopt must keep opened_bar_time: {decisions:?}"
     );
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "adopted opened_bar_time must bound 1R scan: {decisions:?}"
     );
 }
@@ -3883,7 +4800,13 @@ fn strategy5_adopt_keeps_opened_bar_time_so_1r_scan_is_not_the_book() {
 fn strategy5_adopt_does_not_hour1_trail_inherited_s4() {
     // 4→5 adopt: inherited long already at BE. Closed 1h low is far above mark —
     // Hour1 would trail to that low; S4 soak 0.8% mark trail would not. Keep S4 geometry.
-    let mut pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("100.05")), Some(d("106")));
+    let mut pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("100.05")),
+        Some(d("106")),
+    );
     pos.opened_bar_time = Some(london_ms());
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("100.4"), d("2.0"), d("50000000"))];
@@ -3919,7 +4842,8 @@ fn strategy5_adopt_does_not_hour1_trail_inherited_s4() {
             volume: d("20"),
         },
     ];
-    snap.universe_bars.insert("AVAXUSDT".into(), snap.bars.clone());
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), snap.bars.clone());
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     let mut state = EngineState::new(4);
@@ -3927,12 +4851,22 @@ fn strategy5_adopt_does_not_hour1_trail_inherited_s4() {
     state.positions = vec![pos];
     state.adopt_strategy(5);
     assert!(state.s4_inherited.contains("AVAXUSDT"));
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     let floor = d("101.4");
-    let hour1_trail = decisions.iter().any(|dec| matches!(
-        dec,
-        Decision::AmendStop { stop_loss, .. } if *stop_loss >= floor
-    ));
+    let hour1_trail = decisions.iter().any(|dec| {
+        matches!(
+            dec,
+            Decision::AmendStop { stop_loss, .. } if *stop_loss >= floor
+        )
+    });
     assert!(
         !hour1_trail,
         "inherited S4 slot must not Hour1-trail to the 1h low: {decisions:?}"
@@ -3989,7 +4923,15 @@ fn strategy5_stale_peak_does_not_flatten_pullback() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| matches!(
             d,
@@ -3998,7 +4940,9 @@ fn strategy5_stale_peak_does_not_flatten_pullback() {
         "stale 0.8R highs must not flatten pullback: {decisions:?}"
     );
     assert!(
-        !decisions.iter().any(|d| matches!(d, Decision::ExitPosition { .. })),
+        !decisions
+            .iter()
+            .any(|d| matches!(d, Decision::ExitPosition { .. })),
         "stale 1h peak must not exit restored S5 long: {decisions:?}"
     );
 }
@@ -4034,13 +4978,22 @@ fn strategy5_1r_not_in_hand_does_not_flatten_or_scale() {
     snap.account_ok = true;
     snap.live_book = true;
     snap.bars = vec![wick.clone(), last.clone()];
-    snap.universe_bars.insert("ZECUSDT".into(), vec![wick, last]);
+    snap.universe_bars
+        .insert("ZECUSDT".into(), vec![wick, last]);
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(is_reduce),
         "S5 must not scale-out when mark < 1R: {decisions:?}"
@@ -4065,7 +5018,13 @@ fn strategy5_1r_not_in_hand_does_not_flatten_or_scale() {
 #[test]
 fn strategy5_does_not_be_at_half_r() {
     // BE@0.5R lost cache pnl to BE@1R (s5-be-0.5-keep-or-revert). Hour1 waits for 1R.
-    let pos = Position::long("DASHUSDT", d("0.1"), d("100"), Some(d("97")), Some(d("106")));
+    let pos = Position::long(
+        "DASHUSDT",
+        d("0.1"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("DASHUSDT", d("101.6"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -4077,7 +5036,15 @@ fn strategy5_does_not_be_at_half_r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("безубыток")
@@ -4088,7 +5055,13 @@ fn strategy5_does_not_be_at_half_r() {
 
 #[test]
 fn strategy4_does_not_be_at_half_r() {
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("98.5")), Some(d("103.1")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("98.5")),
+        Some(d("103.1")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("101.0"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -4112,7 +5085,13 @@ fn strategy4_does_not_be_at_half_r() {
 #[test]
 fn strategy5_does_not_bank_at_1_5r_before_2r() {
     // risk=3 → 1.5R=104.5, 2R=106. S5 must BE at 1.6R, not flatten like S4 1.5R bank.
-    let pos = Position::long("AVAXUSDT", d("0.1"), d("100"), Some(d("97")), Some(d("106")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.1"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("104.6"), d("2.0"), d("50000000"))];
     snap.account = account();
@@ -4124,7 +5103,15 @@ fn strategy5_does_not_bank_at_1_5r_before_2r() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::ExitPosition { reason, .. } if reason.contains("1.5R")
@@ -4133,7 +5120,10 @@ fn strategy5_does_not_bank_at_1_5r_before_2r() {
     );
     match decisions.iter().find(|d| is_amend(d)) {
         Some(Decision::AmendStop { reason, .. }) => {
-            assert!(reason.contains("безубыток") && reason.contains("1R"), "{reason}");
+            assert!(
+                reason.contains("безубыток") && reason.contains("1R"),
+                "{reason}"
+            );
         }
         other => panic!("expected S5 BE at 1.6R before 2R bank, got {other:?} {decisions:?}"),
     }
@@ -4153,14 +5143,27 @@ fn strategy5_full_position_be_at_one_r_no_scale_out() {
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(is_reduce),
         "Hour1 must not 50% scale-out: {decisions:?}"
     );
     match decisions.iter().find(|d| is_amend(d)) {
-        Some(Decision::AmendStop { stop_loss, reason, .. }) => {
-            assert!(reason.contains("безубыток") && reason.contains("1R"), "{reason}");
+        Some(Decision::AmendStop {
+            stop_loss, reason, ..
+        }) => {
+            assert!(
+                reason.contains("безубыток") && reason.contains("1R"),
+                "{reason}"
+            );
             assert!(*stop_loss > d("100"), "BE must be fee-padded: {stop_loss}");
             assert!(*stop_loss < d("103.1"), "{stop_loss}");
         }
@@ -4171,7 +5174,13 @@ fn strategy5_full_position_be_at_one_r_no_scale_out() {
 #[test]
 fn strategy5_does_not_trail_closed_low_before_be() {
     // risk=3, mark 0.4R, closed 1h low 99 > SL 97. Must hold, not trail to 99.
-    let pos = Position::long("AVAXUSDT", d("0.01"), d("100"), Some(d("97")), Some(d("106")));
+    let pos = Position::long(
+        "AVAXUSDT",
+        d("0.01"),
+        d("100"),
+        Some(d("97")),
+        Some(d("106")),
+    );
     let closed = Bar {
         open_time: london_ms() - 3_600_000,
         open: d("99.2"),
@@ -4197,12 +5206,21 @@ fn strategy5_does_not_trail_closed_low_before_be() {
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     snap.bars = vec![closed.clone(), forming.clone()];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
     snap.last_bars = [("AVAXUSDT".into(), forming)].into_iter().collect();
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !decisions.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("trail")
@@ -4244,14 +5262,28 @@ fn strategy5_trails_1h_bar_low_not_mark_pct() {
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     snap.bars = vec![closed.clone(), forming.clone()];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
     snap.last_bars = [("AVAXUSDT".into(), forming)].into_iter().collect();
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
-    match decisions.iter().find(|d| matches!(d, Decision::AmendStop { .. })) {
-        Some(Decision::AmendStop { stop_loss, reason, .. }) => {
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
+    match decisions
+        .iter()
+        .find(|d| matches!(d, Decision::AmendStop { .. }))
+    {
+        Some(Decision::AmendStop {
+            stop_loss, reason, ..
+        }) => {
             assert_eq!(
                 *stop_loss,
                 d("101.0"),
@@ -4293,12 +5325,21 @@ fn strategy5_trails_once_per_closed_1h_bar() {
     snap.open_positions = vec![pos.clone()];
     snap.position = Some(pos.clone());
     snap.bars = vec![closed.clone(), forming.clone()];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
+    snap.universe_bars
+        .insert("AVAXUSDT".into(), vec![closed, forming.clone()]);
     snap.last_bars = [("AVAXUSDT".into(), forming)].into_iter().collect();
     let mut state = EngineState::new(5);
     state.position = Some(pos.clone());
     state.positions = vec![pos];
-    let (state, first) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (state, first) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         first.iter().any(|d| matches!(
             d, Decision::AmendStop { reason, .. } if reason.contains("1ч")
@@ -4320,14 +5361,24 @@ fn strategy5_trails_once_per_closed_1h_bar() {
         volume: d("20"),
     };
     snap.tickers = vec![Ticker::new("AVAXUSDT", d("104.8"), d("2.0"), d("50000000"))];
-    snap.last_bars = [("AVAXUSDT".into(), forming2.clone())].into_iter().collect();
+    snap.last_bars = [("AVAXUSDT".into(), forming2.clone())]
+        .into_iter()
+        .collect();
     if let Some(bars) = snap.universe_bars.get_mut("AVAXUSDT") {
         if let Some(last) = bars.last_mut() {
             *last = forming2.clone();
         }
     }
     snap.bars.last_mut().map(|b| *b = forming2);
-    let (_, second) = tick_decisions(&state, &snap, london_ts() + 60.0, Some(&s5_params()), None, None, None);
+    let (_, second) = tick_decisions(
+        &state,
+        &snap,
+        london_ts() + 60.0,
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         !second.iter().any(is_amend),
         "Hour1 must not trail twice on the same closed 1h bar: {second:?}"
@@ -4359,7 +5410,15 @@ fn strategy5_1h_atr_stop_fits_hour1_band() {
         "fixture 2×ATR {atr_pct} must fit Hour1 8%"
     );
     let state = EngineState::new(5);
-    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&s5_params()), None, None, None);
+    let (_, decisions) = tick_decisions(
+        &state,
+        &snap,
+        london_ts(),
+        Some(&s5_params()),
+        None,
+        None,
+        None,
+    );
     assert!(
         decisions.iter().any(|d| matches!(
             d, Decision::EnterLong { symbol, .. } if symbol == "AVAXUSDT"

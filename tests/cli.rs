@@ -1,7 +1,8 @@
 //! Drive the real CLI entry (dump-frame) without a TTY.
 
 use tui_bot::app::{
-    dump_frame_offline_isolated, dump_frame_offline_strategy, help_text, live_without_keys_isolated, parse_args,
+    dump_frame_offline_isolated, dump_frame_offline_strategy, help_text,
+    live_without_keys_isolated, parse_args,
 };
 use tui_bot::engine::STRATEGY_NAMES;
 
@@ -44,11 +45,20 @@ fn live_without_keys_is_refused() {
 fn dump_frame_strategy_4_shows_title() {
     let (code, text, _) = dump_frame_offline_strategy("4");
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("Continuation: откат ликвидных (не догон 24h %)"), "{text}");
+    assert!(
+        text.contains("Continuation: откат ликвидных (не догон 24h %)"),
+        "{text}"
+    );
     assert!(text.contains("Текущая: 4"), "{text}");
-    assert!(text.contains("Momentum rider (растущий + TP + SL вверх)"), "{text}");
+    assert!(
+        text.contains("Momentum rider (растущий + TP + SL вверх)"),
+        "{text}"
+    );
     assert!(text.contains("Скальп: откат к VWAP/EMA9"), "{text}");
-    assert!(text.contains("Тренд: пробой Donchian 20/10 (день)"), "{text}");
+    assert!(
+        text.contains("Тренд: пробой Donchian 20/10 (день)"),
+        "{text}"
+    );
     assert!(text.contains("00–02"), "{text}");
     assert!(text.contains("07–10"), "{text}");
     assert!(text.contains("13–16"), "{text}");
@@ -76,7 +86,10 @@ fn help_lists_flags() {
 fn dump_frame_strategy_5_shows_title() {
     let (code, text, _) = dump_frame_offline_strategy("5");
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("S5 Verify: continuation 1ч (A/B vs S4)"), "{text}");
+    assert!(
+        text.contains("S5 Verify: continuation 1ч (A/B vs S4)"),
+        "{text}"
+    );
     assert!(text.contains("Текущая: 5"), "{text}");
     assert!(text.contains("1ч"), "{text}");
     assert!(

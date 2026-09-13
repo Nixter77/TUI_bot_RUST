@@ -2,10 +2,9 @@
 
 use crate::config::{default_risk_pct, TradeInterval, STRATEGY1_POLL_SECONDS};
 use crate::dayrisk::{default_daily_loss_r, default_daily_loss_usdt};
-use crate::models::{
-    bar_is_red, near_24h_high, Bar, Decision, MarketSnapshot, Position, Side, Ticker,
-};
-use crate::ranking::{momentum_min_change_percent, pick_momentum_book};
+use crate::indicators::last_ema;
+use crate::models::{bar_is_red, Bar, Decision, MarketSnapshot, Position, Side, Ticker};
+use crate::ranking::{momentum_min_change_percent, pick_strategy1_book_with};
 use crate::sessions::{
     in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS,
 };
@@ -79,13 +78,7 @@ pub(crate) fn mark_for(
         .map(|t| t.last_price)
 }
 
-fn manage_momentum_long(
-    position: &Position,
-    tickers: &[Ticker],
-    last_bars: &HashMap<String, Bar>,
-    book_syms: &HashSet<String>,
-    p: &MomentumParams,
-) -> Decision {
+fn manage_momentum_long(position: &Position, tickers: &[Ticker], p: &MomentumParams) -> Decision {
     if position.side != Side::Long {
         return Decision::hold("momentum is buy-only; short not managed");
     }
@@ -100,23 +93,24 @@ fn manage_momentum_long(
             };
         }
     }
-    if !book_syms.is_empty() && !book_syms.contains(&position.symbol) {
-        return Decision::ExitPosition {
-            reason: "выпал из топа — закрываю до стопа".into(),
-            symbol: position.symbol.clone(),
-        };
-    }
-    if bar_is_red(last_bars.get(&position.symbol)) {
-        return Decision::ExitPosition {
-            reason: "5м разворот — закрываю до стопа".into(),
-            symbol: position.symbol.clone(),
-        };
-    }
+    // Rank-drop and a single red 5m bar do not flatten. Live S1 0/9 WR was alt-chase
+    // plus those panic exits; Python rider waits for TP / SL / trail only.
     let Some(sl) = position.stop_loss else {
-        let cand = match candidate_stop(mark, "LONG", p.trail_pct) {
+        let anchor = if position.entry_price > Decimal::ZERO {
+            position.entry_price
+        } else {
+            mark
+        };
+        let cand = match candidate_stop(anchor, "LONG", p.trail_pct) {
             Ok(c) => c,
             Err(_) => return Decision::hold("cannot attach stop"),
         };
+        if mark <= cand {
+            return Decision::ExitPosition {
+                reason: "momentum stop loss".into(),
+                symbol: position.symbol.clone(),
+            };
+        }
         if !long_stop_is_valid(cand, mark) {
             return Decision::hold("cannot attach stop");
         }
@@ -148,6 +142,23 @@ fn manage_momentum_long(
         };
     }
     Decision::hold("momentum hold / trail not raised")
+}
+
+/// 4h close must be above EMA20 when history exists. Missing 4h = fail-open
+/// (unit tests and the first live ticks before klines land).
+fn s1_htf_skip(snapshot: Option<&MarketSnapshot>, symbol: &str) -> Option<String> {
+    let snap = snapshot?;
+    let bars = snap.htf_bars_for(symbol);
+    if bars.len() < 21 {
+        return None;
+    }
+    let closes: Vec<Decimal> = bars.iter().map(|b| b.close).collect();
+    let ema = last_ema(&closes, 20)?;
+    let last = bars.last()?;
+    if last.close <= ema {
+        return Some("4ч ниже EMA20 — не вхожу".into());
+    }
+    None
 }
 
 fn enter_from_ticker(ticker: &Ticker, p: &MomentumParams) -> Decision {
@@ -193,8 +204,8 @@ pub fn s1_setup_skip(
     if !in_book {
         return Some("не в топе роста".into());
     }
-    if near_24h_high(ticker, Decimal::new(2, 2)) {
-        return Some("у 24h high — не догоняю".into());
+    if let Some(reason) = s1_htf_skip(snapshot, &ticker.symbol) {
+        return Some(reason);
     }
     if !last_bars.is_empty() {
         match last_bars.get(&ticker.symbol) {
@@ -226,7 +237,7 @@ pub fn momentum_decisions(
     if poll != 60 && poll != 120 {
         return (vec![Decision::hold("poll_seconds must be 60 or 120")], now);
     }
-    let book = pick_momentum_book(
+    let book = pick_strategy1_book_with(
         tickers,
         p.max_positions.max(1) as usize,
         p.min_quote_volume,
@@ -234,15 +245,13 @@ pub fn momentum_decisions(
         p.min_change_percent,
         p.max_change_percent,
         exclude,
-        true,
     );
-    let book_syms: HashSet<String> = book.iter().map(|t| t.symbol.clone()).collect();
     let mut out: Vec<Decision> = Vec::new();
     for pos in positions {
         if pos.qty <= Decimal::ZERO {
             continue;
         }
-        let decision = manage_momentum_long(pos, tickers, last_bars, &book_syms, p);
+        let decision = manage_momentum_long(pos, tickers, p);
         if !decision.is_hold() {
             out.push(decision);
         }
@@ -315,6 +324,7 @@ pub fn momentum_decisions(
     }
     let mut skipped_red = false;
     let mut skipped_no_bar = false;
+    let mut skipped_htf = false;
     if let Some(snap) = snapshot {
         if let Some(reason) = crate::regime::block_alt_entry(snap) {
             if out.is_empty() {
@@ -330,7 +340,8 @@ pub fn momentum_decisions(
         if blocked.contains(&ticker.symbol.to_ascii_uppercase()) {
             continue;
         }
-        if crate::models::near_24h_high(ticker, Decimal::new(2, 2)) {
+        if s1_htf_skip(snapshot, &ticker.symbol).is_some() {
+            skipped_htf = true;
             continue;
         }
         if !last_bars.is_empty() {
@@ -358,6 +369,9 @@ pub fn momentum_decisions(
     }
     if !out.is_empty() {
         return (out, now);
+    }
+    if skipped_htf && held.is_empty() {
+        return (vec![Decision::hold("4ч ниже EMA20 — не вхожу")], now);
     }
     if skipped_red && held.is_empty() {
         return (vec![Decision::hold("5м красная — не вхожу")], now);

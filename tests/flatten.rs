@@ -36,7 +36,12 @@ impl FlattenClient for FakeFlat {
         self.protect_cancels.push(symbol.into());
         Ok(())
     }
-    fn market_close(&mut self, symbol: &str, side: &str, qty: Decimal) -> Result<(), ExchangeError> {
+    fn market_close(
+        &mut self,
+        symbol: &str,
+        side: &str,
+        qty: Decimal,
+    ) -> Result<(), ExchangeError> {
         if self.fail.contains(symbol) {
             return Err(ExchangeError("reject close".into()));
         }
@@ -49,7 +54,9 @@ impl FlattenClient for FakeFlat {
     fn position_risk(&mut self) -> Result<Value, ExchangeError> {
         self.risk_reads += 1;
         if self.fail_on_read == Some(self.risk_reads) {
-            return Err(ExchangeError("HTTP 502 /fapi/v2/positionRisk: gateway".into()));
+            return Err(ExchangeError(
+                "HTTP 502 /fapi/v2/positionRisk: gateway".into(),
+            ));
         }
         Ok(self.position_raw.clone())
     }
@@ -96,7 +103,12 @@ fn skips_zero_qty_and_keeps_shorts() {
 #[test]
 fn watch_mode_sends_nothing() {
     let mut client = FakeFlat::new(&[], json!([]));
-    let result = close_all_positions(false, true, &mut client, &[pos("ETHUSDT", Side::Short, "1")]);
+    let result = close_all_positions(
+        false,
+        true,
+        &mut client,
+        &[pos("ETHUSDT", Side::Short, "1")],
+    );
     assert_eq!(result.errors, vec!["flatten refused: not live"]);
     assert!(client.closes.is_empty());
 }
@@ -104,7 +116,12 @@ fn watch_mode_sends_nothing() {
 #[test]
 fn no_credentials_refuses() {
     let mut client = FakeFlat::new(&[], json!([]));
-    let result = close_all_positions(true, false, &mut client, &[pos("ETHUSDT", Side::Short, "1")]);
+    let result = close_all_positions(
+        true,
+        false,
+        &mut client,
+        &[pos("ETHUSDT", Side::Short, "1")],
+    );
     assert_eq!(result.errors, vec!["flatten refused: no credentials"]);
     assert!(client.closes.is_empty());
 }
@@ -157,7 +174,10 @@ fn continues_after_one_symbol_fails() {
     assert_eq!(result.closed, vec!["SHORT ETHUSDT"]);
     assert_eq!(result.errors.len(), 1);
     assert!(result.errors[0].contains("BTCUSDT"));
-    assert_eq!(client.closes, vec![("ETHUSDT".into(), "SHORT".into(), d("0.071"))]);
+    assert_eq!(
+        client.closes,
+        vec![("ETHUSDT".into(), "SHORT".into(), d("0.071"))]
+    );
 }
 
 #[test]
@@ -183,7 +203,10 @@ fn flatten_open_book_confirm_read_failure_is_error() {
     let result = flatten_open_book(&mut client);
     assert_eq!(result.closed, vec!["SHORT ETHUSDT"]);
     assert!(
-        result.errors.iter().any(|e| e.contains("подтвердить flatten")),
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("подтвердить flatten")),
         "{:?}",
         result.errors
     );
@@ -192,11 +215,19 @@ fn flatten_open_book_confirm_read_failure_is_error() {
 #[test]
 fn close_cancels_protectives_again_after_fill() {
     let mut client = FakeFlat::new(&[], json!([]));
-    let result = close_all_positions(true, true, &mut client, &[pos("BTCUSDT", Side::Short, "0.004")]);
+    let result = close_all_positions(
+        true,
+        true,
+        &mut client,
+        &[pos("BTCUSDT", Side::Short, "0.004")],
+    );
     assert!(result.errors.is_empty());
     assert_eq!(result.closed, vec!["SHORT BTCUSDT"]);
     assert_eq!(client.protect_cancels, vec!["BTCUSDT", "BTCUSDT"]);
-    assert_eq!(client.closes, vec![("BTCUSDT".into(), "SHORT".into(), d("0.004"))]);
+    assert_eq!(
+        client.closes,
+        vec![("BTCUSDT".into(), "SHORT".into(), d("0.004"))]
+    );
 }
 
 #[test]

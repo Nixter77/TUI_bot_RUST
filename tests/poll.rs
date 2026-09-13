@@ -1,8 +1,8 @@
 //! Snapshot poller: latest-wins slot, keys must not wait on the pull.
 
 use rust_decimal::Decimal;
-use std::sync::mpsc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use tui_bot::models::MarketSnapshot;
@@ -93,10 +93,11 @@ fn panicking_pull_does_not_kill_poller() {
 
 #[test]
 fn panicking_pull_is_counted_for_the_tui() {
-    let poller: SnapshotPoller<MarketSnapshot> = SnapshotPoller::start(Duration::from_secs(30), || -> Pulled<MarketSnapshot> {
-        panic!("boom");
-    })
-    .unwrap();
+    let poller: SnapshotPoller<MarketSnapshot> =
+        SnapshotPoller::start(Duration::from_secs(30), || -> Pulled<MarketSnapshot> {
+            panic!("boom");
+        })
+        .unwrap();
     poller.bump();
     let mut n = 0;
     for _ in 0..50 {

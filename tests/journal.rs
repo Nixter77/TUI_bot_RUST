@@ -256,12 +256,21 @@ fn losing_close_keeps_symbol_off_book_for_twelve_hours() {
         map.get("TAKEUSDT").copied().unwrap_or(0.0) > eight_h,
         "loser still cooling ~8h later same UTC day: {map:?}"
     );
-    assert!(!map.contains_key("BLESSUSDT"), "winner uses 30m pause: {map:?}");
+    assert!(
+        !map.contains_key("BLESSUSDT"),
+        "winner uses 30m pause: {map:?}"
+    );
     let thirteen_h = tui_bot::sessions::make_utc_ts(2026, 8, 24, 21, 15, 0);
     let later = cooldowns_from_events(&events, thirteen_h, COOLDOWN_SEC);
-    assert!(!later.contains_key("TAKEUSDT"), "loser free after 12h+: {later:?}");
+    assert!(
+        !later.contains_key("TAKEUSDT"),
+        "loser free after 12h+: {later:?}"
+    );
     assert_eq!(LOSS_SYMBOL_COOLDOWN_SEC, 43_200.0);
-    assert_eq!(symbol_pause_sec(false, COOLDOWN_SEC), LOSS_SYMBOL_COOLDOWN_SEC);
+    assert_eq!(
+        symbol_pause_sec(false, COOLDOWN_SEC),
+        LOSS_SYMBOL_COOLDOWN_SEC
+    );
     assert_eq!(symbol_pause_sec(true, COOLDOWN_SEC), COOLDOWN_SEC);
 }
 
@@ -298,16 +307,24 @@ fn s5_losing_close_cools_twelve_hours() {
     assert!(s4.is_empty(), "S4 must not inherit S5 cooldown: {s4:?}");
     let plus_13h = t0 + 13.0 * 3600.0;
     let later = cooldowns_from_events_for(&events, plus_13h, COOLDOWN_SEC, Some(5));
-    assert!(!later.contains_key("ZECUSDT"), "S5 loser free after 12h+: {later:?}");
+    assert!(
+        !later.contains_key("ZECUSDT"),
+        "S5 loser free after 12h+: {later:?}"
+    );
 }
 
 #[test]
 fn london_window_ends_at_ten_utc() {
     let ts = tui_bot::sessions::make_utc_ts(2026, 8, 24, 7, 1, 0);
-    let end = tui_bot::sessions::window_end_ts(ts, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS).unwrap();
+    let end =
+        tui_bot::sessions::window_end_ts(ts, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS).unwrap();
     let expect = tui_bot::sessions::make_utc_ts(2026, 8, 24, 10, 0, 0);
     assert_eq!(end, expect);
-    let pause = tui_bot::sessions::pause_until_after_loss(ts, &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS, 1800.0);
+    let pause = tui_bot::sessions::pause_until_after_loss(
+        ts,
+        &tui_bot::sessions::DEFAULT_ENTRY_WINDOWS,
+        1800.0,
+    );
     assert_eq!(pause, expect);
 }
 
@@ -349,14 +366,18 @@ fn parallel_appends_do_not_tear_jsonl_lines() {
 
 #[test]
 fn unmatched_without_active_journal_is_empty() {
-    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = JOURNAL_ACTIVE_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     set_active(None);
     assert!(unmatched_open_positions().is_empty());
 }
 
 #[test]
 fn unmatched_reads_active_path_not_default() {
-    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = JOURNAL_ACTIVE_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trades.jsonl");
     let j = TradeJournal::new(Some(&path));
@@ -454,10 +475,12 @@ fn trade_event_old_line_still_parses() {
 
 #[test]
 fn open_meta_r_math_and_persist_roundtrip() {
-    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = JOURNAL_ACTIVE_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     use tui_bot::openmeta::{
-        apply_mark_excursion, initial_risk_usdt, metrics_for_close, on_open, r_multiple, set_active_path,
-        update_mark,
+        apply_mark_excursion, initial_risk_usdt, metrics_for_close, on_open, r_multiple,
+        set_active_path, update_mark,
     };
     let dir = tempfile::tempdir().unwrap();
     let meta_path = dir.path().join("open_meta.json");
@@ -465,7 +488,15 @@ fn open_meta_r_math_and_persist_roundtrip() {
     let risk = initial_risk_usdt(d("100"), d("98"), d("2")).unwrap();
     assert_eq!(risk, d("4"));
     assert_eq!(r_multiple(d("6"), risk).unwrap(), d("1.5"));
-    on_open(4, "TESTUSDT", d("100"), d("98"), d("2"), 1_000.0, Some("bull".into()));
+    on_open(
+        4,
+        "TESTUSDT",
+        d("100"),
+        d("98"),
+        d("2"),
+        1_000.0,
+        Some("bull".into()),
+    );
     update_mark("TESTUSDT", d("103"), 1_010.0);
     let m = metrics_for_close("TESTUSDT", Some(d("5")), 1_100.0, false);
     assert_eq!(m.initial_risk_usdt.as_deref(), Some("4"));
@@ -493,14 +524,24 @@ fn open_meta_r_math_and_persist_roundtrip() {
 
 #[test]
 fn s5_close_persists_mfe_mae_r_from_1h_bars() {
-    let _guard = JOURNAL_ACTIVE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = JOURNAL_ACTIVE_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     use tui_bot::journal::{record_close, set_active, TradeEvent};
     use tui_bot::models::{Bar, MarketSnapshot, Position, Ticker};
     use tui_bot::openmeta::{on_open, update_from_positions};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trades.jsonl");
     set_active(Some(path.clone()));
-    on_open(5, "AVAXUSDT", d("100"), d("97"), d("1"), 1_700_000_000.0, None);
+    on_open(
+        5,
+        "AVAXUSDT",
+        d("100"),
+        d("97"),
+        d("1"),
+        1_700_000_000.0,
+        None,
+    );
     let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
     pos.opened_bar_time = Some(1_700_000_000_000);
     let bar = Bar {

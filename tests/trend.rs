@@ -51,7 +51,13 @@ fn holds_in_downtrend() {
 fn exits_when_close_loses_exit_channel() {
     let mut extra = range_then_breakout();
     let last_i = extra.len() as i64;
-    let mut px = extra.last().unwrap().close.to_string().parse::<f64>().unwrap();
+    let mut px = extra
+        .last()
+        .unwrap()
+        .close
+        .to_string()
+        .parse::<f64>()
+        .unwrap();
     for j in 0..12 {
         let nxt = px - 1.5;
         extra.push(trend_bar(last_i + j, px, px + 0.1, nxt - 0.1, nxt));

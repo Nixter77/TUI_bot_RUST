@@ -158,7 +158,6 @@ fn does_not_trail_until_in_profit() {
     assert!(matches!(decision, Decision::Hold { .. }));
 }
 
-
 #[test]
 fn default_max_hold_is_eight() {
     assert_eq!(tui_bot::scalp::ScalpParams::default().max_hold_bars, 8);
@@ -185,7 +184,9 @@ fn exits_at_end_of_session() {
     let night = night_ms() as f64 / 1000.0;
     let decision = scalp_decision(&bars, Some(&pos), "BTCUSDT", Some(&p), Some(night));
     match decision {
-        Decision::ExitPosition { reason, .. } => assert!(reason.contains("конец сессии"), "{reason}"),
+        Decision::ExitPosition { reason, .. } => {
+            assert!(reason.contains("конец сессии"), "{reason}")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -220,7 +221,9 @@ fn peak_giveback_locks_or_exits_pre_be() {
     };
     let decision = scalp_decision(&bars, Some(&pos), "BTCUSDT", Some(&scalp_loose()), None);
     match decision {
-        Decision::AmendStop { reason, stop_loss, .. } => {
+        Decision::AmendStop {
+            reason, stop_loss, ..
+        } => {
             assert!(reason.contains("откат с пика"), "{reason}");
             assert!(stop_loss > sl);
             assert!(stop_loss < mark || stop_loss >= entry);
@@ -326,7 +329,10 @@ fn entry_tp_is_fee_padded() {
             let mark = bars.last().unwrap().close;
             let risk = mark - stop_loss;
             let padded = (mark + risk * d("2")) * (Decimal::ONE + round_trip_taker_pct());
-            assert!(take_profit >= padded * d("0.999"), "tp={take_profit} padded={padded}");
+            assert!(
+                take_profit >= padded * d("0.999"),
+                "tp={take_profit} padded={padded}"
+            );
         }
         other => panic!("{} {:?}", other.reason(), other),
     }

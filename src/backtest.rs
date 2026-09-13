@@ -156,9 +156,11 @@ pub fn run_cli() -> i32 {
     // Majors for S1–S3; alts for S4/S5 (continuation skips BTC/ETH/SOL/BNB/XRP/BCH).
     let majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     let alts = ["LINKUSDT", "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "NEARUSDT"];
-    for symbol in majors.iter().chain(alts.iter()) {
-        for iv in ["5m", "15m", "1h", "4h"] {
-            let _ = fs::remove_file(format!("{CACHE_DIR}/{symbol}_{iv}.json"));
+    if env::var("KEEP_KLINES").is_err() && env::var("SWEEP_S1").is_err() {
+        for symbol in majors.iter().chain(alts.iter()) {
+            for iv in ["5m", "15m", "1h", "4h"] {
+                let _ = fs::remove_file(format!("{CACHE_DIR}/{symbol}_{iv}.json"));
+            }
         }
     }
 
@@ -170,6 +172,9 @@ pub fn run_cli() -> i32 {
     for symbol in majors {
         if let Some(bars) = fetch_klines(symbol, "5m") {
             univ_5m.push((symbol.into(), bars));
+        }
+        if let Some(h) = fetch_klines(symbol, "4h") {
+            htf_4h.insert(symbol.into(), h);
         }
     }
     for symbol in alts {
@@ -194,6 +199,63 @@ pub fn run_cli() -> i32 {
     }
 
     let mut rows = Vec::new();
+    if env::var("SWEEP_S1").is_ok() {
+        let grid: &[(&str, &str, &str, bool)] = &[
+            ("2.5/2.0 24/7", "0.025", "0.020", true),
+            ("4.0/2.0 24/7", "0.040", "0.020", true),
+            ("5.0/2.5 24/7", "0.050", "0.025", true),
+            ("3.0/1.5 24/7", "0.030", "0.015", true),
+            ("6.0/3.0 24/7", "0.060", "0.030", true),
+            ("2.5/2.0 windows", "0.025", "0.020", false),
+            ("4.0/2.0 windows", "0.040", "0.020", false),
+            ("trail 3% TP20", "0.200", "0.030", true),
+        ];
+        println!("S1 geometry sweep (majors 5m, fee 0.04%/side, notional 20)");
+        for (label, tp, trail, always) in grid {
+            let mom = MomentumParams {
+                always_enter: *always,
+                cooldown_sec: 0.0,
+                tp_pct: tp.parse().unwrap(),
+                trail_pct: trail.parse().unwrap(),
+                ..MomentumParams::default()
+            };
+            let mut n = 0usize;
+            let mut wins = 0usize;
+            let mut pnl = Decimal::ZERO;
+            for (symbol, bars) in &univ_5m {
+                let opts = SimOpts {
+                    htf: htf_4h.get(symbol).map(|v| v.as_slice()),
+                    btc_htf: btc_htf.as_deref(),
+                };
+                let res = simulate_bars_opts(
+                    1,
+                    bars,
+                    symbol,
+                    "",
+                    Decimal::from(20),
+                    Decimal::new(4, 4),
+                    Decimal::new(1, 4),
+                    Some(40),
+                    Decimal::from(1000),
+                    Some(&mom),
+                    None,
+                    None,
+                    opts,
+                    None,
+                );
+                n += res.trades.len();
+                wins += res.wins();
+                pnl += res.pnl();
+            }
+            let wr = if n == 0 {
+                "—".into()
+            } else {
+                format!("{:.1}%", wins as f64 / n as f64 * 100.0)
+            };
+            println!("  {label:18} n={n:4}  wr={wr:>6}  pnl={pnl:+.4}");
+        }
+        return 0;
+    }
     // Quick per-symbol S5 dump for debugging: write trade lists to .state
     if env::var("DUMP_S5").is_ok() {
         let cont_mom = MomentumParams {
@@ -441,7 +503,11 @@ pub fn run_cli() -> i32 {
     };
 
     for (symbol, bars) in &univ_5m {
-        rows.push(simulate_bars(
+        let s1_opts = SimOpts {
+            htf: htf_4h.get(symbol).map(|v| v.as_slice()),
+            btc_htf: btc_htf.as_deref(),
+        };
+        rows.push(simulate_bars_opts(
             1,
             bars,
             symbol,
@@ -453,6 +519,8 @@ pub fn run_cli() -> i32 {
             Decimal::from(1000),
             Some(&mom),
             None,
+            None,
+            s1_opts,
             None,
         ));
         rows.push(simulate_bars(
