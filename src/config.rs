@@ -160,7 +160,7 @@ pub fn default_notional() -> Decimal {
     Decimal::from(20)
 }
 pub fn default_tp_pct() -> Decimal {
-    Decimal::new(25, 3) // 0.025
+    Decimal::new(5, 2) // 0.050 — S1 rider floor is 2R of TRAIL_PCT
 }
 pub fn default_trail_pct() -> Decimal {
     Decimal::new(20, 3) // 0.020
@@ -404,7 +404,7 @@ pub fn load_config(
     if risk_pct < Decimal::ZERO {
         return Err(ConfigError("RISK_PCT cannot be negative".into()));
     }
-    let tp_pct = dec(&get("TAKE_PROFIT_PCT", "0.025"))
+    let tp_pct = dec(&get("TAKE_PROFIT_PCT", "0.050"))
         .map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;
     let trail_pct = dec(&get("TRAIL_PCT", "0.020"))
         .map_err(|e| ConfigError(format!("invalid numeric config: {e}")))?;

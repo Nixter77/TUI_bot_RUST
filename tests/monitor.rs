@@ -216,3 +216,74 @@ fn wait_until_entry_shows_cooldown() {
     assert!(frame.contains("до входа:"), "{frame}");
     assert!(frame.contains("11 мин"), "{frame}");
 }
+
+fn cfg_hours() -> tui_bot::config::Config {
+    load_config(false, None, Some(&HashMap::new())).unwrap()
+}
+
+fn majors_tape() -> Vec<Ticker> {
+    vec![
+        Ticker::new("BTCUSDT", d("78954.2"), d("2.085"), d("127502500000")),
+        Ticker::new("ETHUSDT", d("2559.19"), d("1.806"), d("118924300000")),
+        Ticker::new("SOLUSDT", d("103.51"), d("2.081"), d("388600000")),
+    ]
+}
+
+#[test]
+fn s2_outside_hours_until_is_next_session_not_candle() {
+    let cfg = cfg_hours();
+    let state = EngineState::new(2);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = majors_tape();
+    // 21:21 UTC — same clock as the radar screenshot; windows 00-02, 07-10, 13-16.
+    let now = make_utc_ts(2026, 9, 14, 21, 21, 0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    assert!(
+        waiting.iter().any(|w| w.symbol == "BTCUSDT"),
+        "S2 book is majors: {waiting:?}"
+    );
+    for row in &waiting {
+        assert_eq!(row.kind, WaitKind::Gate, "{row:?}");
+        assert!(
+            row.reason.contains("вне часов старта") || row.reason.contains("вне сессии"),
+            "{}",
+            row.reason
+        );
+        assert!(
+            row.until.contains("00:00") && row.until.contains("ещё"),
+            "outside hours must count to next window, not freeze on a 5m candle: {}",
+            row.until
+        );
+        assert!(
+            !row.until.contains("свечу"),
+            "frozen candle wait is the bug: {}",
+            row.until
+        );
+    }
+    let frame = render_monitor(&build_monitor(&cfg, &state, &snap, &[], now));
+    assert!(frame.contains("до входа:"), "{frame}");
+    assert!(frame.contains("00:00"), "{frame}");
+    assert!(!frame.contains("ждёт свечу 5м"), "{frame}");
+}
+
+#[test]
+fn s2_in_session_counts_down_to_next_5m_close() {
+    let cfg = cfg_hours();
+    let state = EngineState::new(2);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = majors_tape();
+    // 08:02 UTC is inside 07-10. No klines → setup skip, remaining is next 5m close 08:05.
+    let now = make_utc_ts(2026, 9, 14, 8, 2, 0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    let btc = waiting
+        .iter()
+        .find(|w| w.symbol == "BTCUSDT")
+        .expect("BTC in S2 wait");
+    assert_eq!(btc.kind, WaitKind::Setup, "{btc:?}");
+    assert!(
+        btc.until.contains("до закрытия 5м") && btc.until.contains("ещё"),
+        "closed last bar / missing klines must count down, not hang: {}",
+        btc.until
+    );
+    assert!(!btc.until.contains("ждёт свечу"), "{}", btc.until);
+}

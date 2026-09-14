@@ -353,6 +353,7 @@ fn flatten_live_short(client: &mut dyn LiveClient, symbol: &str) -> Option<Posit
         return None;
     }
     let _ = close_targets(client, std::slice::from_ref(&row));
+    cancel_leftover_sells(client, &row.symbol);
     Some(row)
 }
 
@@ -1299,6 +1300,7 @@ pub fn apply_flatten(
     } else {
         (flatten_open_book(client), true)
     };
+    cancel_sells_for_closed(client, &result.closed);
     let out = record_flatten(state, result, pause);
     emit_flatten(&out, flatten_sound_won(&out.closed, &book));
     out
@@ -1640,6 +1642,11 @@ pub fn rearm_live_protectives(
         .iter()
         .filter(|p| p.side == Side::Long && p.qty > Decimal::ZERO)
         .filter(|p| {
+            // S1 must not rearm leftover alts — that re-places SELL on a tail
+            // we are about to flatten and opens a short.
+            if state.strategy_id == 1 {
+                return crate::ranking::is_s1_symbol(&p.symbol);
+            }
             if !crate::engine::is_continuation(state.strategy_id) {
                 return true;
             }
@@ -1941,6 +1948,7 @@ pub fn clear_vanished_longs(
     let mut cleared = Vec::new();
     for pos in remembered {
         let _ = client.cancel_protectives(&pos.symbol);
+        cancel_leftover_sells(client, &pos.symbol);
         let exit_px = mark_for_symbol(snapshot, &pos.symbol).unwrap_or(pos.entry_price);
         let won = journal::long_close_was_win(pos.entry_price, exit_px, pos.take_profit);
         let reason = if won {
@@ -2024,10 +2032,18 @@ pub fn clear_orphan_protectives(
     let mut cleared = Vec::new();
     for symbol in leftover {
         let _ = client.cancel_protectives(&symbol);
+        cancel_leftover_sells(client, &symbol);
         push_recent(state, format!("снял сиротский стоп: {symbol}"));
         cleared.push(symbol);
     }
     cleared
+}
+
+fn cancel_sells_for_closed(client: &mut dyn LiveClient, closed: &[String]) {
+    for label in closed {
+        let symbol = label.rsplit(' ').next().unwrap_or(label);
+        cancel_leftover_sells(client, symbol);
+    }
 }
 
 /// Long-only desk: close leftover shorts without waiting for x x.
@@ -2059,6 +2075,7 @@ pub fn sweep_rogue_shorts(
         return FlattenResult::default();
     }
     let result = close_targets(client, &shorts);
+    cancel_sells_for_closed(client, &result.closed);
     if !result.closed.is_empty() {
         let ts = now.unwrap_or_else(unix_now);
         for label in &result.closed {
@@ -2090,7 +2107,84 @@ pub fn sweep_rogue_shorts(
     result
 }
 
-/// Vanished longs, leftover shorts, then size TP/SL. TUI calls this once per tick.
+/// Close longs this strategy does not trail (old S1 alts, S4 leftovers on S1).
+pub fn sweep_foreign_longs(
+    cfg: &Config,
+    client: &mut dyn LiveClient,
+    state: &mut EngineState,
+    snapshot: &MarketSnapshot,
+    now: Option<f64>,
+) -> FlattenResult {
+    if !cfg.live || cfg.credentials.is_none() || !snapshot.live_book {
+        return FlattenResult::default();
+    }
+    let mut tails: Vec<Position> = snapshot
+        .open_positions
+        .iter()
+        .filter(|p| {
+            p.side == Side::Long
+                && p.qty > Decimal::ZERO
+                && !crate::engine::strategy_manages_long(
+                    state.strategy_id,
+                    &p.symbol,
+                    &state.s4_inherited,
+                )
+        })
+        .cloned()
+        .collect();
+    if let Some(pos) = &snapshot.position {
+        if pos.side == Side::Long
+            && pos.qty > Decimal::ZERO
+            && !crate::engine::strategy_manages_long(
+                state.strategy_id,
+                &pos.symbol,
+                &state.s4_inherited,
+            )
+            && !tails.iter().any(|p| p.symbol == pos.symbol)
+        {
+            tails.push(pos.clone());
+        }
+    }
+    if tails.is_empty() {
+        return FlattenResult::default();
+    }
+    let result = close_targets(client, &tails);
+    cancel_sells_for_closed(client, &result.closed);
+    if !result.closed.is_empty() {
+        let ts = now.unwrap_or_else(unix_now);
+        for label in &result.closed {
+            let symbol = label.rsplit(' ').next().unwrap_or(label);
+            let until = ts + COOLDOWN_SEC;
+            let key = symbol.to_ascii_uppercase();
+            let cur = state.cooldowns.get(&key).copied().unwrap_or(0.0);
+            state.cooldowns.insert(key, cur.max(until));
+            drop_symbol(state, symbol);
+        }
+        push_recent(
+            state,
+            format!(
+                "закрыл хвост предыдущей сделки: {}",
+                result.closed.join(", ")
+            ),
+        );
+        if result.errors.is_empty() {
+            state.last_error = None;
+        }
+        journal::record_flatten(
+            state.strategy_id,
+            &result.closed,
+            cfg.live,
+            "закрыл хвост предыдущей сделки",
+        );
+        emit_flatten(&result, flatten_sound_won(&result.closed, &tails));
+    }
+    if !result.errors.is_empty() {
+        state.last_error = result.error();
+    }
+    result
+}
+
+/// Vanished longs, leftover shorts/foreign longs, then size TP/SL.
 pub fn reconcile_live(
     cfg: &Config,
     client: &mut dyn LiveClient,
@@ -2105,9 +2199,15 @@ pub fn reconcile_live(
     clear_vanished_longs(cfg, client, state, snapshot, now_ts);
     let orphans = clear_orphan_protectives(cfg, client, state, snapshot);
     let swept = sweep_rogue_shorts(cfg, client, state, snapshot, now);
+    let foreign = sweep_foreign_longs(cfg, client, state, snapshot, now);
     let rearmed = rearm_live_protectives(cfg, client, state, snapshot);
     let last_text = if !swept.closed.is_empty() {
         format!("закрыл чужой шорт: {}", swept.closed.join(", "))
+    } else if !foreign.closed.is_empty() {
+        format!(
+            "закрыл хвост предыдущей сделки: {}",
+            foreign.closed.join(", ")
+        )
     } else if !orphans.is_empty() {
         format!("снял сиротский стоп: {}", orphans.join(", "))
     } else if !rearmed.is_empty() {

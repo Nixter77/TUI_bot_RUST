@@ -34,6 +34,22 @@ pub fn is_continuation(strategy_id: i32) -> bool {
     matches!(strategy_id, 4 | 5)
 }
 
+/// Positions this lens may trail. Everything else on the book is a tail:
+/// leftover shorts, old S1 alts, S4/S5 tagged opens on another strategy.
+pub fn strategy_manages_long(
+    strategy_id: i32,
+    symbol: &str,
+    inherited_s4: &HashSet<String>,
+) -> bool {
+    if is_continuation(strategy_id) {
+        return crate::openmeta::continuation_owns(symbol, strategy_id, inherited_s4);
+    }
+    if strategy_id == 1 {
+        return crate::ranking::is_s1_symbol(symbol);
+    }
+    true
+}
+
 /// Signal TF: S5 is the 1h verification arm; S4 keeps STRATEGY4_INTERVAL.
 pub fn continuation_interval(
     strategy_id: i32,
@@ -506,12 +522,9 @@ pub fn tick_decisions(
         (merged_list, inflight)
     };
 
-    // S4/S5: only manage opens tagged for this strategy_id (foreign → unmanaged).
-    if is_continuation(state.strategy_id) {
-        merged_list.retain(|p| {
-            crate::openmeta::continuation_owns(&p.symbol, state.strategy_id, &state.s4_inherited)
-        });
-    }
+    // Isolation: S1 majors-only; S4/S5 tagged-only. Foreign longs → unmanaged tails.
+    merged_list
+        .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
 
     let merged = merged_list.first().cloned();
     crate::openmeta::update_from_positions(&merged_list, snapshot, now);

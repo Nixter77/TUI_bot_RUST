@@ -208,10 +208,31 @@ pub fn market_close_params(
     Ok(p)
 }
 
-/// True when exchange rejected a reduce-only close because the book is already flat.
+/// True when Binance returned −2022 ReduceOnly Order is rejected.
+///
+/// That code is *not* proof the book is flat. TestNet uses the same −2022
+/// on a live short; treating it as success leaves leftover shorts forever.
 pub fn is_already_flat_close_error(msg: &str) -> bool {
-    // Only -2022 (already flat). Do not swallow other reduceOnly / precision errors.
+    // Only -2022. Do not swallow other reduceOnly / precision errors.
     msg.to_ascii_lowercase().contains("-2022")
+}
+
+/// Retry the close without `reduceOnly` only when −2022 AND the book still
+/// shows this position. Naked retry on a true flat would open the opposite side.
+pub fn should_retry_close_without_reduce_only(err: &str, still_open: bool) -> bool {
+    is_already_flat_close_error(err) && still_open
+}
+
+fn remaining_close_qty(book: &[Position], symbol: &str, position_side: &str) -> Option<Decimal> {
+    let want = symbol.to_ascii_uppercase();
+    let want_side = match position_side.trim().to_ascii_uppercase().as_str() {
+        "LONG" | "BUY" => Side::Long,
+        "SHORT" | "SELL" => Side::Short,
+        _ => return None,
+    };
+    book.iter()
+        .find(|p| p.symbol == want && p.side == want_side && p.qty > Decimal::ZERO)
+        .map(|p| p.qty)
 }
 
 /// Drop naked `closePosition` SELL protectives (they open leftover shorts when flat).
@@ -252,6 +273,21 @@ pub fn cancel_close_position_sells(client: &mut dyn LiveClient, symbol: &str) {
             }
         }
     }
+}
+
+/// List endpoints return a JSON array; TestNet/wrappers sometimes nest it.
+pub fn parse_open_order_rows(raw: &Value) -> Vec<Value> {
+    if let Some(arr) = raw.as_array() {
+        return arr.clone();
+    }
+    if let Some(obj) = raw.as_object() {
+        for key in ["orders", "data", "list"] {
+            if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
+                return arr.clone();
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// After flatten: drop every leftover SELL (sized or closePosition) so none opens a short.
@@ -1075,6 +1111,9 @@ impl FlattenClient for BinanceFutures {
         p.insert("symbol".into(), symbol.into());
         let _ = self.signed_request("DELETE", "/fapi/v1/allOpenOrders", &p);
         let _ = self.signed_request("DELETE", "/fapi/v1/algoOpenOrders", &p);
+        // Bulk DELETE can miss a conditional SELL; per-id sweep so flatten
+        // cannot leave a stop that opens a leftover short.
+        cancel_leftover_sells(self, symbol);
         Ok(())
     }
 
@@ -1100,12 +1139,35 @@ impl FlattenClient for BinanceFutures {
         match self.signed_request("POST", "/fapi/v1/order", &p) {
             Ok(_) => Ok(()),
             Err(exc) => {
-                // Already flat only. Never swallow other reduceOnly / precision errors.
-                if is_already_flat_close_error(&exc.0) {
-                    Ok(())
-                } else {
-                    Err(exc)
+                if !is_already_flat_close_error(&exc.0) {
+                    return Err(exc);
                 }
+                // −2022: either truly flat, or TestNet refused reduceOnly on a live short.
+                let book = match FlattenClient::position_risk(self)
+                    .and_then(|raw| parse_positions(&raw))
+                {
+                    Ok(b) => b,
+                    Err(_) => return Err(exc),
+                };
+                let Some(live_qty) = remaining_close_qty(&book, symbol, side) else {
+                    return Ok(());
+                };
+                let naked_qty = quantize_to_step(live_qty, filters.step_size, false)
+                    .map_err(|e| ExchangeError(e.to_string()))?;
+                if naked_qty <= Decimal::ZERO {
+                    return Err(exc);
+                }
+                let mut q = market_close_params(symbol, side, naked_qty)?;
+                q.remove("reduceOnly");
+                self.signed_request("POST", "/fapi/v1/order", &q)?;
+                let after =
+                    FlattenClient::position_risk(self).and_then(|raw| parse_positions(&raw))?;
+                if remaining_close_qty(&after, symbol, side).is_some() {
+                    return Err(ExchangeError(format!(
+                        "{symbol} still open after close (−2022 retry)"
+                    )));
+                }
+                Ok(())
             }
         }
     }
@@ -1312,7 +1374,7 @@ impl LiveClient for BinanceFutures {
             p.insert("symbol".into(), s.into());
         }
         let raw = self.signed_request("GET", "/fapi/v1/openAlgoOrders", &p)?;
-        Ok(raw.as_array().cloned().unwrap_or_default())
+        Ok(parse_open_order_rows(&raw))
     }
 
     fn open_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
@@ -1321,7 +1383,7 @@ impl LiveClient for BinanceFutures {
             p.insert("symbol".into(), s.into());
         }
         let raw = self.signed_request("GET", "/fapi/v1/openOrders", &p)?;
-        Ok(raw.as_array().cloned().unwrap_or_default())
+        Ok(parse_open_order_rows(&raw))
     }
 }
 

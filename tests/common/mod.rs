@@ -12,7 +12,7 @@ pub fn d(s: &str) -> Decimal {
 
 pub fn tickers() -> Vec<Ticker> {
     vec![
-        Ticker::new("ETHUSDT", d("3000"), d("2.0"), d("100000")),
+        Ticker::new("ETHUSDT", d("3000"), d("5.5"), d("100000")),
         Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("800000")),
         Ticker::new("SOLUSDT", d("140"), d("4.0"), d("200000")),
         Ticker::new("XRPUSDT", d("0.5"), d("1.0"), d("40000")),
