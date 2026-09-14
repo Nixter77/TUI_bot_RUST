@@ -254,6 +254,21 @@ pub fn cancel_close_position_sells(client: &mut dyn LiveClient, symbol: &str) {
     }
 }
 
+/// List endpoints return a JSON array; TestNet/wrappers sometimes nest it.
+pub fn parse_open_order_rows(raw: &Value) -> Vec<Value> {
+    if let Some(arr) = raw.as_array() {
+        return arr.clone();
+    }
+    if let Some(obj) = raw.as_object() {
+        for key in ["orders", "data", "list"] {
+            if let Some(arr) = obj.get(key).and_then(|v| v.as_array()) {
+                return arr.clone();
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// After flatten: drop every leftover SELL (sized or closePosition) so none opens a short.
 pub fn cancel_leftover_sells(client: &mut dyn LiveClient, symbol: &str) {
     if let Ok(rows) = client.open_algo_orders(Some(symbol)) {
@@ -1075,6 +1090,9 @@ impl FlattenClient for BinanceFutures {
         p.insert("symbol".into(), symbol.into());
         let _ = self.signed_request("DELETE", "/fapi/v1/allOpenOrders", &p);
         let _ = self.signed_request("DELETE", "/fapi/v1/algoOpenOrders", &p);
+        // Bulk DELETE can miss a conditional SELL; per-id sweep so flatten
+        // cannot leave a stop that opens a leftover short.
+        cancel_leftover_sells(self, symbol);
         Ok(())
     }
 
@@ -1312,7 +1330,7 @@ impl LiveClient for BinanceFutures {
             p.insert("symbol".into(), s.into());
         }
         let raw = self.signed_request("GET", "/fapi/v1/openAlgoOrders", &p)?;
-        Ok(raw.as_array().cloned().unwrap_or_default())
+        Ok(parse_open_order_rows(&raw))
     }
 
     fn open_orders(&mut self, symbol: Option<&str>) -> Result<Vec<Value>, ExchangeError> {
@@ -1321,7 +1339,7 @@ impl LiveClient for BinanceFutures {
             p.insert("symbol".into(), s.into());
         }
         let raw = self.signed_request("GET", "/fapi/v1/openOrders", &p)?;
-        Ok(raw.as_array().cloned().unwrap_or_default())
+        Ok(parse_open_order_rows(&raw))
     }
 }
 

@@ -10,8 +10,8 @@ use tui_bot::config::load_config;
 use tui_bot::engine::{tick_decisions, MomentumParams};
 use tui_bot::errors::{COOLDOWN_SEC, RETRY_BACKOFF_SEC};
 use tui_bot::exchange::{
-    buy_client_order_id, is_already_flat_close_error, market_close_params, prepare_algo_params,
-    prune_stale_protectives, reduce_only_close_side, replace_stop_place_first,
+    buy_client_order_id, is_already_flat_close_error, market_close_params, parse_open_order_rows,
+    prepare_algo_params, prune_stale_protectives, reduce_only_close_side, replace_stop_place_first,
     risk_position_notional, sell_protectives_are_sized, size_market_order, size_risk_market_order,
     sized_long_protectives, stale_sell_protective, ExchangeError, FlattenClient, LiveClient,
     SymbolFilters,
@@ -19,7 +19,7 @@ use tui_bot::exchange::{
 use tui_bot::journal::{set_active, TradeJournal};
 use tui_bot::live::{
     apply_decision, apply_live, apply_paper_decision, clear_orphan_protectives,
-    clear_vanished_longs, reconcile_live, sweep_rogue_shorts,
+    clear_vanished_longs, reconcile_live, sweep_foreign_longs, sweep_rogue_shorts,
 };
 use tui_bot::live::{rearm_live_protectives, REARM_FAIL_BUDGET_SEC, REARM_FAIL_MAX};
 use tui_bot::models::{Decision, EngineState, MarketSnapshot, Position, Side, Ticker};
@@ -874,6 +874,93 @@ fn sweep_closes_leftover_short_and_cools_symbol() {
 }
 
 #[test]
+fn sweep_short_cancels_leftover_sell() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.algo_orders = vec![json!({
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "quantity": "0.004",
+        "closePosition": false,
+        "algoId": "leftover1"
+    })];
+    let short = short_pos("BTCUSDT", "0.004", "68600", "-2");
+    let snap = live_book(None, vec![short]);
+    let mut state = EngineState::new(1);
+    let result = sweep_rogue_shorts(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
+    assert_eq!(result.closed, vec!["SHORT BTCUSDT".to_string()]);
+    assert!(
+        client.algo_orders.is_empty(),
+        "closing a leftover short must drop sibling SELL: {:?}",
+        client.algo_orders
+    );
+}
+
+#[test]
+fn s1_sweep_closes_leftover_alt_long() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.algo_orders = vec![json!({
+        "symbol": "LINKUSDT",
+        "side": "SELL",
+        "orderType": "STOP_MARKET",
+        "quantity": "10",
+        "closePosition": false,
+        "algoId": "alt1"
+    })];
+    let btc = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
+    let alt = Position::long("LINKUSDT", d("10"), d("20"), Some(d("19")), Some(d("22")));
+    let mut snap = live_book(Some(btc.clone()), vec![btc.clone(), alt]);
+    snap.chart_symbol = "BTCUSDT".into();
+    let mut state = EngineState::new(1);
+    state.positions = vec![btc];
+    let result = sweep_foreign_longs(&cfg, &mut client, &mut state, &snap, Some(1_700_000_000.0));
+    assert_eq!(result.closed, vec!["LONG LINKUSDT".to_string()]);
+    assert_eq!(
+        client.closes,
+        vec![("LINKUSDT".into(), "LONG".into(), d("10"))]
+    );
+    assert!(
+        client.algo_orders.is_empty(),
+        "flatten leftover alt must drop SELL: {:?}",
+        client.algo_orders
+    );
+    assert!(state
+        .recent_actions
+        .iter()
+        .any(|a| a.text.contains("хвост предыдущей сделки")));
+}
+
+#[test]
+fn s1_rearm_skips_leftover_alt() {
+    let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    let alt = Position::long("LINKUSDT", d("10"), d("20"), Some(d("19")), Some(d("22")));
+    let snap = live_book(Some(alt.clone()), vec![alt]);
+    let mut state = EngineState::new(1);
+    let done = rearm_live_protectives(&cfg, &mut client, &mut state, &snap);
+    assert!(done.is_empty(), "{done:?}");
+    assert!(client.replaces.is_empty());
+}
+
+#[test]
+fn parse_open_order_rows_accepts_wrapped_object() {
+    let raw = json!({"orders": [{"symbol": "BTCUSDT", "side": "SELL"}]});
+    let rows = parse_open_order_rows(&raw);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["symbol"], "BTCUSDT");
+    let arr = json!([{"symbol": "ETHUSDT"}]);
+    assert_eq!(parse_open_order_rows(&arr).len(), 1);
+}
+
+#[test]
 fn vanished_long_cancels_leftover_protectives() {
     let cfg = cfg_live();
     let mut client = FakeClient::new();
@@ -1192,9 +1279,10 @@ fn orphan_cleanup_does_not_probe_majors_when_global_list_works() {
     let mut state = EngineState::new(4);
     let cleared = clear_orphan_protectives(&cfg, &mut client, &mut state, &snap);
     assert_eq!(cleared, vec!["ADAUSDT".to_string()]);
-    // Exactly one global algo list + one global open-orders list.
+    // Global algo + global open-orders, then per-id leftover cancel on ADA only
+    // (2 more lists). Must not probe BTC/ETH/SOL/chart.
     assert_eq!(
-        client.order_list_calls, 2,
+        client.order_list_calls, 4,
         "per-symbol BTC/ETH/SOL/chart probes must not run when global listing works"
     );
     assert_eq!(client.protect_cancels, vec!["ADAUSDT"]);

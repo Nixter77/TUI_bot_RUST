@@ -951,6 +951,43 @@ fn leftover_short_blocks_new_entries() {
     assert!(decisions[0].reason().contains("SHORT"));
 }
 
+#[test]
+fn s1_treats_leftover_alt_as_tail() {
+    let btc = Position::long(
+        "BTCUSDT",
+        d("0.01"),
+        d("50000"),
+        Some(d("49000")),
+        Some(d("52000")),
+    );
+    let alt = Position::long("LINKUSDT", d("10"), d("20"), Some(d("19")), Some(d("22")));
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = majors();
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.live_book = true;
+    snap.account_ok = true;
+    snap.open_positions = vec![btc.clone(), alt];
+    snap.position = Some(btc.clone());
+    let mut state = EngineState::new(1);
+    state.positions = vec![btc];
+    let mom = MomentumParams {
+        always_enter: true,
+        max_positions: 3,
+        ..MomentumParams::default()
+    };
+    let (_, decisions) = tick_decisions(&state, &snap, london_ts(), Some(&mom), None, None, None);
+    assert!(!decisions.iter().any(is_enter), "{decisions:?}");
+    assert!(decisions[0].reason().contains("хвост"), "{decisions:?}");
+    assert!(decisions[0].reason().contains("LINKUSDT"), "{decisions:?}");
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| d.symbol() == "LINKUSDT" && is_amend(d)),
+        "S1 must not trail leftover alts: {decisions:?}"
+    );
+}
+
 fn make_ts() -> f64 {
     london_ts() + 4.0 * 60.0
 }
