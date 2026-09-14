@@ -156,6 +156,8 @@ pub struct ContinuationParams {
     pub stop_lookback: usize,
     /// Signal kline interval (5m / 15m / 30m / 1h).
     pub interval: TradeInterval,
+    /// Phase-3 SetupScore soft gate (hard gates unchanged). Off = baseline A/B.
+    pub setup_score: bool,
 }
 
 impl Default for ContinuationParams {
@@ -186,6 +188,7 @@ impl Default for ContinuationParams {
             min_pullback_pct: TradeInterval::Minute5.min_pullback_pct(),
             stop_lookback: 3,
             interval: TradeInterval::Minute5,
+            setup_score: true,
         }
     }
 }
@@ -940,9 +943,18 @@ fn enter_from_ticker(
     if tp <= ticker.last_price {
         return Decision::hold("computed stop invalid");
     }
+    let reason = if p.setup_score {
+        let sc = crate::setup_score::evaluate(snapshot, ticker, &last, p, now);
+        format!(
+            "откат ликвид {}% score={}",
+            ticker.price_change_percent, sc.score
+        )
+    } else {
+        format!("откат ликвид {}%", ticker.price_change_percent)
+    };
     Decision::EnterLong {
         symbol: ticker.symbol.clone(),
-        reason: format!("откат ликвид {}%", ticker.price_change_percent),
+        reason,
         take_profit: tp,
         stop_loss: sl,
     }
@@ -1174,6 +1186,11 @@ fn skip_new_long(
         let r = "стоп слишком широкий — не вхожу".to_string();
         log_skip_reason(&ticker.symbol, &r);
         return Some(r);
+    }
+    // Phase-3 SetupScore: soft score + costR soft-reject (hard gates above unchanged).
+    if let Some(reason) = crate::setup_score::soft_entry_skip(snapshot, ticker, bar, p, now) {
+        log_skip_reason(&ticker.symbol, &reason);
+        return Some(reason);
     }
     None
 }

@@ -39,6 +39,7 @@ pub mod report;
 pub mod s4stats;
 pub mod scalp;
 pub mod sessions;
+pub mod setup_score;
 pub mod signals;
 pub mod signing;
 pub mod sim;
