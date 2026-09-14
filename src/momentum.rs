@@ -188,8 +188,9 @@ fn s1_ret_1h_pct(bars: &[Bar]) -> Option<Decimal> {
     Some((last.close - prev.close) / prev.close * Decimal::from(100))
 }
 
-/// Research (~28d majors): 24h in [2%, 4%) fades (trail-heavy, ~0 MFE);
-/// continuation lives in +4%…+12% with multi-day still green. Missing bars = fail-open.
+/// Research (~28d majors): 24h in [2%, 4%) faded on that sample (trail-heavy, thin 1h MFE);
+/// +4%…+12% continued more often when multi-day was still green. Missing bars = fail-open.
+/// Not a proven edge — cargo `--backtest` on this crate is still unprofitable.
 fn s1_edge_skip(ticker: &Ticker, snapshot: Option<&MarketSnapshot>) -> Option<String> {
     let c24 = ticker.price_change_percent;
     // Mid-band mean-reversion pocket — not "new indicators", just don't buy the fade.
@@ -201,7 +202,7 @@ fn s1_edge_skip(ticker: &Ticker, snapshot: Option<&MarketSnapshot>) -> Option<St
     };
     let htf = snap.htf_bars_for(&ticker.symbol);
     if let Some(r3) = s1_ret_3d_pct(htf) {
-        // Longer lookback: edge is multi-day, not a one-day spike.
+        // Longer lookback: skip one-day spikes that already faded on 3d.
         if r3 < Decimal::ONE {
             return Some("3д импульс слабый — не вхожу".into());
         }

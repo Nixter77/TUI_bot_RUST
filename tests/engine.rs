@@ -1690,6 +1690,59 @@ fn s1_skips_when_3d_impulse_weak() {
 }
 
 #[test]
+fn s1_skips_late_chase_without_1h_confirm() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    // 5.5% 24h sits past the [2%, 4%) mid-band; late-chase is 24h≥2.5% without 1h≥0.1%.
+    snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("5.5"), d("800000"))];
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.account_ok = true;
+    snap.htf_bars
+        .insert("BTCUSDT".into(), htf_up_4h_at(50_000.0));
+    // 20 closed 5m bars, last ~flat vs 12 bars ago → 1h return ~0% (< 0.1%).
+    let t0 = london_ms();
+    let dt = 5 * 60_000i64;
+    let bars: Vec<Bar> = (0..20)
+        .map(|i| Bar {
+            open_time: t0 + i * dt,
+            open: d("49990"),
+            high: d("50020"),
+            low: d("49980"),
+            close: d("50000"),
+            volume: d("20"),
+        })
+        .collect();
+    let last = bars.last().cloned().expect("bars");
+    snap.last_bars.insert("BTCUSDT".into(), last);
+    snap.universe_bars.insert("BTCUSDT".into(), bars);
+    let mom = MomentumParams {
+        always_enter: true,
+        max_positions: 1,
+        ..MomentumParams::default()
+    };
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !decisions.iter().any(|d| is_enter(d)),
+        "hot 24h without 1h confirm must skip (late chase): {decisions:?}"
+    );
+    let skip =
+        tui_bot::momentum::s1_setup_skip(&snap.tickers[0], &snap.last_bars, true, Some(&snap));
+    assert_eq!(
+        skip.as_deref(),
+        Some("догон 24h без 1h — не вхожу"),
+        "late-chase filter reason: {skip:?}"
+    );
+}
+
+#[test]
 fn holds_open_long_on_red_5m_above_stop() {
     let pos = Position::long(
         "BTCUSDT",

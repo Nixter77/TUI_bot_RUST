@@ -258,6 +258,17 @@ graph TD
 * **Тайминг**: Окна UTC (`00–02`, `07–10`, `13–16`) либо 24/7 при `STRATEGY1_ALWAYS_ENTER=1`.
 * **Выход**: тейк-профит (`TAKE_PROFIT_PCT`, 2.5%) и только-вверх трейл (`TRAIL_PCT`, 2.0%) от входа. Красная 5м и выпадение из топа **не** закрывают лонг — ждём TP/SL.
 
+#### Cargo `--backtest` (majors 5m, shipped 2.5/2.0 TP/trail, 24/7)
+
+Home-economic `cargo run -- --backtest --strategy 1`: fee 0.04%/side, notional 20 USDT. Same klines cache.
+
+| | n | wr | pnl |
+| --- | ---: | ---: | ---: |
+| baseline (before mid-band / 3d / late-chase) | 7 | 0% | −2.1941 |
+| after filters | 2 | 0% | −0.7653 |
+
+Research on ~28d majors 5m suggested 24h **[2%, 4%)** is a fade pocket (PF~0.54) while +4–12% continued more often. Filters cut some losers (7→2 trades). **Cargo BT is still unprofitable** (0% WR). This is not an edge and is **not** a reason to restart S1 live.
+
 ---
 
 ### 2. Scalp (Клавиша `2`)
