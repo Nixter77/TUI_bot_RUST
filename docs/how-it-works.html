@@ -490,7 +490,7 @@ footer {
     <h4>Книга входа</h4>
     <ul>
       <li>Ранг 24h % среди tradable USDT-M</li>
-      <li>Мин. рост <code>+0.4%</code>, потолок <code>+12%</code></li>
+      <li>Мин. рост <code>+0.4%</code>, потолок <code>+12%</code>; сетап режет mid-band <code>[2%, 4%)</code></li>
       <li>Мин. quote volume 50k, junk/1000x/TradFi out</li>
       <li>Слотов: <code>STRATEGY1_MAX_POSITIONS</code> (1–10)</li>
       <li>Окна UTC 00–02 / 07–10 / 13–16, либо <code>STRATEGY1_ALWAYS_ENTER=1</code></li>
@@ -500,10 +500,9 @@ footer {
   <div class="card">
     <h4>Сетап и выход</h4>
     <ul>
-      <li><code>s1_setup_skip</code>: не в топе / у 24h high (2%) / нет 5м / 5м красная</li>
+      <li><code>s1_setup_skip</code>: не в топе / mid-band fade / слабый 3д / догон без 1h / нет 5м / 5м красная / 4ч&lt;EMA20</li>
       <li>TP net +2.5% (после комиссии), trail 2.0% только вверх</li>
-      <li>Выпал из топа → Exit «выпал из топа — закрываю до стопа»</li>
-      <li>Красная 5м на открытом → Exit до стопа</li>
+      <li>Выпал из топа / красная 5м на открытом → <b>не</b> Exit (ждём TP/SL/trail)</li>
       <li>Любой открытый слот в минусе → новый EnterLong запрещён («слот в минусе»)</li>
       <li>Mark ≥ TP / mark ≤ SL → Exit</li>
     </ul>
@@ -791,7 +790,7 @@ footer {
 </pre>
 
 <footer>
-  Собрано по текущему коду crate <b>tui-bot</b> (не по устаревшим абзацам README, где они расходятся: S1 порог в коде +0.4%, S4 stretch не режет зелёных лидеров).
+  Собрано по текущему коду crate <b>tui-bot</b> (не по устаревшим абзацам README, где они расходятся: S1 книга +0.4%…+12% + mid-band/3д edge filters; S4 stretch не режет зелёных лидеров).
   Открой этот файл в браузере. Печать → PDF. Ордера сам не запускает.
 </footer>
 </div>

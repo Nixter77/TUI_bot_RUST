@@ -1323,9 +1323,10 @@ fn live_tui_loop_fills_three_majors_not_alts() {
         Ticker::new("MORPHOUSDT", d("2.87"), d("9.8"), d("300000")),
         Ticker::new("SPKUSDT", d("0.0225"), d("8.4"), d("200000")),
         Ticker::new("GRASSUSDT", d("0.364"), d("7.1"), d("150000")),
-        Ticker::new("BTCUSDT", d("77600"), d("0.8"), d("800000")),
-        Ticker::new("ETHUSDT", d("2450"), d("1.6"), d("700000")),
-        Ticker::new("SOLUSDT", d("95.4"), d("2.0"), d("200000")),
+        // Outside S1 mid-band fade [2%, 4); alts still ignored by majors book.
+        Ticker::new("BTCUSDT", d("77600"), d("6.8"), d("800000")),
+        Ticker::new("ETHUSDT", d("2450"), d("5.6"), d("700000")),
+        Ticker::new("SOLUSDT", d("95.4"), d("4.5"), d("200000")),
     ];
     snap.account.wallet_balance = d("10000");
     snap.account.available_balance = d("10000");

@@ -210,7 +210,7 @@ pub fn pick_momentum_book(
     rows
 }
 
-/// Strategy 1 book: BTC/ETH/SOL only, +0.4%…+12% 24h, not sitting on the day's high.
+/// Strategy 1 book: BTC/ETH/SOL only, +0.4%…+12% 24h (setup also skips mid-band fade + weak 3d).
 /// TestNet 24h alt leaders (MORPHO/SPK/GIGGLE) are a noise incinerator — alts belong to S4.
 pub fn pick_strategy1_book(tickers: &[Ticker], n: usize, exclude: &[String]) -> Vec<Ticker> {
     pick_strategy1_book_with(

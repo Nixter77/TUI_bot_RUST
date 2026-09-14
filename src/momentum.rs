@@ -161,6 +161,65 @@ fn s1_htf_skip(snapshot: Option<&MarketSnapshot>, symbol: &str) -> Option<String
     None
 }
 
+/// ~3 calendar days from closed 4h bars (18×4h). None = not enough history.
+fn s1_ret_3d_pct(htf: &[Bar]) -> Option<Decimal> {
+    // Need prior close ~72h back: index len-1-18.
+    if htf.len() < 19 {
+        return None;
+    }
+    let last = htf.last()?;
+    let prev = &htf[htf.len() - 19];
+    if prev.close <= Decimal::ZERO {
+        return None;
+    }
+    Some((last.close - prev.close) / prev.close * Decimal::from(100))
+}
+
+/// ~1h return from 5m universe bars (12 bars). None = not enough history.
+fn s1_ret_1h_pct(bars: &[Bar]) -> Option<Decimal> {
+    if bars.len() < 13 {
+        return None;
+    }
+    let last = bars.last()?;
+    let prev = &bars[bars.len() - 13];
+    if prev.close <= Decimal::ZERO {
+        return None;
+    }
+    Some((last.close - prev.close) / prev.close * Decimal::from(100))
+}
+
+/// Research (~28d majors): 24h in [2%, 4%) fades (trail-heavy, ~0 MFE);
+/// continuation lives in +4%…+12% with multi-day still green. Missing bars = fail-open.
+fn s1_edge_skip(ticker: &Ticker, snapshot: Option<&MarketSnapshot>) -> Option<String> {
+    let c24 = ticker.price_change_percent;
+    // Mid-band mean-reversion pocket — not "new indicators", just don't buy the fade.
+    if c24 >= Decimal::from(2) && c24 < Decimal::from(4) {
+        return Some("24h mid-band fade — не вхожу".into());
+    }
+    let Some(snap) = snapshot else {
+        return None;
+    };
+    let htf = snap.htf_bars_for(&ticker.symbol);
+    if let Some(r3) = s1_ret_3d_pct(htf) {
+        // Longer lookback: edge is multi-day, not a one-day spike.
+        if r3 < Decimal::ONE {
+            return Some("3д импульс слабый — не вхожу".into());
+        }
+    }
+    // Late chase: hot 24h already given back on the 1h — skip when 5m depth exists.
+    if c24 >= Decimal::new(25, 1) {
+        if let Some(bars) = snap.universe_bars.get(&ticker.symbol) {
+            if let Some(r1) = s1_ret_1h_pct(bars) {
+                if r1 < Decimal::new(1, 1) {
+                    // < +0.1%
+                    return Some("догон 24h без 1h — не вхожу".into());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn enter_from_ticker(ticker: &Ticker, p: &MomentumParams) -> Decision {
     let tp = match take_profit_price_net(ticker.last_price, "LONG", p.tp_pct) {
         Ok(v) => v,
@@ -205,6 +264,9 @@ pub fn s1_setup_skip(
         return Some("не в топе роста".into());
     }
     if let Some(reason) = s1_htf_skip(snapshot, &ticker.symbol) {
+        return Some(reason);
+    }
+    if let Some(reason) = s1_edge_skip(ticker, snapshot) {
         return Some(reason);
     }
     if !last_bars.is_empty() {
@@ -342,6 +404,9 @@ pub fn momentum_decisions(
         }
         if s1_htf_skip(snapshot, &ticker.symbol).is_some() {
             skipped_htf = true;
+            continue;
+        }
+        if s1_edge_skip(ticker, snapshot).is_some() {
             continue;
         }
         if !last_bars.is_empty() {

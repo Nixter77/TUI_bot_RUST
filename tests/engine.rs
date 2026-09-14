@@ -418,7 +418,8 @@ fn scan_buys_fastest_major_not_alt_junk() {
         Ticker::new("GRASSUSDT", d("0.364"), d("7.1"), d("150000")),
         Ticker::new("BTCUSDT", d("50000"), d("0.8"), d("800000")),
         Ticker::new("ETHUSDT", d("3000"), d("1.6"), d("700000")),
-        Ticker::new("SOLUSDT", d("95"), d("2.0"), d("200000")),
+        // 2–4% 24h is the fade mid-band — use a real continuation print.
+        Ticker::new("SOLUSDT", d("95"), d("5.2"), d("200000")),
     ];
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = tickers;
@@ -1613,6 +1614,78 @@ fn s1_skips_major_when_4h_below_ema20() {
     assert!(
         up.iter().any(|d| is_enter(d) && d.symbol() == "BTCUSDT"),
         "4h uptrend may enter BTC: {up:?}"
+    );
+}
+
+#[test]
+fn s1_skips_24h_mid_band_fade() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![
+        Ticker::new("BTCUSDT", d("50000"), d("3.0"), d("800000")),
+        Ticker::new("ETHUSDT", d("3000"), d("2.5"), d("700000")),
+        Ticker::new("SOLUSDT", d("95"), d("3.5"), d("200000")),
+    ];
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.account_ok = true;
+    let mom = MomentumParams {
+        always_enter: true,
+        max_positions: 3,
+        ..MomentumParams::default()
+    };
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !decisions.iter().any(|d| is_enter(d)),
+        "2–4% 24h majors must not enter (fade pocket): {decisions:?}"
+    );
+}
+
+#[test]
+fn s1_skips_when_3d_impulse_weak() {
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("5.5"), d("800000"))];
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.account_ok = true;
+    // Rising 4h path but only ~0.3% over last 3d → multi-day floor fails.
+    let mut htf = htf_up_4h_at(50_000.0);
+    let n = htf.len();
+    if n >= 19 {
+        let last = htf[n - 1].close;
+        let prev_i = n - 19;
+        // Force 3d return ~0.3%: prev = last / 1.003
+        let prev = last * d("1000") / d("1003");
+        htf[prev_i].close = prev;
+        htf[prev_i].open = prev;
+        htf[prev_i].high = prev + d("50");
+        htf[prev_i].low = prev - d("50");
+    }
+    snap.htf_bars.insert("BTCUSDT".into(), htf);
+    let mom = MomentumParams {
+        always_enter: true,
+        max_positions: 1,
+        ..MomentumParams::default()
+    };
+    let (_, decisions) = tick_decisions(
+        &EngineState::new(1),
+        &snap,
+        london_ts(),
+        Some(&mom),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !decisions.iter().any(|d| is_enter(d)),
+        "weak 3d impulse must skip: {decisions:?}"
     );
 }
 
