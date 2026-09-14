@@ -12,9 +12,9 @@ use tui_bot::errors::{COOLDOWN_SEC, RETRY_BACKOFF_SEC};
 use tui_bot::exchange::{
     buy_client_order_id, is_already_flat_close_error, market_close_params, parse_open_order_rows,
     prepare_algo_params, prune_stale_protectives, reduce_only_close_side, replace_stop_place_first,
-    risk_position_notional, sell_protectives_are_sized, size_market_order, size_risk_market_order,
-    sized_long_protectives, stale_sell_protective, ExchangeError, FlattenClient, LiveClient,
-    SymbolFilters,
+    risk_position_notional, sell_protectives_are_sized, should_retry_close_without_reduce_only,
+    size_market_order, size_risk_market_order, sized_long_protectives, stale_sell_protective,
+    ExchangeError, FlattenClient, LiveClient, SymbolFilters,
 };
 use tui_bot::journal::{set_active, TradeJournal};
 use tui_bot::live::{
@@ -2503,6 +2503,20 @@ fn already_flat_close_error_is_narrow() {
     ));
     assert!(!is_already_flat_close_error(
         r#"{"code":-1111,"msg":"Precision is over the maximum"}"#
+    ));
+}
+
+#[test]
+fn minus_2022_retries_naked_close_only_when_book_still_open() {
+    let err = r#"{"code":-2022,"msg":"ReduceOnly Order is rejected."}"#;
+    assert!(should_retry_close_without_reduce_only(err, true));
+    assert!(
+        !should_retry_close_without_reduce_only(err, false),
+        "true flat must not naked-BUY/SELL (would open the other side)"
+    );
+    assert!(!should_retry_close_without_reduce_only(
+        r#"{"code":-1111,"msg":"Precision is over the maximum"}"#,
+        true
     ));
 }
 
