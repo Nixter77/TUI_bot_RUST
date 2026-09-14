@@ -390,6 +390,29 @@ fn next_utc_midnight(now: f64) -> f64 {
         .unwrap_or(now + 86_400.0)
 }
 
+/// Unix time of the next Binance bar close on `interval` (bars align to epoch).
+fn next_aligned_close(interval: TradeInterval, now: f64) -> f64 {
+    let dur = interval.duration_ms() / 1000;
+    if dur <= 0 {
+        return now;
+    }
+    let now_i = now.max(0.0).floor() as i64;
+    let rem = now_i.rem_euclid(dur);
+    if rem == 0 {
+        (now_i + dur) as f64
+    } else {
+        (now_i + (dur - rem)) as f64
+    }
+}
+
+fn close_until_text(close: f64, interval: TradeInterval, now: f64) -> String {
+    format!(
+        "ещё {} до закрытия {}",
+        fmt_remain((close - now).max(0.0)),
+        interval.as_ru()
+    )
+}
+
 fn next_bar_until(
     snapshot: &MarketSnapshot,
     symbol: &str,
@@ -401,22 +424,30 @@ fn next_bar_until(
         if let Some(bar) = snapshot.last_bars.get(symbol) {
             return bar_close_until(bar.open_time, interval, now);
         }
-        return format!("ждёт свечу {}", interval.as_ru());
+        return close_until_text(next_aligned_close(interval, now), interval, now);
     };
     bar_close_until(last.open_time, interval, now)
 }
 
 fn bar_close_until(open_time_ms: i64, interval: TradeInterval, now: f64) -> String {
-    let close = (open_time_ms + interval.duration_ms()) as f64 / 1000.0;
-    if close > now {
-        format!(
-            "ещё {} до закрытия {}",
-            fmt_remain(close - now),
-            interval.as_ru()
-        )
+    let this_close = (open_time_ms + interval.duration_ms()) as f64 / 1000.0;
+    let close = if this_close > now {
+        this_close
     } else {
-        format!("ждёт свечу {}", interval.as_ru())
+        // Snapshot keeps last *closed* kline (`closed_klines` drops the forming bar),
+        // so this_close is already in the past. Count down to the next aligned close
+        // instead of freezing on «ждёт свечу 5м» for hours.
+        next_aligned_close(interval, now)
+    };
+    close_until_text(close, interval, now)
+}
+
+fn session_until(cfg: &Config, state: &EngineState, now: f64) -> Option<String> {
+    let (windows, always) = session_knobs(cfg, state.strategy_id);
+    if in_entry_window(now, Some(&windows), always) {
+        return None;
     }
+    next_window_start(now, &windows).map(|nxt| until_clock(nxt.timestamp() as f64, now))
 }
 
 fn scan_until(state: &EngineState, poll_sec: f64, now: f64) -> String {
@@ -480,6 +511,40 @@ fn price_until(last: Decimal, target: Decimal, label: &str) -> String {
         fmt_price(usdt),
         pct_gap(pct)
     )
+}
+
+fn s1_setup_until(snapshot: &MarketSnapshot, ticker: &Ticker, now: f64) -> String {
+    let skip = crate::momentum::s1_setup_skip(ticker, &snapshot.last_bars, true, Some(snapshot));
+    if let Some(reason) = skip.as_deref() {
+        if reason.contains("догон") {
+            return "ждёт 1h подтверждение".into();
+        }
+        if reason.contains("4ч") {
+            let htf = snapshot.htf_bars_for(&ticker.symbol);
+            if htf.len() >= 21 {
+                let closes: Vec<Decimal> = htf.iter().map(|b| b.close).collect();
+                if let (Some(ema), Some(last)) = (last_ema(&closes, 20), htf.last()) {
+                    if last.close <= ema {
+                        return price_until(last.close, ema, "4ч EMA20");
+                    }
+                }
+            }
+            return "ждёт 4ч EMA20".into();
+        }
+        if reason.contains("красная") || reason.contains("нет 5м") {
+            return next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now);
+        }
+    }
+    if near_24h_high(ticker, Decimal::new(2, 2)) && ticker.high_price > Decimal::ZERO {
+        let cap = ticker.high_price * Decimal::new(98, 2);
+        if ticker.last_price > cap && ticker.last_price > Decimal::ZERO {
+            let pct = (ticker.last_price - cap) / ticker.last_price * Decimal::from(100);
+            if pct >= Decimal::new(1, 1) {
+                return format!("ещё {}% вниз от 24h high", pct_gap(pct));
+            }
+        }
+    }
+    next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
 }
 
 fn s4_setup_until(
@@ -562,11 +627,8 @@ fn until_entry(
             if now < state.cooldown_until {
                 return until_clock(state.cooldown_until, now);
             }
-            let (windows, always) = session_knobs(cfg, state.strategy_id);
-            if !in_entry_window(now, Some(&windows), always) {
-                if let Some(nxt) = next_window_start(now, &windows) {
-                    return until_clock(nxt.timestamp() as f64, now);
-                }
+            if let Some(text) = session_until(cfg, state, now) {
+                return text;
             }
             if state.entries_paused {
                 return "пока r в торговом TUI".into();
@@ -574,21 +636,13 @@ fn until_entry(
             "ждёт свободный слот".into()
         }
         WaitKind::Setup => {
+            if let Some(text) = session_until(cfg, state, now) {
+                return text;
+            }
             if is_continuation(state.strategy_id) {
                 s4_setup_until(snapshot, ticker, &s4_params(cfg, state.strategy_id), now)
             } else if state.strategy_id == 1 {
-                if near_24h_high(ticker, Decimal::new(2, 2)) && ticker.high_price > Decimal::ZERO {
-                    let cap = ticker.high_price * Decimal::new(98, 2);
-                    if ticker.last_price > cap {
-                        return format!(
-                            "ещё {}% вниз от 24h high",
-                            pct_gap(
-                                (ticker.last_price - cap) / ticker.last_price * Decimal::from(100)
-                            )
-                        );
-                    }
-                }
-                next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
+                s1_setup_until(snapshot, ticker, now)
             } else {
                 next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
             }
@@ -623,12 +677,14 @@ pub fn classify_waiting(
         }
         let setup = setup_skip(cfg, state, snapshot, &ticker, now);
         let pause = pause_reason(state, &ticker.symbol, now);
+        // Hours/halt/slots first. Scalp/trend `Decision::Hold` also says «вне сессии»,
+        // and that used to land in Setup → «ждёт свечу 5м» for the whole closed window.
         let (kind, reason) = if let Some(why) = pause {
             (WaitKind::Pause, why)
-        } else if let Some(why) = setup {
-            (WaitKind::Setup, why)
         } else if let Some(why) = gate.clone() {
             (WaitKind::Gate, why)
+        } else if let Some(why) = setup {
+            (WaitKind::Setup, why)
         } else {
             (WaitKind::Ready, "готов к входу".into())
         };

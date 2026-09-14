@@ -12,7 +12,6 @@ pub fn d(s: &str) -> Decimal {
 
 pub fn tickers() -> Vec<Ticker> {
     vec![
-        // ETH must sit outside the S1 mid-band fade pocket [2%, 4%).
         Ticker::new("ETHUSDT", d("3000"), d("5.5"), d("100000")),
         Ticker::new("BTCUSDT", d("50000"), d("9.5"), d("800000")),
         Ticker::new("SOLUSDT", d("140"), d("4.0"), d("200000")),

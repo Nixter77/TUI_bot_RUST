@@ -4,6 +4,7 @@ use crate::config::{default_risk_pct, TradeInterval, STRATEGY1_POLL_SECONDS};
 use crate::dayrisk::{default_daily_loss_r, default_daily_loss_usdt};
 use crate::indicators::last_ema;
 use crate::models::{bar_is_red, Bar, Decision, MarketSnapshot, Position, Side, Ticker};
+use crate::money::round_trip_taker_pct;
 use crate::ranking::{momentum_min_change_percent, pick_strategy1_book_with};
 use crate::sessions::{
     in_entry_window, outside_entry_reason, session_status, HourWindow, DEFAULT_ENTRY_WINDOWS,
@@ -11,6 +12,16 @@ use crate::sessions::{
 use crate::trail::{candidate_stop, long_stop_is_valid, take_profit_price_net, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
+
+/// Rider TP is at least 2R of the stop. 2.5% TP with a 2% SL is a scalp, not a ride.
+pub fn s1_tp_pct(tp_pct: Decimal, trail_pct: Decimal) -> Decimal {
+    let two_r = trail_pct * Decimal::from(2);
+    if tp_pct >= two_r {
+        tp_pct
+    } else {
+        two_r
+    }
+}
 
 /// Tick knobs. S4 fields hitch here so `engine::tick` takes one options object.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,7 +51,7 @@ impl Default for MomentumParams {
     fn default() -> Self {
         Self {
             poll_seconds: STRATEGY1_POLL_SECONDS,
-            tp_pct: Decimal::new(25, 3),
+            tp_pct: Decimal::new(5, 2),
             trail_pct: Decimal::new(20, 3),
             min_quote_volume: Decimal::from(50_000),
             entry_windows: DEFAULT_ENTRY_WINDOWS.to_vec(),
@@ -76,6 +87,18 @@ pub(crate) fn mark_for(
         .iter()
         .find(|t| t.symbol == symbol && t.last_price > Decimal::ZERO)
         .map(|t| t.last_price)
+}
+
+fn s1_fee_be(entry: Decimal) -> Decimal {
+    entry * (Decimal::ONE + round_trip_taker_pct())
+}
+
+fn s1_one_r_price(pos: &Position) -> Option<Decimal> {
+    let sl = pos.stop_loss?;
+    if pos.entry_price <= Decimal::ZERO || sl >= pos.entry_price {
+        return None;
+    }
+    Some(pos.entry_price + (pos.entry_price - sl))
 }
 
 fn manage_momentum_long(position: &Position, tickers: &[Ticker], p: &MomentumParams) -> Decision {
@@ -126,10 +149,33 @@ fn manage_momentum_long(position: &Position, tickers: &[Ticker], p: &MomentumPar
             symbol: position.symbol.clone(),
         };
     }
+    let entry = position.entry_price;
+    // Pre-BE: do not trail. 90d majors walk: immediate trail WR~36% vs BE-then-trail ~49%.
+    if sl < entry {
+        if let Some(one_r) = s1_one_r_price(position) {
+            if mark >= one_r {
+                let be = s1_fee_be(entry);
+                if be > sl && long_stop_is_valid(be, mark) {
+                    return Decision::AmendStop {
+                        stop_loss: be,
+                        reason: "безубыток на 1R".into(),
+                        symbol: position.symbol.clone(),
+                    };
+                }
+            }
+        }
+        return Decision::hold("momentum hold / жду 1R");
+    }
     let cand = match candidate_stop(mark, "LONG", p.trail_pct) {
         Ok(c) => c,
         Err(_) => return Decision::hold("momentum hold / trail not raised"),
     };
+    let floor = if entry > Decimal::ZERO {
+        s1_fee_be(entry)
+    } else {
+        cand
+    };
+    let cand = if cand < floor { floor } else { cand };
     let new_sl = match trail_stop_upward(Some(sl), cand, "LONG") {
         Ok(v) => v,
         Err(_) => return Decision::hold("momentum hold / trail not raised"),
@@ -161,20 +207,6 @@ fn s1_htf_skip(snapshot: Option<&MarketSnapshot>, symbol: &str) -> Option<String
     None
 }
 
-/// ~3 calendar days from closed 4h bars (18×4h). None = not enough history.
-fn s1_ret_3d_pct(htf: &[Bar]) -> Option<Decimal> {
-    // Need prior close ~72h back: index len-1-18.
-    if htf.len() < 19 {
-        return None;
-    }
-    let last = htf.last()?;
-    let prev = &htf[htf.len() - 19];
-    if prev.close <= Decimal::ZERO {
-        return None;
-    }
-    Some((last.close - prev.close) / prev.close * Decimal::from(100))
-}
-
 /// ~1h return from 5m universe bars (12 bars). None = not enough history.
 fn s1_ret_1h_pct(bars: &[Bar]) -> Option<Decimal> {
     if bars.len() < 13 {
@@ -188,31 +220,18 @@ fn s1_ret_1h_pct(bars: &[Bar]) -> Option<Decimal> {
     Some((last.close - prev.close) / prev.close * Decimal::from(100))
 }
 
-/// Research (~28d majors): 24h in [2%, 4%) faded on that sample (trail-heavy, thin 1h MFE);
-/// +4%…+12% continued more often when multi-day was still green. Missing bars = fail-open.
-/// Not a proven edge — cargo `--backtest` on this crate is still unprofitable.
+/// Late chase only: hot 24h already given back on the 1h. Missing bars = fail-open.
+/// 90d majors walk: 3d-impulse and [2%, 4%) mid-band were train-mirage / knife-edge
+/// (blocked ETH at +1.8% 24h while 3d < 1%). Dropped. Late-chase stayed +EV both splits.
 fn s1_edge_skip(ticker: &Ticker, snapshot: Option<&MarketSnapshot>) -> Option<String> {
     let c24 = ticker.price_change_percent;
-    // Mid-band mean-reversion pocket — not "new indicators", just don't buy the fade.
-    if c24 >= Decimal::from(2) && c24 < Decimal::from(4) {
-        return Some("24h mid-band fade — не вхожу".into());
-    }
     let Some(snap) = snapshot else {
         return None;
     };
-    let htf = snap.htf_bars_for(&ticker.symbol);
-    if let Some(r3) = s1_ret_3d_pct(htf) {
-        // Longer lookback: skip one-day spikes that already faded on 3d.
-        if r3 < Decimal::ONE {
-            return Some("3д импульс слабый — не вхожу".into());
-        }
-    }
-    // Late chase: hot 24h already given back on the 1h — skip when 5m depth exists.
     if c24 >= Decimal::new(25, 1) {
         if let Some(bars) = snap.universe_bars.get(&ticker.symbol) {
             if let Some(r1) = s1_ret_1h_pct(bars) {
                 if r1 < Decimal::new(1, 1) {
-                    // < +0.1%
                     return Some("догон 24h без 1h — не вхожу".into());
                 }
             }
@@ -222,10 +241,11 @@ fn s1_edge_skip(ticker: &Ticker, snapshot: Option<&MarketSnapshot>) -> Option<St
 }
 
 fn enter_from_ticker(ticker: &Ticker, p: &MomentumParams) -> Decision {
-    let tp = match take_profit_price_net(ticker.last_price, "LONG", p.tp_pct) {
-        Ok(v) => v,
-        Err(_) => return Decision::hold("computed stop invalid"),
-    };
+    let tp =
+        match take_profit_price_net(ticker.last_price, "LONG", s1_tp_pct(p.tp_pct, p.trail_pct)) {
+            Ok(v) => v,
+            Err(_) => return Decision::hold("computed stop invalid"),
+        };
     let sl = match candidate_stop(ticker.last_price, "LONG", p.trail_pct) {
         Ok(v) => v,
         Err(_) => return Decision::hold("computed stop invalid"),

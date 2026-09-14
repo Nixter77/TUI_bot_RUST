@@ -100,46 +100,66 @@ fn does_not_rescan_before_poll() {
 fn trails_stop_up_and_never_down() {
     let params = MomentumParams {
         poll_seconds: 120,
-        trail_pct: d("0.006"),
+        trail_pct: d("0.020"),
         ..MomentumParams::default()
     };
     let pos = Position {
         symbol: "BTCUSDT".into(),
         side: Side::Long,
         qty: d("0.01"),
-        entry_price: d("50000"),
-        stop_loss: Some(d("100")),
-        take_profit: Some(d("90000")),
+        entry_price: d("100"),
+        stop_loss: Some(d("98")),
+        take_profit: Some(d("200")),
         unrealized_pnl: Decimal::ZERO,
         opened_bar_time: None,
         leverage: 0,
     };
+    let pre = vec![Ticker::new("BTCUSDT", d("100.5"), d("1"), d("1"))];
+    let (hold, _) = momentum_decision(&pre, Some(&pos), 50.0, 0.0, Some(&params));
+    assert!(is_hold(&hold), "{hold:?}");
+    assert!(!is_amend(&hold), "pre-1R must not trail: {hold:?}");
+
+    let at_one_r = vec![Ticker::new("BTCUSDT", d("102"), d("1"), d("1"))];
+    let (be, _) = momentum_decision(&at_one_r, Some(&pos), 50.0, 1.0, Some(&params));
+    match be {
+        Decision::AmendStop {
+            stop_loss, reason, ..
+        } => {
+            assert!(reason.contains("безубыток"), "{reason}");
+            let floor = d("100") * (Decimal::ONE + tui_bot::money::round_trip_taker_pct());
+            assert_eq!(stop_loss, floor);
+        }
+        other => panic!("expected BE at 1R, got {other:?}"),
+    }
+
+    let mut locked = pos.clone();
+    locked.stop_loss = Some(d("100") * (Decimal::ONE + tui_bot::money::round_trip_taker_pct()));
     let up = vec![Ticker::new("BTCUSDT", d("110"), d("1"), d("1"))];
-    let (decision, _) = momentum_decision(&up, Some(&pos), 50.0, 1.0, Some(&params));
-    match decision {
+    let (trail, _) = momentum_decision(&up, Some(&locked), 50.0, 1.0, Some(&params));
+    match trail {
         Decision::AmendStop { stop_loss, .. } => {
             let expected = trail_stop_upward(
-                Some(d("100")),
+                locked.stop_loss,
                 candidate_stop(d("110"), "LONG", params.trail_pct).unwrap(),
                 "LONG",
             )
             .unwrap();
             assert_eq!(stop_loss, expected);
-            assert!(stop_loss > d("100"));
+            assert!(stop_loss > locked.stop_loss.unwrap());
         }
         other => panic!("{other:?}"),
     }
     let high_sl = Position {
-        stop_loss: Some(d("100")),
-        take_profit: Some(d("90000")),
+        stop_loss: Some(d("107")),
+        take_profit: Some(d("200")),
         entry_price: d("100"),
         ..pos
     };
-    let down = vec![Ticker::new("BTCUSDT", d("100.5"), d("1"), d("1"))];
+    let down = vec![Ticker::new("BTCUSDT", d("108"), d("1"), d("1"))];
     let (hold, _) = momentum_decision(&down, Some(&high_sl), 50.0, 1.0, Some(&params));
-    assert!(is_hold(&hold));
-    let cand = candidate_stop(d("100.5"), "LONG", params.trail_pct).unwrap();
-    assert!(cand <= d("100"));
+    assert!(is_hold(&hold), "{hold:?}");
+    let cand = candidate_stop(d("108"), "LONG", params.trail_pct).unwrap();
+    assert!(cand <= d("107"));
 }
 
 #[test]
@@ -418,7 +438,6 @@ fn scan_buys_fastest_major_not_alt_junk() {
         Ticker::new("GRASSUSDT", d("0.364"), d("7.1"), d("150000")),
         Ticker::new("BTCUSDT", d("50000"), d("0.8"), d("800000")),
         Ticker::new("ETHUSDT", d("3000"), d("1.6"), d("700000")),
-        // 2–4% 24h is the fade mid-band — use a real continuation print.
         Ticker::new("SOLUSDT", d("95"), d("5.2"), d("200000")),
     ];
     let mut snap = MarketSnapshot::empty(d("10000"));
@@ -871,24 +890,29 @@ fn manages_three_open_longs_independently() {
         d("0.01"),
         d("50000"),
         Some(d("48000")),
-        Some(d("53000")),
+        Some(d("56000")),
     );
     let eth = Position::long(
         "ETHUSDT",
         d("0.1"),
         d("3000"),
         Some(d("2800")),
-        Some(d("3200")),
+        Some(d("3400")),
     );
     let sol = Position::long(
         "SOLUSDT",
         d("0.4"),
         d("140"),
         Some(d("130")),
-        Some(d("150")),
+        Some(d("160")),
     );
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = tickers();
+    // Marks at 1R so each long locks fee-aware BE (no trail before 1R).
+    snap.tickers = vec![
+        Ticker::new("ETHUSDT", d("3210"), d("5.5"), d("100000")),
+        Ticker::new("BTCUSDT", d("52100"), d("9.5"), d("800000")),
+        Ticker::new("SOLUSDT", d("151"), d("4.0"), d("200000")),
+    ];
     snap.account = account();
     snap.chart_symbol = "BTCUSDT".into();
     snap.live_book = true;
@@ -1655,7 +1679,7 @@ fn s1_skips_major_when_4h_below_ema20() {
 }
 
 #[test]
-fn s1_skips_24h_mid_band_fade() {
+fn s1_allows_24h_between_2_and_4() {
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![
         Ticker::new("BTCUSDT", d("50000"), d("3.0"), d("800000")),
@@ -1680,25 +1704,23 @@ fn s1_skips_24h_mid_band_fade() {
         None,
     );
     assert!(
-        !decisions.iter().any(|d| is_enter(d)),
-        "2–4% 24h majors must not enter (fade pocket): {decisions:?}"
+        decisions.iter().any(|d| is_enter(d)),
+        "mid-band 24h is not a skip (90d walk: knife-edge, not an edge): {decisions:?}"
     );
 }
 
 #[test]
-fn s1_skips_when_3d_impulse_weak() {
+fn s1_weak_3d_does_not_block() {
     let mut snap = MarketSnapshot::empty(d("10000"));
     snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("5.5"), d("800000"))];
     snap.account = account();
     snap.chart_symbol = "BTCUSDT".into();
     snap.account_ok = true;
-    // Rising 4h path but only ~0.3% over last 3d → multi-day floor fails.
     let mut htf = htf_up_4h_at(50_000.0);
     let n = htf.len();
     if n >= 19 {
         let last = htf[n - 1].close;
         let prev_i = n - 19;
-        // Force 3d return ~0.3%: prev = last / 1.003
         let prev = last * d("1000") / d("1003");
         htf[prev_i].close = prev;
         htf[prev_i].open = prev;
@@ -1721,15 +1743,49 @@ fn s1_skips_when_3d_impulse_weak() {
         None,
     );
     assert!(
-        !decisions.iter().any(|d| is_enter(d)),
-        "weak 3d impulse must skip: {decisions:?}"
+        decisions
+            .iter()
+            .any(|d| is_enter(d) && d.symbol() == "BTCUSDT"),
+        "weak 3d must not block (train-mirage filter): {decisions:?}"
     );
+}
+
+#[test]
+fn s1_tp_is_at_least_two_r() {
+    let params = MomentumParams {
+        always_enter: true,
+        poll_seconds: 60,
+        tp_pct: d("0.025"),
+        trail_pct: d("0.020"),
+        ..MomentumParams::default()
+    };
+    let (decision, _) = momentum_decision(&tickers(), None, london_ts(), 0.0, Some(&params));
+    match decision {
+        Decision::EnterLong {
+            take_profit,
+            stop_loss,
+            ..
+        } => {
+            let mark = tickers()
+                .into_iter()
+                .find(|t| t.symbol == "BTCUSDT")
+                .unwrap()
+                .last_price;
+            let two_r = tui_bot::trail::take_profit_price_net(mark, "LONG", d("0.040")).unwrap();
+            assert!(
+                take_profit >= two_r,
+                "S1 TP must be ≥2R of the 2% stop, got {take_profit} vs {two_r}"
+            );
+            assert!(stop_loss < mark);
+        }
+        other => panic!("expected enter, got {other:?}"),
+    }
 }
 
 #[test]
 fn s1_skips_late_chase_without_1h_confirm() {
     let mut snap = MarketSnapshot::empty(d("10000"));
-    // 5.5% 24h sits past the [2%, 4%) mid-band; late-chase is 24h≥2.5% without 1h≥0.1%.
+    // Late-chase: 24h≥2.5% without 1h≥0.1%.
     snap.tickers = vec![Ticker::new("BTCUSDT", d("50000"), d("5.5"), d("800000"))];
     snap.account = account();
     snap.chart_symbol = "BTCUSDT".into();
