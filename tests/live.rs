@@ -495,8 +495,48 @@ fn sets_leverage_only_when_configured() {
 }
 
 #[test]
-fn default_notional_bumps_to_btc_min() {
+fn fixed_notional_below_btc_min_skips_instead_of_upsizing() {
+    // Fixed ORDER_NOTIONAL is a hard risk limit — never silent-bump to Binance min.
     let cfg = cfg_live();
+    let mut client = FakeClient::new();
+    client.min_notional = Decimal::from(100);
+    let mut s = snap(None);
+    s.tickers = vec![Ticker::new("BTCUSDT", d("115000"), d("1"), d("1"))];
+    s.account.wallet_balance = d("3000");
+    let result = apply_live(
+        &cfg,
+        &mut client,
+        &s,
+        &Decision::EnterLong {
+            symbol: "BTCUSDT".into(),
+            reason: "x".into(),
+            take_profit: d("117875"),
+            stop_loss: d("112700"),
+        },
+        None,
+    );
+    assert!(!result.filled);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("below 100 minNotional"),
+        "{:?}",
+        result.error
+    );
+    assert_eq!(client.buys, 0);
+}
+
+#[test]
+fn exchange_min_notional_mode_uses_btc_min() {
+    // ORDER_NOTIONAL_USDT=binance|min|exchange|0 → explicit exchange-min sizing.
+    let mut env = HashMap::new();
+    env.insert("BINANCE_API_KEY".into(), "A".repeat(32));
+    env.insert("BINANCE_API_SECRET".into(), "B".repeat(32));
+    env.insert("ORDER_NOTIONAL_USDT".into(), "binance".into());
+    let cfg = load_config(true, None, Some(&env)).unwrap();
+    assert!(cfg.notional_from_exchange);
     let mut client = FakeClient::new();
     client.min_notional = Decimal::from(100);
     let mut s = snap(None);
@@ -798,6 +838,37 @@ fn s4_live_skips_symbol_when_min_notional_inflates_risk() {
 
 #[test]
 fn s4_live_risk_pct_zero_falls_back_to_order_notional() {
+    // RISK_PCT=0 → fixed ORDER_NOTIONAL path (same hard-limit as S1).
+    let mut env = HashMap::new();
+    env.insert("BINANCE_API_KEY".into(), "A".repeat(32));
+    env.insert("BINANCE_API_SECRET".into(), "B".repeat(32));
+    env.insert("RISK_PCT".into(), "0".into());
+    env.insert("ORDER_NOTIONAL_USDT".into(), "50".into());
+    let cfg = load_config(true, None, Some(&env)).unwrap();
+    assert_eq!(cfg.risk_pct, Decimal::ZERO);
+    let mut client = FakeClient::new();
+    client.min_notional = d("50");
+    let mut s = snap(None);
+    s.tickers = vec![Ticker::new("BTCUSDT", d("100000"), d("1"), d("1"))];
+    let state = EngineState::new(4);
+    let result = apply_live(
+        &cfg,
+        &mut client,
+        &s,
+        &Decision::EnterLong {
+            symbol: "BTCUSDT".into(),
+            reason: "x".into(),
+            take_profit: d("104000"),
+            stop_loss: d("98000"),
+        },
+        Some(&state),
+    );
+    assert!(result.filled, "{:?}", result.error);
+    assert_eq!(client.bought, vec![d("0.001")]);
+}
+
+#[test]
+fn s4_live_risk_pct_zero_below_min_skips_instead_of_upsizing() {
     let mut env = HashMap::new();
     env.insert("BINANCE_API_KEY".into(), "A".repeat(32));
     env.insert("BINANCE_API_SECRET".into(), "B".repeat(32));
@@ -822,9 +893,17 @@ fn s4_live_risk_pct_zero_falls_back_to_order_notional() {
         },
         Some(&state),
     );
-    assert!(result.filled, "{:?}", result.error);
-    // ORDER_NOTIONAL 20 bumps to exchange min 50 (legacy path).
-    assert_eq!(client.bought, vec![d("0.001")]);
+    assert!(!result.filled);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("below 50 minNotional"),
+        "{:?}",
+        result.error
+    );
+    assert_eq!(client.buys, 0);
 }
 
 fn short_pos(symbol: &str, qty: &str, entry: &str, upnl: &str) -> Position {

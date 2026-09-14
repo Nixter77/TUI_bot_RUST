@@ -260,14 +260,14 @@ graph TD
 
 #### Публичные klines (BTC/ETH/SOL 5m, ~90d, fee 0.04%/side, notional 20, 1 слот)
 
-Train 70% / held-out 30%. Immediate trail + 2.5% TP на train **−EV**. BE после 1R + late-chase + TP≥2R — единственная ветка с PF≥1 на **обоих** кусках.
+Research walk (public 5m majors, ~90d, fee 0.04%/side): train 70% / held-out 30%. Immediate trail + 2.5% TP на train **−EV**. BE после 1R + late-chase + TP≥2R была лучшей веткой на **том** walk (PF≥1 на обоих кусках) — **не** доказанный edge и **не** claim прибыльности.
 
 | arm | train n / WR / PF | held n / WR / PF |
 | --- | --- | --- |
 | tip 2.5/2.0 + 3d/mid/late, trail сразу | 51 / 31% / 0.79 | 45 / 44% / 1.43 |
 | + BE@1R, без 3d/mid, late, TP 5% (2.5R) | 36 / 50% / 1.09 | 22 / 50% / 1.92 |
 
-Короткий `cargo --backtest` (~5d cache) слишком мал для этого вывода. Это **не** гарантия live TestNet.
+Короткий `cargo --backtest` (~5d cache) слишком мал для edge-call. MAX lookback (NOTES_S1v2) и TSMOM (NOTES_S1v3) на held-out **убиты** — в live path не возвращать. **Freeze** = нет live soak / нет edge-claims после held-out kill; стратегия 1 **остаётся** selectable (мейджоры + TP/trail). Live restart только с явным **GO**.
 
 ---
 

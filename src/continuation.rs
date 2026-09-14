@@ -21,7 +21,6 @@ use crate::sessions::{
 use crate::trail::{candidate_stop, long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
