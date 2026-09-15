@@ -110,3 +110,41 @@ fn not_enough_bars() {
         Decision::Hold { .. }
     ));
 }
+
+#[test]
+fn default_needs_ema100_and_channel_40() {
+    let p = tui_bot::trend::TrendParams::default();
+    assert_eq!(p.channel, 40);
+    assert_eq!(p.exit_channel, 20);
+    assert_eq!(p.ema_filter, 100);
+    // 60 range bars is enough for Donchian 20, not for EMA100.
+    let decision = trend_decision(&range_then_breakout(), None, "ETHUSDT", None);
+    match decision {
+        Decision::Hold { reason } => assert!(
+            reason.contains("not enough bars") || reason.contains("EMA"),
+            "{reason}"
+        ),
+        other => panic!("default must not fire on a 61-bar 20-breakout: {other:?}"),
+    }
+}
+
+#[test]
+fn exit_and_amend_carry_symbol() {
+    let bars = range_then_breakout();
+    let mark = bars.last().unwrap().close;
+    let pos = Position {
+        symbol: "ETHUSDT".into(),
+        side: Side::Long,
+        qty: Decimal::ONE,
+        entry_price: mark,
+        stop_loss: Some(mark + Decimal::ONE),
+        take_profit: Some(mark + d("50")),
+        unrealized_pnl: Decimal::ZERO,
+        opened_bar_time: None,
+        leverage: 0,
+    };
+    match trend_decision(&bars, Some(&pos), "ETHUSDT", Some(&trend_loose())) {
+        Decision::ExitPosition { symbol, .. } => assert_eq!(symbol, "ETHUSDT"),
+        other => panic!("{other:?}"),
+    }
+}

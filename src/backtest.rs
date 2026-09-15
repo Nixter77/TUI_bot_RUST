@@ -88,7 +88,7 @@ fn format_packed(rows: &[SimResult]) -> String {
     let mut lines = vec![
         "home-economic backtest (Binance USDT-M public klines)".to_string(),
         "это НЕ TestNet: свечи без ордеров, fee=0.04% taker/side, notional=20 USDT.".into(),
-        "momentum/scalp = 5m; trend = Donchian 20/10; continuation = STRATEGY4_INTERVAL (5m/15m/30m/1h).".into(),
+        "momentum/scalp = 5m; trend = Donchian 40/20 on 1d; continuation = STRATEGY4_INTERVAL (5m/15m/30m/1h).".into(),
         String::new(),
         "=== L4 shipped defaults ===".into(),
     ];
@@ -162,7 +162,7 @@ pub fn run_cli() -> i32 {
         && env::var("DUMP_S2").is_err()
     {
         for symbol in majors.iter().chain(alts.iter()) {
-            for iv in ["5m", "15m", "1h", "4h"] {
+            for iv in ["5m", "15m", "1h", "4h", "1d"] {
                 let _ = fs::remove_file(format!("{CACHE_DIR}/{symbol}_{iv}.json"));
             }
         }
@@ -171,6 +171,7 @@ pub fn run_cli() -> i32 {
     let mut univ_5m: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut univ_15m: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut univ_1h: Vec<(String, Vec<Bar>)> = Vec::new();
+    let mut univ_1d: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut htf_4h: std::collections::HashMap<String, Vec<Bar>> = std::collections::HashMap::new();
 
     for symbol in majors {
@@ -179,6 +180,9 @@ pub fn run_cli() -> i32 {
         }
         if let Some(h) = fetch_klines(symbol, "4h") {
             htf_4h.insert(symbol.into(), h);
+        }
+        if let Some(d1) = fetch_klines(symbol, "1d") {
+            univ_1d.push((symbol.into(), d1));
         }
     }
     for symbol in alts {
@@ -200,6 +204,9 @@ pub fn run_cli() -> i32 {
         univ_5m.push(("BTCUSDT".into(), fx.clone()));
         univ_15m.push(("LINKUSDT".into(), fx.clone()));
         univ_1h.push(("LINKUSDT".into(), fx));
+    }
+    if univ_1d.is_empty() {
+        univ_1d.push(("BTCUSDT".into(), fixture_bars(200, 100.0, 0.05, 86_400_000)));
     }
 
     let mut rows = Vec::new();
@@ -267,9 +274,8 @@ pub fn run_cli() -> i32 {
         let rt_pct = fee_side + fee_side; // 0.08%
         let notional = Decimal::from(20);
         let slip = Decimal::new(1, 4);
-        let mut arms: Vec<(&str, ScalpParams)> = vec![
-            ("default 24/7 (CLI)", ScalpParams::default()),
-        ];
+        let mut arms: Vec<(&str, ScalpParams)> =
+            vec![("default 24/7 (CLI)", ScalpParams::default())];
         let mut sess = ScalpParams::default();
         sess.always_enter = false;
         sess.entry_windows = crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec();
@@ -284,7 +290,10 @@ pub fn run_cli() -> i32 {
             String::new(),
         ];
         for (label, params) in &arms {
-            lines.push(format!("--- arm: {label}  max_hold={} ---", params.max_hold_bars));
+            lines.push(format!(
+                "--- arm: {label}  max_hold={} ---",
+                params.max_hold_bars
+            ));
             let mut all = Vec::new();
             for (symbol, bars) in &univ_5m {
                 let res = simulate_bars(
@@ -346,7 +355,9 @@ pub fn run_cli() -> i32 {
             ));
             let mut by_reason: BTreeMap<String, (usize, Decimal)> = BTreeMap::new();
             for t in &all {
-                let e = by_reason.entry(t.reason.clone()).or_insert((0, Decimal::ZERO));
+                let e = by_reason
+                    .entry(t.reason.clone())
+                    .or_insert((0, Decimal::ZERO));
                 e.0 += 1;
                 e.1 += t.pnl;
             }
@@ -361,7 +372,9 @@ pub fn run_cli() -> i32 {
             ));
             lines.push(String::new());
         }
-        lines.push("locked: max_hold default 8; peak≥0.8R→0.25R; session end flatten; majors book.".into());
+        lines.push(
+            "locked: max_hold default 8; peak≥0.8R→0.25R; session end flatten; majors book.".into(),
+        );
         lines.push("Do NOT raise RISK_PCT while PF_net≤1. No profit claim.".into());
         let text = lines.join("\n");
         print!("{text}\n");
@@ -650,15 +663,17 @@ pub fn run_cli() -> i32 {
             Some(&ScalpParams::default()),
             None,
         ));
+    }
+    for (symbol, bars) in &univ_1d {
         rows.push(simulate_bars(
             3,
             bars,
             symbol,
-            &format!("trend {symbol} 5m"),
+            &format!("trend {symbol} 1d"),
             Decimal::from(20),
             Decimal::new(4, 4),
             Decimal::new(1, 4),
-            Some(70),
+            Some(110),
             Decimal::from(1000),
             None,
             None,

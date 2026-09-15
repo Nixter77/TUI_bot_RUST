@@ -170,7 +170,7 @@ fn tick_and_three_named_strategies() {
         "Momentum rider (растущий + TP + SL вверх)"
     );
     assert_eq!(STRATEGY_NAMES[1].1, "Скальп: откат к VWAP/EMA9");
-    assert_eq!(STRATEGY_NAMES[2].1, "Тренд: пробой Donchian 20/10 (день)");
+    assert_eq!(STRATEGY_NAMES[2].1, "Тренд: пробой Donchian 40/20 (день)");
     assert!(STRATEGY_NAMES[3].1.contains("Continuation"));
     assert!(STRATEGY_NAMES[4].1.contains("S5 Verify"));
     assert_eq!(select_strategy_str("2").unwrap(), 2);

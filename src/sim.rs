@@ -215,7 +215,7 @@ pub fn simulate_bars_opts(
     let warmup = warmup.unwrap_or(if strategy_id == 2 {
         80
     } else if strategy_id == 3 {
-        70
+        110
     } else if strategy_id == 4 || strategy_id == 5 {
         // Need ~21 closed 4h bars before HTF EMA gate can pass.
         360

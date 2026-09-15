@@ -46,6 +46,8 @@ pub fn scalp_loose() -> ScalpParams {
 
 pub fn trend_loose() -> TrendParams {
     TrendParams {
+        channel: 20,
+        exit_channel: 10,
         adx_min: Decimal::ZERO,
         ema_filter: 0,
         min_stop_pct: Decimal::ZERO,

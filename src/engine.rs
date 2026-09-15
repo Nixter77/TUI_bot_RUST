@@ -24,7 +24,7 @@ pub const STRATEGY_IDS: [i32; 5] = [1, 2, 3, 4, 5];
 pub const STRATEGY_NAMES: [(i32, &'static str); 5] = [
     (1, "Momentum rider (растущий + TP + SL вверх)"),
     (2, "Скальп: откат к VWAP/EMA9"),
-    (3, "Тренд: пробой Donchian 20/10 (день)"),
+    (3, "Тренд: пробой Donchian 40/20 (день)"),
     (4, "Continuation: откат ликвидных (не догон 24h %)"),
     (5, "S5 Verify: continuation 1ч (A/B vs S4)"),
 ];

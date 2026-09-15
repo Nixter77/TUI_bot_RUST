@@ -643,6 +643,8 @@ fn until_entry(
                 s4_setup_until(snapshot, ticker, &s4_params(cfg, state.strategy_id), now)
             } else if state.strategy_id == 1 {
                 s1_setup_until(snapshot, ticker, now)
+            } else if state.strategy_id == 3 {
+                until_clock(next_utc_midnight(now), now)
             } else {
                 next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
             }
