@@ -17,7 +17,7 @@ fn sma_matches_window_mean() {
 #[test]
 fn enters_on_donchian_breakout() {
     let bars = range_then_breakout();
-    let decision = trend_decision(&bars, None, "ETHUSDT", Some(&trend_loose()));
+    let decision = trend_decision(&bars, None, "ETHUSDT", Some(&trend_loose()), None);
     match decision {
         Decision::EnterLong {
             symbol,
@@ -37,13 +37,13 @@ fn enters_on_donchian_breakout() {
 
 #[test]
 fn does_not_buy_the_box() {
-    let decision = trend_decision(&range_only(), None, "ETHUSDT", Some(&trend_loose()));
+    let decision = trend_decision(&range_only(), None, "ETHUSDT", Some(&trend_loose()), None);
     assert!(matches!(decision, Decision::Hold { .. }));
 }
 
 #[test]
 fn holds_in_downtrend() {
-    let decision = trend_decision(&grind_down(), None, "ETHUSDT", Some(&trend_loose()));
+    let decision = trend_decision(&grind_down(), None, "ETHUSDT", Some(&trend_loose()), None);
     assert!(matches!(decision, Decision::Hold { .. }));
 }
 
@@ -74,7 +74,7 @@ fn exits_when_close_loses_exit_channel() {
         opened_bar_time: Some(extra[0].open_time),
         leverage: 0,
     };
-    let decision = trend_decision(&extra, Some(&pos), "ETHUSDT", Some(&trend_loose()));
+    let decision = trend_decision(&extra, Some(&pos), "ETHUSDT", Some(&trend_loose()), None);
     match decision {
         Decision::ExitPosition { reason, .. } => assert!(reason.contains("Donchian 10")),
         other => panic!("{:?} {}", other, other.reason()),
@@ -96,7 +96,7 @@ fn exits_on_stop() {
         opened_bar_time: None,
         leverage: 0,
     };
-    let decision = trend_decision(&bars, Some(&pos), "ETHUSDT", Some(&trend_loose()));
+    let decision = trend_decision(&bars, Some(&pos), "ETHUSDT", Some(&trend_loose()), None);
     match decision {
         Decision::ExitPosition { reason, .. } => assert!(reason.contains("stop")),
         other => panic!("{other:?}"),
@@ -106,7 +106,7 @@ fn exits_on_stop() {
 #[test]
 fn not_enough_bars() {
     assert!(matches!(
-        trend_decision(&[trend_bar(0, 1.0, 1.1, 0.9, 1.0)], None, "X", None),
+        trend_decision(&[trend_bar(0, 1.0, 1.1, 0.9, 1.0)], None, "X", None, None),
         Decision::Hold { .. }
     ));
 }
@@ -117,8 +117,10 @@ fn default_needs_ema100_and_channel_40() {
     assert_eq!(p.channel, 40);
     assert_eq!(p.exit_channel, 20);
     assert_eq!(p.ema_filter, 100);
+    assert_eq!(p.entry_grace_sec, tui_bot::trend::ENTRY_GRACE_SEC);
+    assert_eq!(p.max_stop_pct, tui_bot::trend::max_stop_pct());
     // 60 range bars is enough for Donchian 20, not for EMA100.
-    let decision = trend_decision(&range_then_breakout(), None, "ETHUSDT", None);
+    let decision = trend_decision(&range_then_breakout(), None, "ETHUSDT", None, None);
     match decision {
         Decision::Hold { reason } => assert!(
             reason.contains("not enough bars") || reason.contains("EMA"),
@@ -143,8 +145,62 @@ fn exit_and_amend_carry_symbol() {
         opened_bar_time: None,
         leverage: 0,
     };
-    match trend_decision(&bars, Some(&pos), "ETHUSDT", Some(&trend_loose())) {
+    match trend_decision(&bars, Some(&pos), "ETHUSDT", Some(&trend_loose()), None) {
         Decision::ExitPosition { symbol, .. } => assert_eq!(symbol, "ETHUSDT"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn does_not_chase_breakout_hours_after_daily_close() {
+    let bars = range_then_breakout();
+    let mut p = trend_loose();
+    p.entry_grace_sec = tui_bot::trend::ENTRY_GRACE_SEC;
+    let close_ts = tui_bot::trend::daily_bar_close_ts(bars.last().unwrap().open_time);
+    let fresh = trend_decision(&bars, None, "ETHUSDT", Some(&p), Some(close_ts + 60.0));
+    assert!(
+        matches!(fresh, Decision::EnterLong { .. }),
+        "just after the daily close must still enter: {} ",
+        fresh.reason()
+    );
+    let stale = trend_decision(
+        &bars,
+        None,
+        "ETHUSDT",
+        Some(&p),
+        Some(close_ts + 10.0 * 3_600.0),
+    );
+    match stale {
+        Decision::Hold { reason } => assert!(reason.contains("не на закрытии"), "{reason}"),
+        other => panic!("stale daily breakout must hold, got {other:?}"),
+    }
+}
+
+#[test]
+fn live_left_daily_close_rejects_pump_chase() {
+    let close = d("0.127");
+    assert_eq!(
+        tui_bot::trend::live_left_daily_close(
+            close,
+            d("0.168"),
+            tui_bot::trend::max_close_extension_pct()
+        ),
+        Some("цена ушла от закрытия дня")
+    );
+    assert_eq!(
+        tui_bot::trend::live_left_daily_close(
+            close,
+            d("0.120"),
+            tui_bot::trend::max_close_extension_pct()
+        ),
+        Some("цена ниже закрытия пробоя")
+    );
+    assert_eq!(
+        tui_bot::trend::live_left_daily_close(
+            close,
+            d("0.128"),
+            tui_bot::trend::max_close_extension_pct()
+        ),
+        None
+    );
 }

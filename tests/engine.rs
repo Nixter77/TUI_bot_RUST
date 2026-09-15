@@ -1056,8 +1056,17 @@ fn scalp_leaves_dead_btc_for_eth_setup() {
 fn trend_leaves_dead_btc_for_eth_breakout() {
     let dead = grind_down();
     let live = range_then_breakout();
+    let mark = live.last().unwrap().close;
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = majors();
+    snap.tickers = majors()
+        .into_iter()
+        .map(|mut t| {
+            if t.symbol == "ETHUSDT" {
+                t.last_price = mark;
+            }
+            t
+        })
+        .collect();
     snap.bars = dead.clone();
     snap.account = account();
     snap.chart_symbol = "BTCUSDT".into();
@@ -1092,9 +1101,10 @@ fn trend_leaves_dead_btc_for_eth_breakout() {
 fn trend_enters_alt_breakout_not_only_majors() {
     let dead = grind_down();
     let live = range_then_breakout();
+    let mark = live.last().unwrap().close;
     let mut snap = MarketSnapshot::empty(d("10000"));
     let mut tickers = majors();
-    tickers.push(Ticker::new("AVAXUSDT", d("20"), d("1.0"), d("50000000")));
+    tickers.push(Ticker::new("AVAXUSDT", mark, d("1.0"), d("50000000")));
     snap.tickers = tickers;
     snap.bars = dead.clone();
     snap.account = account();
@@ -1125,6 +1135,100 @@ fn trend_enters_alt_breakout_not_only_majors() {
         Decision::EnterLong { symbol, .. } => assert_eq!(symbol, "AVAXUSDT"),
         other => panic!("expected AVAX enter, got {other:?} {}", other.reason()),
     }
+}
+
+fn s3_alt_breakout_snap(live_px: Decimal) -> MarketSnapshot {
+    let dead = grind_down();
+    let live = range_then_breakout();
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    let mut tickers = majors();
+    tickers.push(Ticker::new("AVAXUSDT", live_px, d("1.0"), d("50000000")));
+    snap.tickers = tickers;
+    snap.bars = dead.clone();
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.universe_bars = [
+        ("BTCUSDT".into(), dead.clone()),
+        ("ETHUSDT".into(), dead.clone()),
+        ("SOLUSDT".into(), dead),
+        ("AVAXUSDT".into(), live),
+    ]
+    .into_iter()
+    .collect();
+    snap
+}
+
+#[test]
+fn s3_does_not_chase_hours_after_daily_close() {
+    let live = range_then_breakout();
+    let mark = live.last().unwrap().close;
+    let snap = s3_alt_breakout_snap(mark);
+    let close_ts = tui_bot::trend::daily_bar_close_ts(live.last().unwrap().open_time);
+    let mut p = trend_loose();
+    p.entry_grace_sec = tui_bot::trend::ENTRY_GRACE_SEC;
+    let empty = HashMap::new();
+    let (fresh, _) = decide(
+        3,
+        &snap,
+        close_ts + 60.0,
+        0.0,
+        None,
+        None,
+        Some(&p),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    match fresh {
+        Decision::EnterLong { symbol, .. } => assert_eq!(symbol, "AVAXUSDT"),
+        other => panic!("fresh close must enter: {} ", other.reason()),
+    }
+    let (stale, _) = decide(
+        3,
+        &snap,
+        close_ts + 10.0 * 3_600.0,
+        0.0,
+        None,
+        None,
+        Some(&p),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    assert!(
+        is_hold(&stale) && stale.reason().contains("не на закрытии"),
+        "{}",
+        stale.reason()
+    );
+}
+
+#[test]
+fn s3_skips_when_live_price_ran_away_from_close() {
+    let live = range_then_breakout();
+    let mark = live.last().unwrap().close;
+    let pumped = mark * d("1.32");
+    let snap = s3_alt_breakout_snap(pumped);
+    let empty = HashMap::new();
+    let (decision, _) = decide(
+        3,
+        &snap,
+        1.0,
+        0.0,
+        None,
+        None,
+        Some(&trend_loose()),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    assert!(
+        is_hold(&decision) && decision.reason().contains("ушла от закрытия"),
+        "{}",
+        decision.reason()
+    );
 }
 
 #[test]

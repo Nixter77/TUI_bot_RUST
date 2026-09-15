@@ -13,7 +13,7 @@ use crate::profit::current_equity;
 use crate::ranking::{is_tradable_symbol, iter_liquid_majors, pick_strategy3_book};
 use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::HourWindow;
-use crate::trend::{trend_decision, TrendParams};
+use crate::trend::{live_left_daily_close, max_close_extension_pct, trend_decision, TrendParams};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -189,6 +189,21 @@ fn combine_holds(rows: &[(String, String)]) -> String {
     format!("нет входа — {}", parts.join("; "))
 }
 
+fn s3_fill_guard(snapshot: &MarketSnapshot, symbol: &str) -> Option<String> {
+    let Some(signal) = snapshot.bars_for(symbol).last().map(|b| b.close) else {
+        return Some("нет графика".into());
+    };
+    let Some(live) = snapshot
+        .tickers
+        .iter()
+        .find(|t| t.symbol.eq_ignore_ascii_case(symbol))
+        .map(|t| t.last_price)
+    else {
+        return Some("нет цены".into());
+    };
+    live_left_daily_close(signal, live, max_close_extension_pct()).map(str::to_string)
+}
+
 fn desk_symbols(
     snapshot: &MarketSnapshot,
     exclude: &[String],
@@ -305,7 +320,7 @@ pub fn decide(
                 ));
             }
             return Ok((
-                trend_decision(bars, Some(pos), &pos.symbol, trend),
+                trend_decision(bars, Some(pos), &pos.symbol, trend, Some(now)),
                 last_scan_ts,
             ));
         }
@@ -327,9 +342,15 @@ pub fn decide(
         let decision = if sid == 2 {
             scalp_decision(bars, None, &symbol, scalp, Some(now))
         } else {
-            trend_decision(bars, None, &symbol, trend)
+            trend_decision(bars, None, &symbol, trend, Some(now))
         };
         if let Decision::EnterLong { .. } = &decision {
+            if sid == 3 {
+                if let Some(why) = s3_fill_guard(snapshot, &symbol) {
+                    holds.push((symbol, why));
+                    continue;
+                }
+            }
             return Ok((decision, last_scan_ts));
         }
         holds.push((symbol, decision.reason().to_string()));

@@ -9,6 +9,17 @@ use rust_decimal::Decimal;
 pub const CHART_INTERVAL: &str = "1d";
 /// Closed daily bars. EMA100 + Donchian 40 need >101; forming bar is dropped.
 pub const CHART_LIMIT: usize = 150;
+/// Last closed 1d bar is the signal. Do not chase it all the next UTC day.
+pub const ENTRY_GRACE_SEC: f64 = 2.0 * 3_600.0;
+pub const DAY_SEC: f64 = 86_400.0;
+/// Skip 2-ATR stops that are a third of the coin (TestNet microcap pumps).
+pub fn max_stop_pct() -> Decimal {
+    Decimal::new(15, 2)
+}
+/// Live ticker may not have already run away from the closed daily close.
+pub fn max_close_extension_pct() -> Decimal {
+    Decimal::new(3, 2)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrendParams {
@@ -17,12 +28,15 @@ pub struct TrendParams {
     pub atr_period: usize,
     pub sl_atr: Decimal,
     pub min_stop_pct: Decimal,
+    pub max_stop_pct: Decimal,
     pub trail_atr: Decimal,
     pub reward_r: Decimal,
     pub ema_filter: usize,
     pub adx_period: usize,
     pub adx_min: Decimal,
     pub cooldown_sec: f64,
+    /// 0 = off (tests). Live default is `ENTRY_GRACE_SEC`.
+    pub entry_grace_sec: f64,
     pub entry_windows: Vec<HourWindow>,
 }
 
@@ -36,15 +50,40 @@ impl Default for TrendParams {
             atr_period: 20,
             sl_atr: Decimal::from(2),
             min_stop_pct: Decimal::new(6, 3),
+            max_stop_pct: max_stop_pct(),
             trail_atr: Decimal::new(25, 1),
             reward_r: Decimal::from(8),
             ema_filter: 100,
             adx_period: 14,
             adx_min: Decimal::ZERO,
             cooldown_sec: 3600.0,
+            entry_grace_sec: ENTRY_GRACE_SEC,
             entry_windows: Vec::new(),
         }
     }
+}
+
+/// Unix seconds when the daily bar that opened at `open_time_ms` closes.
+pub fn daily_bar_close_ts(open_time_ms: i64) -> f64 {
+    (open_time_ms as f64) / 1000.0 + DAY_SEC
+}
+
+/// Live last vs the closed daily close that formed the Donchian signal.
+pub fn live_left_daily_close(
+    signal_close: Decimal,
+    live_mark: Decimal,
+    max_ext: Decimal,
+) -> Option<&'static str> {
+    if signal_close <= Decimal::ZERO || live_mark <= Decimal::ZERO {
+        return Some("нет цены");
+    }
+    if live_mark < signal_close {
+        return Some("цена ниже закрытия пробоя");
+    }
+    if max_ext > Decimal::ZERO && live_mark > signal_close * (Decimal::ONE + max_ext) {
+        return Some("цена ушла от закрытия дня");
+    }
+    None
 }
 
 pub fn trend_decision(
@@ -52,6 +91,7 @@ pub fn trend_decision(
     position: Option<&Position>,
     symbol: &str,
     params: Option<&TrendParams>,
+    now: Option<f64>,
 ) -> Decision {
     let owned = TrendParams::default();
     let p = params.unwrap_or(&owned);
@@ -84,6 +124,15 @@ pub fn trend_decision(
     if !in_entry_window(ts, Some(&p.entry_windows), false) {
         return Decision::hold("вне сессии тренда");
     }
+    if p.entry_grace_sec > 0.0 {
+        let close_ts = daily_bar_close_ts(last.open_time);
+        let now = now.unwrap_or(close_ts);
+        // Live snapshot already dropped the forming 1d bar, so now is after close_ts.
+        // The sim still passes the in-progress bar (now < close_ts) — do not block it.
+        if now + 1.0 >= close_ts && now - close_ts > p.entry_grace_sec {
+            return Decision::hold("пробой не на закрытии дня");
+        }
+    }
     if last.close <= last.open {
         return Decision::hold("нет подтверждения (красная свеча)");
     }
@@ -115,6 +164,9 @@ pub fn trend_decision(
     let risk = mark - sl;
     if risk <= Decimal::ZERO {
         return Decision::hold("risk is zero");
+    }
+    if p.max_stop_pct > Decimal::ZERO && risk > mark * p.max_stop_pct {
+        return Decision::hold("стоп слишком широкий");
     }
     let tp = mark + p.reward_r * risk;
     Decision::EnterLong {

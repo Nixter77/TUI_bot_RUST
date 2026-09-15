@@ -357,6 +357,7 @@ fn setup_skip(
             None,
             &ticker.symbol,
             None,
+            Some(now),
         ) {
             crate::models::Decision::Hold { reason } => Some(reason),
             crate::models::Decision::EnterLong { .. } => None,

@@ -544,6 +544,24 @@ fn enter_live(
     else {
         return err("skip enter: no mark");
     };
+    let signal_mark = if state.map(|s| s.strategy_id) == Some(3) {
+        let close = snapshot
+            .bars_for(symbol)
+            .last()
+            .map(|b| b.close)
+            .filter(|c| *c > Decimal::ZERO)
+            .unwrap_or(mark);
+        if let Some(why) = crate::trend::live_left_daily_close(
+            close,
+            mark,
+            crate::trend::max_close_extension_pct(),
+        ) {
+            return err(format!("skip enter: {why}"));
+        }
+        close
+    } else {
+        mark
+    };
     // S4 live path: RISK_PCT of account equity (wallet+uPnL). 0 = fall back to ORDER_NOTIONAL_USDT.
     // Phase-2: Neutral → 0.5×; Bear/Panic should not reach here (skip_new_long) — fail-closed skip.
     // Never bump qty so qty*(entry-SL) exceeds the risk budget — skip the symbol instead.
@@ -629,7 +647,7 @@ fn enter_live(
     qty = filled_pos.qty;
     let entry_price = filled_pos.entry_price;
     let (take_profit, stop_loss) =
-        match rebase_long_protectives(mark, entry_price, take_profit, stop_loss) {
+        match rebase_long_protectives(signal_mark, entry_price, take_profit, stop_loss) {
             Ok(prices) => prices,
             Err(detail) => {
                 return fail_closed_immediate_trigger(cfg, client, state, symbol, qty, &detail)

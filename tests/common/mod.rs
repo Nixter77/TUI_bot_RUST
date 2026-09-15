@@ -51,8 +51,10 @@ pub fn trend_loose() -> TrendParams {
         adx_min: Decimal::ZERO,
         ema_filter: 0,
         min_stop_pct: Decimal::ZERO,
+        max_stop_pct: Decimal::ONE,
         entry_windows: Vec::new(),
         cooldown_sec: 0.0,
+        entry_grace_sec: 0.0,
         ..TrendParams::default()
     }
 }
