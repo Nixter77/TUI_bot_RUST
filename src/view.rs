@@ -9,7 +9,7 @@ use crate::errors::is_retry_error;
 use crate::models::{
     coalesce_position, unmanaged_positions, EngineState, MarketSnapshot, Position, Side,
 };
-use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
+use crate::ranking::{iter_liquid_majors, pick_strategy1_book, pick_strategy3_book};
 use crate::render::ViewModel;
 use crate::signals::signals_enabled;
 use rust_decimal::Decimal;
@@ -73,6 +73,11 @@ pub fn basket_symbols(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsh
         .into_iter()
         .map(|t| t.symbol)
         .collect()
+    } else if state.strategy_id == 3 {
+        pick_strategy3_book(&snapshot.tickers, &state.skip_symbols)
+            .into_iter()
+            .map(|t| t.symbol)
+            .collect()
     } else {
         iter_liquid_majors(&snapshot.tickers, &state.skip_symbols)
             .into_iter()

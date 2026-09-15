@@ -373,7 +373,13 @@ fn apply_decision_emits_buy_on_fill() {
     set_enabled(true);
     let cfg = cfg_live();
     let mut state = EngineState::new(1);
-    apply_decision(&cfg, &mut FakeClient::new(), &mut state, &snap(None), &enter());
+    apply_decision(
+        &cfg,
+        &mut FakeClient::new(),
+        &mut state,
+        &snap(None),
+        &enter(),
+    );
     assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Buy]);
     heard.lock().unwrap().clear();
     let mut green = Position::long(

@@ -3,11 +3,11 @@
 mod common;
 use common::*;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tui_bot::config::STRATEGY1_POLL_SECONDS;
 use tui_bot::engine::{
-    decide, momentum_decision, select_strategy_str, tick, tick_decisions, MomentumParams,
-    STRATEGY_NAMES,
+    decide, momentum_decision, select_strategy_str, strategy_manages_long, tick, tick_decisions,
+    MomentumParams, STRATEGY_NAMES,
 };
 use tui_bot::models::{
     coalesce_position, Bar, Decision, EngineState, MarketSnapshot, Position, Side, Ticker,
@@ -1086,6 +1086,104 @@ fn trend_leaves_dead_btc_for_eth_breakout() {
         Decision::EnterLong { symbol, .. } => assert_eq!(symbol, "ETHUSDT"),
         other => panic!("expected enter, got {other:?} {}", other.reason()),
     }
+}
+
+#[test]
+fn trend_enters_alt_breakout_not_only_majors() {
+    let dead = grind_down();
+    let live = range_then_breakout();
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    let mut tickers = majors();
+    tickers.push(Ticker::new("AVAXUSDT", d("20"), d("1.0"), d("50000000")));
+    snap.tickers = tickers;
+    snap.bars = dead.clone();
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.universe_bars = [
+        ("BTCUSDT".into(), dead.clone()),
+        ("ETHUSDT".into(), dead.clone()),
+        ("SOLUSDT".into(), dead),
+        ("AVAXUSDT".into(), live),
+    ]
+    .into_iter()
+    .collect();
+    let empty = HashMap::new();
+    let (decision, _) = decide(
+        3,
+        &snap,
+        1.0,
+        0.0,
+        None,
+        None,
+        Some(&trend_loose()),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    match decision {
+        Decision::EnterLong { symbol, .. } => assert_eq!(symbol, "AVAXUSDT"),
+        other => panic!("expected AVAX enter, got {other:?} {}", other.reason()),
+    }
+}
+
+#[test]
+fn s3_manages_tradable_alts_junk_is_tail() {
+    let none = HashSet::new();
+    assert!(strategy_manages_long(3, "AVAXUSDT", &none));
+    assert!(strategy_manages_long(3, "BTCUSDT", &none));
+    assert!(!strategy_manages_long(3, "1000PEPEUSDT", &none));
+    assert!(!strategy_manages_long(1, "AVAXUSDT", &none));
+    assert!(!strategy_manages_long(2, "AVAXUSDT", &none));
+}
+
+#[test]
+fn s3_open_alt_is_managed_not_tail() {
+    let pos = Position::long("AVAXUSDT", d("1"), d("20"), Some(d("18")), Some(d("40")));
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new("AVAXUSDT", d("20"), d("1.0"), d("50000000"))];
+    snap.account = account();
+    snap.chart_symbol = "AVAXUSDT".into();
+    snap.live_book = true;
+    snap.account_ok = true;
+    snap.open_positions = vec![pos.clone()];
+    snap.position = Some(pos);
+    snap.universe_bars.insert("AVAXUSDT".into(), grind_down());
+    let state = EngineState::new(3);
+    let (_, decisions) = tick_decisions(&state, &snap, 10.0, None, None, None, None);
+    assert!(
+        !decisions.iter().any(|d| d.reason().contains("хвост")),
+        "S3 must trail AVAX, not flatten as leftover: {decisions:?}"
+    );
+}
+
+#[test]
+fn s3_junk_open_is_tail() {
+    let junk = Position::long(
+        "1000PEPEUSDT",
+        d("100"),
+        d("0.01"),
+        Some(d("0.009")),
+        Some(d("0.02")),
+    );
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    snap.tickers = vec![Ticker::new(
+        "1000PEPEUSDT",
+        d("0.01"),
+        d("40"),
+        d("9000000"),
+    )];
+    snap.account = account();
+    snap.live_book = true;
+    snap.account_ok = true;
+    snap.open_positions = vec![junk.clone()];
+    snap.position = Some(junk);
+    let state = EngineState::new(3);
+    let (_, decisions) = tick_decisions(&state, &snap, 10.0, None, None, None, None);
+    assert!(
+        decisions[0].reason().contains("хвост"),
+        "1000x junk must stay a tail on S3: {decisions:?}"
+    );
 }
 
 fn green_5m() -> Bar {

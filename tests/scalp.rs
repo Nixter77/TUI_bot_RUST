@@ -3,9 +3,9 @@
 mod common;
 use common::*;
 use rust_decimal::Decimal;
-use tui_bot::models::{Decision, Position, Side};
 use std::collections::HashMap;
 use tui_bot::config::load_config;
+use tui_bot::models::{Decision, Position, Side};
 use tui_bot::scalp::{scalp_decision, ScalpParams};
 
 #[test]
@@ -339,7 +339,6 @@ fn entry_tp_is_fee_padded() {
         other => panic!("{} {:?}", other.reason(), other),
     }
 }
-
 
 #[test]
 fn from_config_locks_session_and_max_hold() {

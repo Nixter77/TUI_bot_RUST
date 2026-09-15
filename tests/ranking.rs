@@ -1,7 +1,9 @@
 use rust_decimal::Decimal;
 use serde_json::json;
 use tui_bot::models::Ticker;
-use tui_bot::ranking::{is_tradable_symbol, parse_tickers, pick_strategy1_book, rank_most_rising};
+use tui_bot::ranking::{
+    is_tradable_symbol, parse_tickers, pick_strategy1_book, pick_strategy3_book, rank_most_rising,
+};
 
 #[test]
 fn picks_highest_percent_usdt() {
@@ -117,4 +119,53 @@ fn already_pumped_and_near_high_are_not_the_buy_list() {
         book.iter().map(|t| t.symbol.as_str()).collect::<Vec<_>>(),
         vec!["BTCUSDT"]
     );
+}
+
+#[test]
+fn strategy3_book_is_liquid_usdt_not_three_majors() {
+    let tickers = vec![
+        Ticker::new(
+            "1000PEPEUSDT",
+            "0.01".parse().unwrap(),
+            Decimal::from(40),
+            Decimal::from(9_000_000),
+        ),
+        Ticker::new(
+            "AVAXUSDT",
+            Decimal::from(20),
+            Decimal::from(2),
+            Decimal::from(50_000_000),
+        ),
+        Ticker::new(
+            "BTCUSDT",
+            Decimal::from(50000),
+            Decimal::from(1),
+            Decimal::from(800_000),
+        ),
+        Ticker::new(
+            "LINKUSDT",
+            Decimal::from(15),
+            Decimal::from(3),
+            Decimal::from(5_000_000),
+        ),
+        Ticker::new(
+            "FARTCOINUSDT",
+            Decimal::from(1),
+            Decimal::from(80),
+            Decimal::from(2_000_000),
+        ),
+        Ticker::new(
+            "XAUUSDT",
+            Decimal::from(2400),
+            Decimal::from(5),
+            Decimal::from(3_000_000),
+        ),
+    ];
+    let book = pick_strategy3_book(&tickers, &["XAUUSDT".into()]);
+    let syms: Vec<_> = book.iter().map(|t| t.symbol.as_str()).collect();
+    assert_eq!(syms, vec!["AVAXUSDT", "LINKUSDT", "BTCUSDT"]);
+    assert!(!syms
+        .iter()
+        .any(|s| s.contains("PEPE") || s.contains("FART")));
+    assert!(!syms.contains(&"XAUUSDT"));
 }

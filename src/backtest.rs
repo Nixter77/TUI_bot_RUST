@@ -154,7 +154,7 @@ pub fn run_cli() -> i32 {
             std::env::var("SWEEP_S4S5").is_ok()
         ),
     );
-    // Majors for S1–S3; alts for S4/S5 (continuation skips BTC/ETH/SOL/BNB/XRP/BCH).
+    // Majors for S1–S2; majors+alts 1d for S3; alts for S4/S5 (continuation skips majors).
     let majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     let alts = ["LINKUSDT", "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "NEARUSDT"];
     if env::var("KEEP_KLINES").is_err()
@@ -194,6 +194,9 @@ pub fn run_cli() -> i32 {
         }
         if let Some(bars) = fetch_klines(symbol, "4h") {
             htf_4h.insert(symbol.into(), bars);
+        }
+        if let Some(d1) = fetch_klines(symbol, "1d") {
+            univ_1d.push((symbol.into(), d1));
         }
     }
     let btc_htf = fetch_klines("BTCUSDT", "4h");

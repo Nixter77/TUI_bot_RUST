@@ -13,7 +13,7 @@ use crate::journal::{event_unix, parse_pnl, TradeEvent};
 use crate::models::{near_24h_high, EngineState, MarketSnapshot, Position, Side, Ticker};
 use crate::momentum::{s1_setup_skip, MomentumParams};
 use crate::profit::{account_profit, current_equity};
-use crate::ranking::{iter_liquid_majors, pick_strategy1_book};
+use crate::ranking::{iter_liquid_majors, pick_strategy1_book, pick_strategy3_book};
 use crate::render::{cooldown_lines, one_r_status, top_movers, OneRStatus};
 use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::{
@@ -297,6 +297,11 @@ fn candidate_tickers(cfg: &Config, state: &EngineState, snapshot: &MarketSnapsho
         1 => {
             for t in pick_strategy1_book(&snapshot.tickers, cfg.max_positions.max(8) as usize, skip)
             {
+                push_unique(&mut out, &mut seen, t);
+            }
+        }
+        3 => {
+            for t in pick_strategy3_book(&snapshot.tickers, skip) {
                 push_unique(&mut out, &mut seen, t);
             }
         }
@@ -702,7 +707,7 @@ pub fn classify_waiting(
         });
     }
     rows.sort_by(|a, b| {
-        let by_book = if is_continuation(state.strategy_id) {
+        let by_book = if is_continuation(state.strategy_id) || state.strategy_id == 3 {
             b.volume.cmp(&a.volume)
         } else {
             b.change_pct.cmp(&a.change_pct)
@@ -899,9 +904,9 @@ fn wait_heading(view: &MonitorView) -> String {
     match view.strategy_id {
         4 | 5 => "=== В ожидании входа (книга ликвид, не топ 24h) ===".into(),
         1 => "=== В ожидании входа (книга momentum) ===".into(),
-        // S2/S3: same liquid-majors book as engine desk — NOT the full 24h tape («Топ роста»).
+        // S2: liquid-majors book. S3: liquid USDT-M desk — NOT the 24h % tape.
         2 => "=== В ожидании входа (книга majors BTC/ETH/SOL, не топ 24h) ===".into(),
-        3 => "=== В ожидании входа (книга majors BTC/ETH/SOL, не топ 24h) ===".into(),
+        3 => "=== В ожидании входа (книга ликвид USDT-M, не топ 24h) ===".into(),
         _ => "=== В ожидании входа ===".into(),
     }
 }
@@ -911,7 +916,7 @@ fn wait_hint(view: &MonitorView) -> &'static str {
         4 => "  кого стратегия 4 реально берёт: ликвидный откат, не догон 24h %",
         1 => "  кого momentum берёт из растущих (не вся лента)",
         2 => "  кого S2 реально берёт: BTC/ETH/SOL majors book (не лента 24h %)",
-        3 => "  кого S3 реально берёт: BTC/ETH/SOL majors book (не лента 24h %)",
+        3 => "  кого S3 реально берёт: ликвидный USDT-M стакан (не три majors, не лента 24h %)",
         _ => "  кандидаты текущей стратегии",
     }
 }

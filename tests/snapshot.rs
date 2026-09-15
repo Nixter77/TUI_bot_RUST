@@ -485,6 +485,52 @@ fn s4_fetches_liquid_universe_not_only_entry_book() {
 }
 
 #[test]
+fn s3_fetches_liquid_alts_not_only_majors() {
+    let cfg = cfg_with_keys();
+    let mut client = FakeSnap::book("3000", "0", json!([]));
+    client.tickers = vec![
+        Ticker::new("BTCUSDT", d("50000"), d("1"), d("800000")),
+        Ticker::new("ETHUSDT", d("3000"), d("1"), d("400000")),
+        Ticker::new("SOLUSDT", d("140"), d("1"), d("200000")),
+        Ticker::new("AVAXUSDT", d("20"), d("2"), d("50000000")),
+        Ticker::new("LINKUSDT", d("15"), d("3"), d("5000000")),
+        Ticker::new("1000PEPEUSDT", d("0.01"), d("40"), d("9000000")),
+    ];
+    let mut state = EngineState::new(3);
+    let mut pin = EquityPin {
+        value: None,
+        persist: false,
+    };
+    let snap = pull_snapshot(&cfg, Some(&mut client), &mut state, &mut pin, false, None);
+    assert!(
+        snap.universe_bars.contains_key("AVAXUSDT"),
+        "S3 must fetch 1d for liquid alts: {:?}",
+        snap.universe_bars.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        snap.universe_bars.contains_key("LINKUSDT"),
+        "S3 must fetch LINK 1d: {:?}",
+        snap.universe_bars.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        client
+            .kline_calls
+            .iter()
+            .any(|(s, iv, _)| s == "AVAXUSDT" && iv == "1d"),
+        "AVAX 1d must be requested: {:?}",
+        client.kline_calls
+    );
+    assert!(
+        !client
+            .kline_calls
+            .iter()
+            .any(|(s, _, _)| s == "1000PEPEUSDT"),
+        "junk 1000x must not be on the S3 desk: {:?}",
+        client.kline_calls
+    );
+}
+
+#[test]
 fn pull_snapshot_live_does_not_consume_scan_cadence() {
     // Regression: live poller used to bump last_scan_ts on snapshot arrival, so
     // continuation_decisions saw !scan_due → eternal «waiting for next scan»

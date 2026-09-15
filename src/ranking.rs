@@ -7,6 +7,10 @@ use std::sync::OnceLock;
 
 pub const LIQUID_MAJORS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 
+/// Strategy 3 Donchian desk: tradable USDT-M by 24h quote volume (majors included).
+/// Cap bounds 1d kline weight; junk / 1000x stay out via `is_tradable_symbol`.
+pub const S3_BOOK_CAP: usize = 80;
+
 /// Majors Strategy 4 never enters (alts-only book).
 pub fn is_major_symbol(symbol: &str) -> bool {
     let s = symbol.trim().to_ascii_uppercase();
@@ -313,7 +317,34 @@ pub fn pick_scalp_ticker(tickers: &[Ticker], exclude: &[String]) -> Option<Ticke
 }
 
 pub fn pick_trend_ticker(tickers: &[Ticker], exclude: &[String]) -> Option<Ticker> {
-    pick_liquid_major(tickers, exclude)
+    pick_strategy3_book(tickers, exclude).into_iter().next()
+}
+
+/// Strategy 3 book: every tradable USDT-M name with tape, ranked by 24h quote
+/// volume. Includes BTC/ETH/SOL. Not the S1 three-major whitelist and not the
+/// 24h % tape. Skip-list and junk/1000x are out.
+pub fn pick_strategy3_book(tickers: &[Ticker], exclude: &[String]) -> Vec<Ticker> {
+    let skip = exclude_set(exclude);
+    let mut rows: Vec<Ticker> = tickers
+        .iter()
+        .filter(|t| {
+            if skip.contains(&t.symbol) {
+                return false;
+            }
+            if !is_tradable_symbol(&t.symbol) {
+                return false;
+            }
+            t.last_price > Decimal::ZERO && t.quote_volume > Decimal::ZERO
+        })
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| {
+        b.quote_volume
+            .cmp(&a.quote_volume)
+            .then(b.symbol.cmp(&a.symbol))
+    });
+    rows.truncate(S3_BOOK_CAP);
+    rows
 }
 
 pub fn pick_chart_ticker(

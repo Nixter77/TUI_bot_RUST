@@ -288,7 +288,6 @@ fn s2_in_session_counts_down_to_next_5m_close() {
     assert!(!btc.until.contains("ждёт свечу"), "{}", btc.until);
 }
 
-
 #[test]
 fn s2_wait_heading_is_majors_book_not_24h_tape() {
     let cfg = cfg_hours();
@@ -302,7 +301,9 @@ fn s2_wait_heading_is_majors_book_not_24h_tape() {
     let now = make_utc_ts(2026, 9, 14, 8, 2, 0);
     let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
     assert!(
-        waiting.iter().all(|w| matches!(w.symbol.as_str(), "BTCUSDT" | "ETHUSDT" | "SOLUSDT")),
+        waiting
+            .iter()
+            .all(|w| matches!(w.symbol.as_str(), "BTCUSDT" | "ETHUSDT" | "SOLUSDT")),
         "S2 wait book must be majors only, got {waiting:?}"
     );
     assert!(
@@ -315,4 +316,37 @@ fn s2_wait_heading_is_majors_book_not_24h_tape() {
         "{frame}"
     );
     assert!(frame.contains("не лента 24h"), "{frame}");
+}
+
+#[test]
+fn s3_wait_lists_liquid_alts_not_only_majors() {
+    let cfg = cfg_always();
+    let state = EngineState::new(3);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = {
+        let mut t = majors_tape();
+        t.push(Ticker::new("APTUSDT", d("8"), d("20.0"), d("3000000")));
+        t.push(Ticker::new("LINKUSDT", d("15"), d("3.2"), d("5000000")));
+        t
+    };
+    let now = make_utc_ts(2026, 9, 15, 10, 0, 0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    assert!(
+        waiting.iter().any(|w| w.symbol == "APTUSDT"),
+        "S3 book is liquid USDT-M, not three majors: {waiting:?}"
+    );
+    assert!(
+        waiting.iter().any(|w| w.symbol == "LINKUSDT"),
+        "S3 must wait on LINK: {waiting:?}"
+    );
+    assert!(
+        waiting.iter().any(|w| w.symbol == "BTCUSDT"),
+        "majors stay in the S3 desk: {waiting:?}"
+    );
+    let frame = render_monitor(&build_monitor(&cfg, &state, &snap, &[], now));
+    assert!(frame.contains("книга ликвид USDT-M, не топ 24h"), "{frame}");
+    assert!(
+        !frame.contains("книга majors BTC/ETH/SOL, не топ 24h"),
+        "{frame}"
+    );
 }

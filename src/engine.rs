@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::momentum::mark_for;
 use crate::profit::current_equity;
-use crate::ranking::iter_liquid_majors;
+use crate::ranking::{is_tradable_symbol, iter_liquid_majors, pick_strategy3_book};
 use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::HourWindow;
 use crate::trend::{trend_decision, TrendParams};
@@ -44,9 +44,13 @@ pub fn strategy_manages_long(
     if is_continuation(strategy_id) {
         return crate::openmeta::continuation_owns(symbol, strategy_id, inherited_s4);
     }
-    if strategy_id == 1 || strategy_id == 2 || strategy_id == 3 {
-        // S1/S2/S3 book = liquid majors only (BTC/ETH/SOL). Alt leftovers are tails.
+    if strategy_id == 1 || strategy_id == 2 {
+        // S1/S2 book = liquid majors only (BTC/ETH/SOL). Alt leftovers are tails.
         return crate::ranking::is_s1_symbol(symbol);
+    }
+    if strategy_id == 3 {
+        // S3 scans the liquid USDT-M desk, not three majors. Junk/1000x stay tails.
+        return is_tradable_symbol(symbol);
     }
     true
 }
@@ -190,11 +194,17 @@ fn desk_symbols(
     exclude: &[String],
     cooldowns: &HashMap<String, f64>,
     now: f64,
+    strategy_id: i32,
 ) -> (Vec<String>, Vec<String>) {
     let skip: HashSet<String> = exclude.iter().map(|s| s.to_ascii_uppercase()).collect();
     let mut ordered: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for ticker in iter_liquid_majors(&snapshot.tickers, exclude) {
+    let book = if strategy_id == 3 {
+        pick_strategy3_book(&snapshot.tickers, exclude)
+    } else {
+        iter_liquid_majors(&snapshot.tickers, exclude)
+    };
+    for ticker in book {
         if seen.insert(ticker.symbol.clone()) {
             ordered.push(ticker.symbol);
         }
@@ -300,7 +310,7 @@ pub fn decide(
             ));
         }
     }
-    let (live, cooling) = desk_symbols(snapshot, exclude, cooldowns, now);
+    let (live, cooling) = desk_symbols(snapshot, exclude, cooldowns, now, sid);
     if live.is_empty() {
         if !cooling.is_empty() {
             return Ok((Decision::hold("пауза после сделки"), last_scan_ts));
@@ -523,7 +533,7 @@ pub fn tick_decisions(
         (merged_list, inflight)
     };
 
-    // Isolation: S1/S2/S3 majors-only; S4/S5 tagged-only. Foreign longs → unmanaged tails.
+    // Isolation: S1/S2 majors-only; S3 tradable USDT-M; S4/S5 tagged-only. Foreign longs → tails.
     merged_list
         .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
 

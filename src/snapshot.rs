@@ -12,7 +12,8 @@ use crate::models::{
 };
 use crate::profit::EquityPin;
 use crate::ranking::{
-    iter_liquid_majors, pick_chart_ticker, pick_strategy1_book, rank_most_rising, LIQUID_MAJORS,
+    iter_liquid_majors, pick_chart_ticker, pick_strategy1_book, pick_strategy3_book,
+    rank_most_rising, LIQUID_MAJORS,
 };
 use crate::sessions::unix_now;
 use crate::trend::{CHART_INTERVAL, CHART_LIMIT};
@@ -269,6 +270,76 @@ fn collect_s4_history(
         }
     }
     (last_bars, universe, htf_bars)
+}
+
+fn s3_bars_fresh(bars: &[Bar], now: f64) -> bool {
+    // EMA100 + Donchian 40 need >101 closed 1d bars; forming bar is already dropped.
+    if bars.len() < 110 {
+        return false;
+    }
+    let Some(last) = bars.last() else {
+        return false;
+    };
+    let age_ms = (now * 1000.0) as i64 - last.open_time;
+    age_ms >= 0 && age_ms < 2 * 86_400_000
+}
+
+/// Daily Donchian desk: 1d bars for the liquid USDT-M book, not three majors.
+/// Reuses prior bars; fetches missing/stale names in small batches so a 5s poll
+/// does not request 80 × 150 klines every tick.
+fn collect_s3_history(
+    client: &mut dyn SnapshotClient,
+    tickers: &[crate::models::Ticker],
+    chart_symbol: &str,
+    chart_bars: &[Bar],
+    remembered: &[Position],
+    skip: &[String],
+    prior: Option<&MarketSnapshot>,
+) -> HashMap<String, Vec<Bar>> {
+    let mut universe = HashMap::new();
+    if let Some(prev) = prior {
+        universe = prev.universe_bars.clone();
+    }
+    if !chart_symbol.is_empty() && !chart_bars.is_empty() {
+        universe.insert(chart_symbol.to_string(), chart_bars.to_vec());
+    }
+    let mut want: Vec<String> = pick_strategy3_book(tickers, skip)
+        .into_iter()
+        .map(|t| t.symbol)
+        .collect();
+    for pos in remembered {
+        if pos.qty > Decimal::ZERO && !want.iter().any(|s| s.eq_ignore_ascii_case(&pos.symbol)) {
+            want.push(pos.symbol.clone());
+        }
+    }
+    if !chart_symbol.is_empty() && !want.iter().any(|s| s.eq_ignore_ascii_case(chart_symbol)) {
+        want.push(chart_symbol.to_string());
+    }
+    const PER_POLL: usize = 20;
+    let now = unix_now();
+    let mut fetched = 0usize;
+    for symbol in want {
+        if symbol == chart_symbol && !chart_bars.is_empty() {
+            continue;
+        }
+        if s3_bars_fresh(
+            universe.get(&symbol).map(|b| b.as_slice()).unwrap_or(&[]),
+            now,
+        ) {
+            continue;
+        }
+        if fetched >= PER_POLL {
+            continue;
+        }
+        match closed_klines(client, &symbol, CHART_INTERVAL, CHART_LIMIT) {
+            Ok(extra) if !extra.is_empty() => {
+                universe.insert(symbol, extra);
+                fetched += 1;
+            }
+            _ => {}
+        }
+    }
+    universe
 }
 
 fn collect_last_bars(
@@ -595,7 +666,7 @@ pub fn fetch_snapshot(
             }
         }
     }
-    if matches!(state.strategy_id, 2 | 3) && remembered.is_empty() {
+    if state.strategy_id == 2 && remembered.is_empty() {
         let (interval, limit) = chart_spec(state.strategy_id, cfg.s4_interval);
         let mut want: Vec<String> = iter_liquid_majors(&tickers, skip)
             .into_iter()
@@ -621,6 +692,17 @@ pub fn fetch_snapshot(
                 }
             }
         }
+    }
+    if state.strategy_id == 3 {
+        universe_bars = collect_s3_history(
+            client,
+            &tickers,
+            &chart_symbol,
+            &bars,
+            &remembered,
+            skip,
+            prior,
+        );
     }
     let scan_due = if crate::engine::is_continuation(state.strategy_id) {
         crate::continuation::scan_due(state.last_scan_ts, unix_now())
