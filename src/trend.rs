@@ -1,4 +1,4 @@
-//! Daily trend: Turtle Donchian 20/10, long-only.
+//! Daily trend: Turtle-style Donchian 40/20, long-only.
 
 use crate::indicators::{channel_high, channel_low, last_adx, last_atr, last_ema};
 use crate::models::{Bar, Decision, Position, Side};
@@ -7,7 +7,8 @@ use crate::trail::{long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 
 pub const CHART_INTERVAL: &str = "1d";
-pub const CHART_LIMIT: usize = 90;
+/// Closed daily bars. EMA100 + Donchian 40 need >101; forming bar is dropped.
+pub const CHART_LIMIT: usize = 150;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrendParams {
@@ -28,14 +29,16 @@ pub struct TrendParams {
 impl Default for TrendParams {
     fn default() -> Self {
         Self {
-            channel: 20,
-            exit_channel: 10,
+            // 90d+ of 1d majors: 20/10 EMA50 is +EV on the bull train and −EV
+            // on the last 30% (chop). 40/20 + EMA100 stayed +EV on both splits.
+            channel: 40,
+            exit_channel: 20,
             atr_period: 20,
             sl_atr: Decimal::from(2),
             min_stop_pct: Decimal::new(6, 3),
             trail_atr: Decimal::new(25, 1),
             reward_r: Decimal::from(8),
-            ema_filter: 50,
+            ema_filter: 100,
             adx_period: 14,
             adx_min: Decimal::ZERO,
             cooldown_sec: 3600.0,
@@ -88,7 +91,7 @@ pub fn trend_decision(
         return Decision::hold("Donchian недоступен");
     };
     if mark <= prior_high {
-        return Decision::hold("нет пробоя Donchian 20");
+        return Decision::hold(format!("нет пробоя Donchian {}", p.channel));
     }
     if p.ema_filter > 0 {
         let closes: Vec<Decimal> = bars.iter().map(|b| b.close).collect();
@@ -116,7 +119,7 @@ pub fn trend_decision(
     let tp = mark + p.reward_r * risk;
     Decision::EnterLong {
         symbol: symbol.to_string(),
-        reason: "тренд: пробой Donchian 20".into(),
+        reason: format!("тренд: пробой Donchian {}", p.channel),
         take_profit: tp,
         stop_loss: sl,
     }
@@ -142,19 +145,20 @@ fn manage_long(
     p: &TrendParams,
 ) -> Decision {
     let sl = position.stop_loss;
+    let sym = position.symbol.clone();
     if let Some(sl) = sl {
         if mark <= sl {
             return Decision::ExitPosition {
                 reason: "trend stop loss".into(),
-                symbol: String::new(),
+                symbol: sym,
             };
         }
     }
     if let Some(exit_low) = channel_low(bars, p.exit_channel, true) {
         if mark < exit_low {
             return Decision::ExitPosition {
-                reason: "trend broken (Donchian 10)".into(),
-                symbol: String::new(),
+                reason: format!("trend broken (Donchian {})", p.exit_channel),
+                symbol: sym,
             };
         }
     }
@@ -162,7 +166,7 @@ fn manage_long(
         if mark >= tp {
             return Decision::ExitPosition {
                 reason: "trend take profit".into(),
-                symbol: String::new(),
+                symbol: sym,
             };
         }
     }
@@ -181,7 +185,7 @@ fn manage_long(
             return Decision::AmendStop {
                 stop_loss: chandelier,
                 reason: "trend attach stop".into(),
-                symbol: String::new(),
+                symbol: sym,
             };
         }
         return Decision::hold("trend hold, cannot attach stop");
@@ -192,7 +196,7 @@ fn manage_long(
             return Decision::AmendStop {
                 stop_loss: new_sl,
                 reason: "trend chandelier trail".into(),
-                symbol: String::new(),
+                symbol: sym,
             };
         }
     }

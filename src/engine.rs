@@ -24,7 +24,7 @@ pub const STRATEGY_IDS: [i32; 5] = [1, 2, 3, 4, 5];
 pub const STRATEGY_NAMES: [(i32, &'static str); 5] = [
     (1, "Momentum rider (растущий + TP + SL вверх)"),
     (2, "Скальп: откат к VWAP/EMA9"),
-    (3, "Тренд: пробой Donchian 20/10 (день)"),
+    (3, "Тренд: пробой Donchian 40/20 (день)"),
     (4, "Continuation: откат ликвидных (не догон 24h %)"),
     (5, "S5 Verify: continuation 1ч (A/B vs S4)"),
 ];
@@ -44,7 +44,8 @@ pub fn strategy_manages_long(
     if is_continuation(strategy_id) {
         return crate::openmeta::continuation_owns(symbol, strategy_id, inherited_s4);
     }
-    if strategy_id == 1 {
+    if strategy_id == 1 || strategy_id == 2 || strategy_id == 3 {
+        // S1/S2/S3 book = liquid majors only (BTC/ETH/SOL). Alt leftovers are tails.
         return crate::ranking::is_s1_symbol(symbol);
     }
     true
@@ -522,7 +523,7 @@ pub fn tick_decisions(
         (merged_list, inflight)
     };
 
-    // Isolation: S1 majors-only; S4/S5 tagged-only. Foreign longs → unmanaged tails.
+    // Isolation: S1/S2/S3 majors-only; S4/S5 tagged-only. Foreign longs → unmanaged tails.
     merged_list
         .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
 
@@ -542,6 +543,11 @@ pub fn tick_decisions(
     let loss_windows: Vec<crate::sessions::HourWindow> = if is_continuation(state.strategy_id) {
         momentum
             .map(|m| m.s4_entry_windows.clone())
+            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
+    } else if state.strategy_id == 2 {
+        // S2 session knobs — do not inherit STRATEGY1_ENTRY_HOURS for loss pause.
+        scalp
+            .map(|s| s.entry_windows.clone())
             .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
     } else {
         momentum

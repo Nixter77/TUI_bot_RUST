@@ -30,7 +30,16 @@ fn reset() {
     set_sink(None);
 }
 
-struct FakeClient;
+struct FakeClient {
+    /// After market_buy, positionRisk must show the fill or live path fail-closes.
+    filled: Option<(String, Decimal)>,
+}
+
+impl FakeClient {
+    fn new() -> Self {
+        Self { filled: None }
+    }
+}
 
 impl FlattenClient for FakeClient {
     fn cancel_protectives(&mut self, _symbol: &str) -> Result<(), ExchangeError> {
@@ -38,14 +47,29 @@ impl FlattenClient for FakeClient {
     }
     fn market_close(
         &mut self,
-        _symbol: &str,
+        symbol: &str,
         _side: &str,
         _qty: Decimal,
     ) -> Result<(), ExchangeError> {
+        if self
+            .filled
+            .as_ref()
+            .is_some_and(|(s, _)| s.eq_ignore_ascii_case(symbol))
+        {
+            self.filled = None;
+        }
         Ok(())
     }
     fn position_risk(&mut self) -> Result<Value, ExchangeError> {
-        Ok(Value::Array(vec![]))
+        match &self.filled {
+            Some((symbol, qty)) => Ok(serde_json::json!([{
+                "symbol": symbol,
+                "positionAmt": qty.to_string(),
+                "entryPrice": "1000",
+                "unRealizedProfit": "0",
+            }])),
+            None => Ok(Value::Array(vec![])),
+        }
     }
 }
 
@@ -58,7 +82,8 @@ impl LiveClient for FakeClient {
             min_notional: d("5"),
         })
     }
-    fn market_buy(&mut self, _symbol: &str, _qty: Decimal) -> Result<(), ExchangeError> {
+    fn market_buy(&mut self, symbol: &str, qty: Decimal) -> Result<(), ExchangeError> {
+        self.filled = Some((symbol.to_ascii_uppercase(), qty));
         Ok(())
     }
     fn place_tp_sl(
@@ -103,11 +128,12 @@ fn snap(position: Option<Position>) -> MarketSnapshot {
 }
 
 fn enter() -> Decision {
+    // Mark in snap() is 1000 — TP/SL must rebase valid vs that mark.
     Decision::EnterLong {
         symbol: "BTCUSDT".into(),
         reason: "x".into(),
-        take_profit: d("51000"),
-        stop_loss: d("49000"),
+        take_profit: d("1050"),
+        stop_loss: d("980"),
     }
 }
 
@@ -347,7 +373,7 @@ fn apply_decision_emits_buy_on_fill() {
     set_enabled(true);
     let cfg = cfg_live();
     let mut state = EngineState::new(1);
-    apply_decision(&cfg, &mut FakeClient, &mut state, &snap(None), &enter());
+    apply_decision(&cfg, &mut FakeClient::new(), &mut state, &snap(None), &enter());
     assert_eq!(*heard.lock().unwrap(), vec![TradeSignal::Buy]);
     heard.lock().unwrap().clear();
     let mut green = Position::long(
@@ -360,7 +386,7 @@ fn apply_decision_emits_buy_on_fill() {
     green.unrealized_pnl = d("5");
     apply_decision(
         &cfg,
-        &mut FakeClient,
+        &mut FakeClient::new(),
         &mut state,
         &snap(Some(green)),
         &Decision::ExitPosition {
@@ -382,7 +408,7 @@ fn apply_decision_emits_buy_on_fill() {
     red_snap.tickers = vec![Ticker::new("ETHUSDT", d("990"), d("-1"), d("10"))];
     apply_decision(
         &cfg,
-        &mut FakeClient,
+        &mut FakeClient::new(),
         &mut state,
         &red_snap,
         &Decision::ExitPosition {

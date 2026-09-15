@@ -56,7 +56,7 @@ fn dump_frame_strategy_4_shows_title() {
     );
     assert!(text.contains("Скальп: откат к VWAP/EMA9"), "{text}");
     assert!(
-        text.contains("Тренд: пробой Donchian 20/10 (день)"),
+        text.contains("Тренд: пробой Donchian 40/20 (день)"),
         "{text}"
     );
     assert!(text.contains("00–02"), "{text}");

@@ -520,14 +520,18 @@ fn enter_live(
     if held.iter().any(|s| s.eq_ignore_ascii_case(&want)) {
         return err("skip enter: already in position");
     }
-    let cap = if let Some(s) = state.filter(|s| crate::engine::is_continuation(s.strategy_id)) {
-        crate::engine::continuation_slot_cap(
-            s.strategy_id,
-            cfg.s4_max_positions,
-            cfg.s5_max_positions,
-        )
-    } else {
-        cfg.max_positions
+    let cap = match state.map(|s| s.strategy_id) {
+        Some(sid) if crate::engine::is_continuation(sid) => {
+            crate::engine::continuation_slot_cap(
+                sid,
+                cfg.s4_max_positions,
+                cfg.s5_max_positions,
+            )
+        }
+        // S2/S3 are single-slot; monitor gate already uses 1. Do not inherit S1 basket.
+        Some(2) | Some(3) => 1,
+        Some(1) => cfg.max_positions,
+        _ => cfg.max_positions,
     };
     if held.iter().filter(|s| !s.is_empty()).count() as i32 >= cap {
         return err("skip enter: book full");

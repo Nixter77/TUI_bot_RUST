@@ -88,7 +88,7 @@ fn format_packed(rows: &[SimResult]) -> String {
     let mut lines = vec![
         "home-economic backtest (Binance USDT-M public klines)".to_string(),
         "это НЕ TestNet: свечи без ордеров, fee=0.04% taker/side, notional=20 USDT.".into(),
-        "momentum/scalp = 5m; trend = Donchian 20/10; continuation = STRATEGY4_INTERVAL (5m/15m/30m/1h).".into(),
+        "momentum/scalp = 5m; trend = Donchian 40/20 on 1d; continuation = STRATEGY4_INTERVAL (5m/15m/30m/1h).".into(),
         String::new(),
         "=== L4 shipped defaults ===".into(),
     ];
@@ -148,7 +148,8 @@ pub fn run_cli() -> i32 {
             crate::sessions::unix_now() as i64
         ),
         format!(
-            "DUMP_S5={} SWEEP_S4S5={}",
+            "DUMP_S2={} DUMP_S5={} SWEEP_S4S5={}",
+            std::env::var("DUMP_S2").is_ok(),
             std::env::var("DUMP_S5").is_ok(),
             std::env::var("SWEEP_S4S5").is_ok()
         ),
@@ -156,9 +157,12 @@ pub fn run_cli() -> i32 {
     // Majors for S1–S3; alts for S4/S5 (continuation skips BTC/ETH/SOL/BNB/XRP/BCH).
     let majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     let alts = ["LINKUSDT", "AVAXUSDT", "DOGEUSDT", "ADAUSDT", "NEARUSDT"];
-    if env::var("KEEP_KLINES").is_err() && env::var("SWEEP_S1").is_err() {
+    if env::var("KEEP_KLINES").is_err()
+        && env::var("SWEEP_S1").is_err()
+        && env::var("DUMP_S2").is_err()
+    {
         for symbol in majors.iter().chain(alts.iter()) {
-            for iv in ["5m", "15m", "1h", "4h"] {
+            for iv in ["5m", "15m", "1h", "4h", "1d"] {
                 let _ = fs::remove_file(format!("{CACHE_DIR}/{symbol}_{iv}.json"));
             }
         }
@@ -167,6 +171,7 @@ pub fn run_cli() -> i32 {
     let mut univ_5m: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut univ_15m: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut univ_1h: Vec<(String, Vec<Bar>)> = Vec::new();
+    let mut univ_1d: Vec<(String, Vec<Bar>)> = Vec::new();
     let mut htf_4h: std::collections::HashMap<String, Vec<Bar>> = std::collections::HashMap::new();
 
     for symbol in majors {
@@ -175,6 +180,9 @@ pub fn run_cli() -> i32 {
         }
         if let Some(h) = fetch_klines(symbol, "4h") {
             htf_4h.insert(symbol.into(), h);
+        }
+        if let Some(d1) = fetch_klines(symbol, "1d") {
+            univ_1d.push((symbol.into(), d1));
         }
     }
     for symbol in alts {
@@ -196,6 +204,9 @@ pub fn run_cli() -> i32 {
         univ_5m.push(("BTCUSDT".into(), fx.clone()));
         univ_15m.push(("LINKUSDT".into(), fx.clone()));
         univ_1h.push(("LINKUSDT".into(), fx));
+    }
+    if univ_1d.is_empty() {
+        univ_1d.push(("BTCUSDT".into(), fixture_bars(200, 100.0, 0.05, 86_400_000)));
     }
 
     let mut rows = Vec::new();
@@ -254,6 +265,121 @@ pub fn run_cli() -> i32 {
             };
             println!("  {label:18} n={n:4}  wr={wr:>6}  pnl={pnl:+.4}");
         }
+        return 0;
+    }
+    // S2 research: fee/costR + exit-mix (funding omitted; live n=0 — no edge claim).
+    if env::var("DUMP_S2").is_ok() {
+        use std::collections::BTreeMap;
+        let fee_side = Decimal::new(4, 4);
+        let rt_pct = fee_side + fee_side; // 0.08%
+        let notional = Decimal::from(20);
+        let slip = Decimal::new(1, 4);
+        let mut arms: Vec<(&str, ScalpParams)> =
+            vec![("default 24/7 (CLI)", ScalpParams::default())];
+        let mut sess = ScalpParams::default();
+        sess.always_enter = false;
+        sess.entry_windows = crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec();
+        arms.push(("session DEFAULT_ENTRY_HOURS", sess));
+        let mut lines = vec![
+            "=== DUMP_S2 scalp research ===".into(),
+            format!(
+                "fee={fee_side} /side  RT≈{rt_pct}  notional={notional}  slip={slip}  funding=NOT modeled"
+            ),
+            "costR: if avg_win <= ~2x avg RT fee → not edge. fee-floor OK ≠ edge (need PF_net>1 + funding + live).".into(),
+            "MFE peak not stored on ClosedTrade — exit-mix only; live journal S2 n=0.".into(),
+            String::new(),
+        ];
+        for (label, params) in &arms {
+            lines.push(format!(
+                "--- arm: {label}  max_hold={} ---",
+                params.max_hold_bars
+            ));
+            let mut all = Vec::new();
+            for (symbol, bars) in &univ_5m {
+                let res = simulate_bars(
+                    2,
+                    bars,
+                    symbol,
+                    &format!("scalp {symbol} 5m"),
+                    notional,
+                    fee_side,
+                    slip,
+                    Some(80),
+                    Decimal::from(1000),
+                    None,
+                    Some(params),
+                    None,
+                );
+                lines.push(format!("  {}", res.summary_line()));
+                all.extend(res.trades);
+            }
+            let n = all.len();
+            if n == 0 {
+                lines.push("  (no trades)".into());
+                lines.push(String::new());
+                continue;
+            }
+            let wins: Vec<_> = all.iter().filter(|t| t.pnl > Decimal::ZERO).collect();
+            let losses: Vec<_> = all.iter().filter(|t| t.pnl < Decimal::ZERO).collect();
+            let sum_win: Decimal = wins.iter().map(|t| t.pnl).sum();
+            let sum_loss: Decimal = losses.iter().map(|t| -t.pnl).sum();
+            let sum_fee: Decimal = all.iter().map(|t| t.fee).sum();
+            let avg_win = if wins.is_empty() {
+                Decimal::ZERO
+            } else {
+                sum_win / Decimal::from(wins.len() as u64)
+            };
+            let avg_loss = if losses.is_empty() {
+                Decimal::ZERO
+            } else {
+                sum_loss / Decimal::from(losses.len() as u64)
+            };
+            let avg_fee = sum_fee / Decimal::from(n as u64);
+            let thr = avg_fee * Decimal::from(2);
+            let edge_gate = if avg_win > thr {
+                "fee-floor OK (avg_win>2xRT fee; NOT edge — PF/funding decide)"
+            } else {
+                "fee-floor FAIL → not edge even with pretty WR"
+            };
+            let pf = if sum_loss > Decimal::ZERO {
+                format!("{:.3}", sum_win / sum_loss)
+            } else if sum_win > Decimal::ZERO {
+                "∞".into()
+            } else {
+                "0".into()
+            };
+            let wr_pct = wins.len() as f64 / n as f64 * 100.0;
+            let sum_pnl: Decimal = all.iter().map(|t| t.pnl).sum();
+            lines.push(format!(
+                "  pooled n={n} wr={wr_pct:.1}% pf_net≈{pf} sum_pnl={sum_pnl:+} avg_win={avg_win:.4} avg_loss={avg_loss:.4} avg_fee_RT={avg_fee:.4} 2xfee={thr:.4} -> {edge_gate}"
+            ));
+            let mut by_reason: BTreeMap<String, (usize, Decimal)> = BTreeMap::new();
+            for t in &all {
+                let e = by_reason
+                    .entry(t.reason.clone())
+                    .or_insert((0, Decimal::ZERO));
+                e.0 += 1;
+                e.1 += t.pnl;
+            }
+            lines.push("  exit-mix:".into());
+            for (reason, (c, pnl)) in by_reason {
+                lines.push(format!("    {c:4}  pnl={pnl:+.4}  {reason}"));
+            }
+            let avg_hold: f64 = all.iter().map(|t| t.bars_held as f64).sum::<f64>() / n as f64;
+            lines.push(format!(
+                "  avg_bars_held≈{avg_hold:.1} (max_hold locked={})",
+                params.max_hold_bars
+            ));
+            lines.push(String::new());
+        }
+        lines.push(
+            "locked: max_hold default 8; peak≥0.8R→0.25R; session end flatten; majors book.".into(),
+        );
+        lines.push("Do NOT raise RISK_PCT while PF_net≤1. No profit claim.".into());
+        let text = lines.join("\n");
+        print!("{text}\n");
+        let _ = fs::create_dir_all(".state");
+        let _ = fs::write(".state/s2-research.txt", &text);
         return 0;
     }
     // Quick per-symbol S5 dump for debugging: write trade lists to .state
@@ -537,15 +663,17 @@ pub fn run_cli() -> i32 {
             Some(&ScalpParams::default()),
             None,
         ));
+    }
+    for (symbol, bars) in &univ_1d {
         rows.push(simulate_bars(
             3,
             bars,
             symbol,
-            &format!("trend {symbol} 5m"),
+            &format!("trend {symbol} 1d"),
             Decimal::from(20),
             Decimal::new(4, 4),
             Decimal::new(1, 4),
-            Some(70),
+            Some(110),
             Decimal::from(1000),
             None,
             None,

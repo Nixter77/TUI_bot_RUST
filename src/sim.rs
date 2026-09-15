@@ -103,6 +103,15 @@ fn apply_slip(price: Decimal, buy: bool, slip: Decimal) -> Decimal {
     }
 }
 
+fn bars_held_since(pos: &Position, bar: &Bar, bars: &[Bar]) -> usize {
+    let Some(opened) = pos.opened_bar_time else {
+        return 0;
+    };
+    bars.iter()
+        .filter(|b| b.open_time > opened && b.open_time <= bar.open_time)
+        .count()
+}
+
 fn hit_protectives(pos: &Position, bar: &Bar) -> Option<(Decimal, String)> {
     let hit_sl = pos.stop_loss.map(|sl| bar.low <= sl).unwrap_or(false);
     let hit_tp = pos.take_profit.map(|tp| bar.high >= tp).unwrap_or(false);
@@ -206,7 +215,7 @@ pub fn simulate_bars_opts(
     let warmup = warmup.unwrap_or(if strategy_id == 2 {
         80
     } else if strategy_id == 3 {
-        70
+        110
     } else if strategy_id == 4 || strategy_id == 5 {
         // Need ~21 closed 4h bars before HTF EMA gate can pass.
         360
@@ -308,7 +317,7 @@ pub fn simulate_bars_opts(
                     pnl,
                     fee,
                     reason,
-                    bars_held: 0,
+                    bars_held: bars_held_since(p, bar, bars),
                 });
                 equity += pnl;
                 if equity > peak {
@@ -389,7 +398,7 @@ pub fn simulate_bars_opts(
                     pnl,
                     fee,
                     reason,
-                    bars_held: 0,
+                    bars_held: bars_held_since(&p, bar, bars),
                 });
                 equity += pnl;
                 state.scaled_one_r.remove(&p.symbol.to_ascii_uppercase());
@@ -421,7 +430,7 @@ pub fn simulate_bars_opts(
                         pnl,
                         fee,
                         reason,
-                        bars_held: 0,
+                        bars_held: bars_held_since(&p, bar, bars),
                     });
                     equity += pnl;
                     p.qty -= close_qty;
@@ -442,7 +451,7 @@ pub fn simulate_bars_opts(
                         pnl,
                         fee,
                         reason,
-                        bars_held: 0,
+                        bars_held: bars_held_since(&p, bar, bars),
                     });
                     equity += pnl;
                     state.scaled_one_r.remove(&p.symbol.to_ascii_uppercase());
@@ -460,7 +469,7 @@ pub fn simulate_bars_opts(
         let exit_px = apply_slip(last.close, false, slip);
         let (pnl, fee) = long_pnl(p.entry_price, exit_px, p.qty, fee_rate);
         result.trades.push(ClosedTrade {
-            symbol: p.symbol,
+            symbol: p.symbol.clone(),
             strategy_id,
             entry: p.entry_price,
             exit: exit_px,
@@ -468,7 +477,7 @@ pub fn simulate_bars_opts(
             pnl,
             fee,
             reason: "end of series".into(),
-            bars_held: 0,
+            bars_held: bars_held_since(&p, last, bars),
         });
         equity += pnl;
     }

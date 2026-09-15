@@ -643,6 +643,8 @@ fn until_entry(
                 s4_setup_until(snapshot, ticker, &s4_params(cfg, state.strategy_id), now)
             } else if state.strategy_id == 1 {
                 s1_setup_until(snapshot, ticker, now)
+            } else if state.strategy_id == 3 {
+                until_clock(next_utc_midnight(now), now)
             } else {
                 next_bar_until(snapshot, &ticker.symbol, TradeInterval::Minute5, now)
             }
@@ -895,8 +897,11 @@ fn top_heading(label: &str, shown: usize, total: usize) -> String {
 
 fn wait_heading(view: &MonitorView) -> String {
     match view.strategy_id {
-        4 => "=== В ожидании входа (книга ликвид, не топ 24h) ===".into(),
+        4 | 5 => "=== В ожидании входа (книга ликвид, не топ 24h) ===".into(),
         1 => "=== В ожидании входа (книга momentum) ===".into(),
+        // S2/S3: same liquid-majors book as engine desk — NOT the full 24h tape («Топ роста»).
+        2 => "=== В ожидании входа (книга majors BTC/ETH/SOL, не топ 24h) ===".into(),
+        3 => "=== В ожидании входа (книга majors BTC/ETH/SOL, не топ 24h) ===".into(),
         _ => "=== В ожидании входа ===".into(),
     }
 }
@@ -905,8 +910,8 @@ fn wait_hint(view: &MonitorView) -> &'static str {
     match view.strategy_id {
         4 => "  кого стратегия 4 реально берёт: ликвидный откат, не догон 24h %",
         1 => "  кого momentum берёт из растущих (не вся лента)",
-        2 => "  BTC/ETH/SOL — скальп VWAP/EMA9",
-        3 => "  BTC/ETH/SOL — тренд Donchian",
+        2 => "  кого S2 реально берёт: BTC/ETH/SOL majors book (не лента 24h %)",
+        3 => "  кого S3 реально берёт: BTC/ETH/SOL majors book (не лента 24h %)",
         _ => "  кандидаты текущей стратегии",
     }
 }

@@ -287,3 +287,32 @@ fn s2_in_session_counts_down_to_next_5m_close() {
     );
     assert!(!btc.until.contains("ждёт свечу"), "{}", btc.until);
 }
+
+
+#[test]
+fn s2_wait_heading_is_majors_book_not_24h_tape() {
+    let cfg = cfg_hours();
+    let state = EngineState::new(2);
+    let mut snap = MarketSnapshot::empty(d("1000"));
+    snap.tickers = {
+        let mut t = majors_tape();
+        t.push(Ticker::new("APTUSDT", d("8"), d("20.0"), d("3000000")));
+        t
+    };
+    let now = make_utc_ts(2026, 9, 14, 8, 2, 0);
+    let waiting = classify_waiting(&cfg, &state, &snap, &[], now);
+    assert!(
+        waiting.iter().all(|w| matches!(w.symbol.as_str(), "BTCUSDT" | "ETHUSDT" | "SOLUSDT")),
+        "S2 wait book must be majors only, got {waiting:?}"
+    );
+    assert!(
+        waiting.iter().all(|w| w.symbol != "APTUSDT"),
+        "24h tape leader must not appear in S2 ожидание"
+    );
+    let frame = render_monitor(&build_monitor(&cfg, &state, &snap, &[], now));
+    assert!(
+        frame.contains("книга majors BTC/ETH/SOL, не топ 24h"),
+        "{frame}"
+    );
+    assert!(frame.contains("не лента 24h"), "{frame}");
+}
