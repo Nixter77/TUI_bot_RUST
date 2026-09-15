@@ -4,7 +4,9 @@ mod common;
 use common::*;
 use rust_decimal::Decimal;
 use tui_bot::models::{Decision, Position, Side};
-use tui_bot::scalp::scalp_decision;
+use std::collections::HashMap;
+use tui_bot::config::load_config;
+use tui_bot::scalp::{scalp_decision, ScalpParams};
 
 #[test]
 fn enters_on_vwap_ema_pullback() {
@@ -336,4 +338,18 @@ fn entry_tp_is_fee_padded() {
         }
         other => panic!("{} {:?}", other.reason(), other),
     }
+}
+
+
+#[test]
+fn from_config_locks_session_and_max_hold() {
+    let mut env = HashMap::new();
+    env.insert("STRATEGY2_ENTRY_HOURS".into(), "7-10,13-16".into());
+    env.insert("STRATEGY2_MAX_HOLD_BARS".into(), "8".into());
+    let cfg = load_config(false, None, Some(&env)).unwrap();
+    let p = ScalpParams::from_config(&cfg);
+    assert_eq!(p.max_hold_bars, 8);
+    assert!(!p.always_enter);
+    assert_eq!(p.entry_windows, vec![(7, 10), (13, 16)]);
+    assert_eq!(ScalpParams::default().max_hold_bars, 8);
 }
