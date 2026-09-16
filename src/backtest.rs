@@ -190,6 +190,28 @@ pub fn run_cli() -> i32 {
     }
     let btc_htf = fetch_klines("BTCUSDT", "4h");
 
+    // DUMP_S4 needs n≥30 — expand alt book (research only; live book unchanged).
+    if env::var("DUMP_S4").is_ok() {
+        let more = [
+            "ARBUSDT", "OPUSDT", "SUIUSDT", "APTUSDT", "INJUSDT", "FILUSDT",
+            "ATOMUSDT", "DOTUSDT", "LTCUSDT", "RENDERUSDT", "FETUSDT", "TIAUSDT",
+            "SEIUSDT", "WLDUSDT", "PEPEUSDT",
+        ];
+        for symbol in more {
+            if univ_15m.iter().any(|(s, _)| s == symbol) {
+                continue;
+            }
+            if let Some(bars) = fetch_klines(symbol, "15m") {
+                univ_15m.push((symbol.into(), bars));
+            }
+            if let Some(bars) = fetch_klines(symbol, "4h") {
+                htf_4h.insert(symbol.into(), bars);
+            }
+        }
+        eprintln!("DUMP_S4 universe 15m n={}", univ_15m.len());
+    }
+
+
     if univ_5m.is_empty() && univ_15m.is_empty() && univ_1h.is_empty() {
         eprintln!("network/cache empty — walking in-process fixture klines (no orders)");
         let fx = fixture_bars(200, 100.0, 0.05, 300_000);
@@ -490,6 +512,293 @@ pub fn run_cli() -> i32 {
         print!("{s}");
         return 0;
     }
+    // S4 SetupScore research: baseline (soft gate OFF) vs SetupScore ON.
+    // Gates only from live S4 + soft costR. Fees in pnl; funding ≈ 0.01%/8h on notional.
+    if env::var("DUMP_S4").is_ok() {
+        use std::collections::BTreeMap;
+        let fee_side = Decimal::new(4, 4);
+        let notional = Decimal::from(20);
+        let slip = Decimal::new(1, 4);
+        let fund_per_8h = Decimal::new(1, 4); // 0.01% of notional
+        let warmup = 360usize; // ~21×4h on 15m
+        let train_frac = 0.70f64;
+
+        // always_enter=true isolates SetupScore from session-clock (1d/15m sim now=open).
+        let mut baseline = ContinuationParams::default().with_interval(TradeInterval::Minute15);
+        baseline.setup_score = false;
+        baseline.always_enter = true;
+        let mut scored = ContinuationParams::default().with_interval(TradeInterval::Minute15);
+        scored.setup_score = true;
+        scored.always_enter = true;
+        let mut scored65 = scored.clone();
+        scored65.score_enter = 65; // Watch band as enter (research)
+        let mut score_only = scored.clone();
+        score_only.soft_cost_r = false; // isolate score vs costR
+        score_only.score_enter = 65;
+        let mut costr_only = scored.clone();
+        costr_only.score_enter = 0; // costR soft only (score always Enter if no soft_reject)
+        let arms: Vec<(&str, ContinuationParams)> = vec![
+            ("baseline (setup_score=off)", baseline.clone()),
+            ("SetupScore enter≥75+costR", scored),
+            ("SetupScore enter≥65+costR", scored65),
+            ("SetupScore enter≥65 no-costR", score_only),
+            ("SetupScore costR-only", costr_only),
+        ];
+
+        let mut lines = vec![
+            "=== DUMP_S4 continuation SetupScore (feat/s4-setup-score) ===".into(),
+            format!(
+                "fee={fee_side}/side  notional={notional}  slip={slip}  funding≈{fund_per_8h}/8h on notional (flat pay)"
+            ),
+            "universe: 15m + 4h HTF (cache/public). train 70% / held-out 30% chronological.".into(),
+            "pf_net = fee pnl; pf_net_f = after funding. kill: held pf_net_f≤1 OR ≤baseline OR n<30.".into(),
+            "gates: live S4 only + soft costR; no new indicators.".into(),
+            String::new(),
+        ];
+
+        fn split_train_held(bars: &[Bar], train_frac: f64, warmup: usize) -> (Vec<Bar>, Vec<Bar>) {
+            let split = ((bars.len() as f64) * train_frac).floor() as usize;
+            let split = split.max(warmup + 5).min(bars.len().saturating_sub(5));
+            let train = bars[..split].to_vec();
+            let held_start = split.saturating_sub(warmup);
+            let held = bars[held_start..].to_vec();
+            (train, held)
+        }
+
+        fn funding_drag(t: &crate::sim::ClosedTrade, notional: Decimal, fund_per_8h: Decimal) -> Decimal {
+            // 15m bars: 8h = 32 bars
+            let n8 = Decimal::from((t.bars_held.saturating_add(31) / 32) as u64);
+            notional * fund_per_8h * n8
+        }
+
+        fn summarize(
+            label: &str,
+            trades: &[crate::sim::ClosedTrade],
+            notional: Decimal,
+            fund_per_8h: Decimal,
+        ) -> (String, Decimal, usize) {
+            let n = trades.len();
+            if n == 0 {
+                return (format!("  {label}: n=0"), Decimal::ZERO, 0);
+            }
+            let wins: Vec<_> = trades.iter().filter(|t| t.pnl > Decimal::ZERO).collect();
+            let losses: Vec<_> = trades.iter().filter(|t| t.pnl < Decimal::ZERO).collect();
+            let sum_win: Decimal = wins.iter().map(|t| t.pnl).sum();
+            let sum_loss: Decimal = losses.iter().map(|t| -t.pnl).sum();
+            let sum_fee: Decimal = trades.iter().map(|t| t.fee).sum();
+            let sum_pnl: Decimal = trades.iter().map(|t| t.pnl).sum();
+            let fund: Decimal = trades
+                .iter()
+                .map(|t| funding_drag(t, notional, fund_per_8h))
+                .sum();
+            let mut gains_f = Decimal::ZERO;
+            let mut losses_f = Decimal::ZERO;
+            for t in trades {
+                let net = t.pnl - funding_drag(t, notional, fund_per_8h);
+                if net > Decimal::ZERO {
+                    gains_f += net;
+                } else if net < Decimal::ZERO {
+                    losses_f += -net;
+                }
+            }
+            let pf = if sum_loss > Decimal::ZERO {
+                sum_win / sum_loss
+            } else if sum_win > Decimal::ZERO {
+                Decimal::from(1000)
+            } else {
+                Decimal::ZERO
+            };
+            let pf_f = if losses_f > Decimal::ZERO {
+                gains_f / losses_f
+            } else if gains_f > Decimal::ZERO {
+                Decimal::from(1000)
+            } else {
+                Decimal::ZERO
+            };
+            let wr = wins.len() as f64 / n as f64 * 100.0;
+            let avg_win = if wins.is_empty() {
+                Decimal::ZERO
+            } else {
+                sum_win / Decimal::from(wins.len() as u64)
+            };
+            let avg_loss = if losses.is_empty() {
+                Decimal::ZERO
+            } else {
+                sum_loss / Decimal::from(losses.len() as u64)
+            };
+            let avg_fee = sum_fee / Decimal::from(n as u64);
+            let thr = avg_fee * Decimal::from(2);
+            let fee_gate = if avg_win > thr {
+                "fee-floor OK"
+            } else {
+                "fee-floor FAIL"
+            };
+            let avg_hold: f64 = trades.iter().map(|t| t.bars_held as f64).sum::<f64>() / n as f64;
+            let line = format!(
+                "  {label}: n={n} wr={wr:.1}% pf_net={pf:.3} pf_net_f={pf_f:.3} sum_pnl={sum_pnl:+} fund_drag={fund:.4} avg_win={avg_win:.4} avg_loss={avg_loss:.4} avg_fee={avg_fee:.4} avg_hold_bars≈{avg_hold:.1} -> {fee_gate}"
+            );
+            (line, pf_f, n)
+        }
+
+        fn wr_pf(trades: &[crate::sim::ClosedTrade], notional: Decimal, fund_per_8h: Decimal) -> String {
+            let n = trades.len();
+            if n == 0 {
+                return "n=0".into();
+            }
+            let wins = trades.iter().filter(|t| t.pnl > Decimal::ZERO).count();
+            let wr = wins as f64 / n as f64 * 100.0;
+            let mut gains_f = Decimal::ZERO;
+            let mut losses_f = Decimal::ZERO;
+            for t in trades {
+                let net = t.pnl - funding_drag(t, notional, fund_per_8h);
+                if net > Decimal::ZERO {
+                    gains_f += net;
+                } else if net < Decimal::ZERO {
+                    losses_f += -net;
+                }
+            }
+            let pf = if losses_f > Decimal::ZERO {
+                format!("{:.3}", gains_f / losses_f)
+            } else if gains_f > Decimal::ZERO {
+                "∞".into()
+            } else {
+                "0".into()
+            };
+            format!("n={n} wr={wr:.1}% pf_f={pf}")
+        }
+
+        // baseline bleed on FULL sample (setup_score off)
+        {
+            lines.push("--- WHY / FULL SAMPLE baseline (setup_score=off) ---".into());
+            let mut all = Vec::new();
+            for (symbol, bars) in &univ_15m {
+                let htf = htf_4h.get(symbol).map(|v| v.as_slice());
+                let opts = SimOpts {
+                    htf,
+                    btc_htf: btc_htf.as_deref(),
+                };
+                let res = simulate_bars_opts(
+                    4,
+                    bars,
+                    symbol,
+                    &format!("S4 {symbol} 15m full"),
+                    notional,
+                    fee_side,
+                    slip,
+                    Some(warmup),
+                    Decimal::from(1000),
+                    None,
+                    None,
+                    None,
+                    opts,
+                    Some(&baseline),
+                );
+                lines.push(format!("  {}", res.summary_line()));
+                all.extend(res.trades);
+            }
+            let (sum_line, _, _) = summarize("pooled", &all, notional, fund_per_8h);
+            lines.push(sum_line);
+            let mut by_reason: BTreeMap<String, (usize, Decimal)> = BTreeMap::new();
+            for t in &all {
+                let e = by_reason.entry(t.reason.clone()).or_insert((0, Decimal::ZERO));
+                e.0 += 1;
+                e.1 += t.pnl;
+            }
+            lines.push("  exit-mix:".into());
+            for (reason, (c, pnl)) in &by_reason {
+                lines.push(format!("    {c:4}  pnl={pnl:+.4}  {reason}"));
+            }
+            lines.push(String::new());
+        }
+
+        lines.push("--- A/B held-out (train 70% / held 30%) ---".into());
+        let mut held_scores: Vec<(String, Decimal, usize)> = Vec::new();
+        for (label, params) in &arms {
+            let mut train_all = Vec::new();
+            let mut held_all = Vec::new();
+            for (symbol, bars) in &univ_15m {
+                let (train_bars, held_bars) = split_train_held(bars, train_frac, warmup);
+                let htf = htf_4h.get(symbol).map(|v| v.as_slice());
+                for (tag, slice, sink) in [
+                    ("train", train_bars.as_slice(), &mut train_all),
+                    ("held", held_bars.as_slice(), &mut held_all),
+                ] {
+                    let opts = SimOpts {
+                        htf,
+                        btc_htf: btc_htf.as_deref(),
+                    };
+                    let res = simulate_bars_opts(
+                        4,
+                        slice,
+                        symbol,
+                        &format!("S4 {symbol} 15m {tag}"),
+                        notional,
+                        fee_side,
+                        slip,
+                        Some(warmup),
+                        Decimal::from(1000),
+                        None,
+                        None,
+                        None,
+                        opts,
+                        Some(params),
+                    );
+                    sink.extend(res.trades);
+                }
+            }
+            let (tr_line, _, _) = summarize("train", &train_all, notional, fund_per_8h);
+            let (he_line, he_pf, he_n) = summarize("held", &held_all, notional, fund_per_8h);
+            lines.push(format!("arm: {label}"));
+            lines.push(tr_line);
+            lines.push(he_line);
+            lines.push(format!(
+                "  TABLE {label} | {} | {}",
+                wr_pf(&train_all, notional, fund_per_8h),
+                wr_pf(&held_all, notional, fund_per_8h)
+            ));
+            held_scores.push((label.to_string(), he_pf, he_n));
+            let mut by_reason: BTreeMap<String, (usize, Decimal)> = BTreeMap::new();
+            for t in &held_all {
+                let e = by_reason.entry(t.reason.clone()).or_insert((0, Decimal::ZERO));
+                e.0 += 1;
+                e.1 += t.pnl;
+            }
+            lines.push("  held exit-mix:".into());
+            for (reason, (c, pnl)) in by_reason {
+                lines.push(format!("    {c:4}  pnl={pnl:+.4}  {reason}"));
+            }
+            lines.push(String::new());
+        }
+
+        let base_pf = held_scores.first().map(|(_, pf, _)| *pf).unwrap_or(Decimal::ZERO);
+        lines.push("--- VERDICT ---".into());
+        for (name, pf, n) in &held_scores {
+            let kill = if *n < 30 {
+                "KILL (n<30)"
+            } else if *pf <= Decimal::ONE {
+                "KILL (pf_net_f≤1)"
+            } else if name.contains("SetupScore") && *pf <= base_pf {
+                "KILL (≤baseline)"
+            } else if name.contains("SetupScore") {
+                "CANDIDATE"
+            } else {
+                "baseline"
+            };
+            lines.push(format!("  {name}: held n={n} pf_net_f={pf:.3} -> {kill}"));
+        }
+        let edge = held_scores.iter().any(|(name, pf, n)| {
+            name.contains("SetupScore") && *n >= 30 && *pf > Decimal::ONE && *pf > base_pf
+        });
+        lines.push(format!("edge? {}", if edge { "YES" } else { "NO" }));
+        lines.push("live BLOCK — no merge without Chief GO.".into());
+
+        let text = lines.join("\n");
+        print!("{text}\n");
+        let _ = fs::create_dir_all(".state");
+        let _ = fs::write(".state/dump-s4-report.txt", &text);
+        return 0;
+    }
+
     let mom = MomentumParams {
         always_enter: true,
         cooldown_sec: 0.0,

@@ -677,7 +677,14 @@ pub fn tick_decisions(
             .filter(|s| s.as_str() != "*")
             .cloned()
             .collect();
-        let cont = continuation_params(sid, momentum);
+        // Research / BT may pass ContinuationParams (SetupScore on/off). Live keeps None.
+        let cont_owned;
+        let cont_ref = if let Some(p) = _continuation_override {
+            p
+        } else {
+            cont_owned = continuation_params(sid, momentum);
+            &cont_owned
+        };
         let (d, ts, leaders) = continuation_decisions(
             snapshot,
             &merged_list,
@@ -685,7 +692,7 @@ pub fn tick_decisions(
             state.last_scan_ts,
             &inflight_f,
             &cooldowns,
-            Some(&cont),
+            Some(cont_ref),
             &state.skip_symbols,
             !state.daily_halt,
             &state.recent_leaders,

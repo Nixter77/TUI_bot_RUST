@@ -70,7 +70,7 @@ impl SetupScore {
             SetupAction::Enter => None,
             SetupAction::Watch => Some(format!(
                 "setup score {} — watch (need ≥{})",
-                self.score, SCORE_ENTER
+                self.score, SCORE_ENTER // display const; runtime uses p.score_enter
             )),
             SetupAction::Skip => Some(format!(
                 "setup score {} — soft skip (need ≥{})",
@@ -299,20 +299,22 @@ pub fn evaluate(
     let cost_r = natural_stop_risk_pct(snapshot, &ticker.symbol, signal, ticker.last_price, p)
         .and_then(projected_cost_r);
 
-    if let Some(cr) = cost_r {
-        // Strictly worse than 15m design (RT 0.08% / 2% = 0.04R). Equal-to-floor OK.
-        if cr > cost_r_soft_max() {
-            soft_reject = Some(format!(
-                "costR {:.3}R > {:.0}% of 1R — soft reject",
-                cr,
-                cost_r_soft_max() * Decimal::from(100)
-            ));
+    if p.soft_cost_r {
+        if let Some(cr) = cost_r {
+            // Strictly worse than 15m design (RT 0.08% / 2% = 0.04R). Equal-to-floor OK.
+            if cr > cost_r_soft_max() {
+                soft_reject = Some(format!(
+                    "costR {:.3}R > {:.0}% of 1R — soft reject",
+                    cr,
+                    cost_r_soft_max() * Decimal::from(100)
+                ));
+            }
         }
     }
 
     let action = if soft_reject.is_some() {
         SetupAction::Skip
-    } else if score >= SCORE_ENTER {
+    } else if score >= p.score_enter {
         SetupAction::Enter
     } else if score >= SCORE_WATCH {
         SetupAction::Watch
@@ -399,7 +401,7 @@ mod tests {
             bars.push(bar(i, px, px + 0.05, px - 0.05, px + 0.02, 1000.0));
         }
         let last = bars.last().unwrap().clone();
-        snap.bars.insert("ALTUSDT".into(), bars);
+        snap.universe_bars.insert("ALTUSDT".into(), bars);
         // Rising 4h above EMA
         let mut htf = Vec::new();
         for i in 0..40 {

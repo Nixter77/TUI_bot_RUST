@@ -21,7 +21,6 @@ use crate::sessions::{
 use crate::trail::{candidate_stop, long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -158,6 +157,10 @@ pub struct ContinuationParams {
     pub interval: TradeInterval,
     /// Phase-3 SetupScore soft gate (hard gates unchanged). Off = baseline A/B.
     pub setup_score: bool,
+    /// Enter threshold for SetupScore (default SCORE_ENTER=75). Research A/B only.
+    pub score_enter: u8,
+    /// Soft costR reject inside SetupScore (default on).
+    pub soft_cost_r: bool,
 }
 
 impl Default for ContinuationParams {
@@ -188,7 +191,9 @@ impl Default for ContinuationParams {
             min_pullback_pct: TradeInterval::Minute5.min_pullback_pct(),
             stop_lookback: 3,
             interval: TradeInterval::Minute5,
-            setup_score: true,
+            setup_score: false, // off until held-out edge; DUMP_S4 A/Bs ON
+            score_enter: 75,
+            soft_cost_r: true,
         }
     }
 }
