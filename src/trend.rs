@@ -7,7 +7,8 @@ use crate::trail::{long_stop_is_valid, trail_stop_upward};
 use rust_decimal::Decimal;
 
 pub const CHART_INTERVAL: &str = "1d";
-/// Closed daily bars. EMA100 + Donchian 40 need >101; forming bar is dropped.
+/// Closed daily bars. EMA50 + Donchian 40 need >51; keep 150 so ATR/regime
+/// are not starving on a short TestNet history.
 pub const CHART_LIMIT: usize = 150;
 /// Last closed 1d bar is the signal. Do not chase it all the next UTC day.
 pub const ENTRY_GRACE_SEC: f64 = 2.0 * 3_600.0;
@@ -43,8 +44,9 @@ pub struct TrendParams {
 impl Default for TrendParams {
     fn default() -> Self {
         Self {
-            // 90d+ of 1d majors: 20/10 EMA50 is +EV on the bull train and −EV
-            // on the last 30% (chop). 40/20 + EMA100 stayed +EV on both splits.
+            // 25 liquid USDT-M, ~1500×1d, 1-slot book: 40/20 EMA100 is +EV on
+            // the bull train and −EV on held-out (PF 0.86). 40/20 EMA50 stayed
+            // +EV on train, held-out, and 3/3 walk-forward. Still Donchian 40/20.
             channel: 40,
             exit_channel: 20,
             atr_period: 20,
@@ -53,7 +55,7 @@ impl Default for TrendParams {
             max_stop_pct: max_stop_pct(),
             trail_atr: Decimal::new(25, 1),
             reward_r: Decimal::from(8),
-            ema_filter: 100,
+            ema_filter: 50,
             adx_period: 14,
             adx_min: Decimal::ZERO,
             cooldown_sec: 3600.0,
@@ -66,6 +68,18 @@ impl Default for TrendParams {
 /// Unix seconds when the daily bar that opened at `open_time_ms` closes.
 pub fn daily_bar_close_ts(open_time_ms: i64) -> f64 {
     (open_time_ms as f64) / 1000.0 + DAY_SEC
+}
+
+/// How far the last close sits above the prior Donchian high (fraction).
+/// Smaller positive = just broke out. Used to pick the least-chased signal
+/// when several names fire on the same daily close.
+pub fn breakout_extension(bars: &[Bar], channel: usize) -> Option<Decimal> {
+    let last = bars.last()?;
+    let prior = channel_high(bars, channel, true)?;
+    if prior <= Decimal::ZERO {
+        return None;
+    }
+    Some((last.close - prior) / prior)
 }
 
 /// Live last vs the closed daily close that formed the Donchian signal.
