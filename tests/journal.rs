@@ -402,12 +402,17 @@ fn unmatched_reads_active_path_not_default() {
 
 #[test]
 fn close_tags_opener_strategy_id_not_running_lens() {
+    // Serialize vs other open_meta STORE users; unique symbol avoids AVAX collisions.
+    let _guard = JOURNAL_ACTIVE_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trades.jsonl");
+    set_active(Some(path.clone()));
     let j = TradeJournal::new(Some(&path));
     j.record_open(
         4,
-        "AVAXUSDT",
+        "TAGUSDT",
         d("0.02"),
         d("100"),
         "S4 open",
@@ -418,7 +423,7 @@ fn close_tags_opener_strategy_id_not_running_lens() {
     );
     j.record_close(
         5,
-        "AVAXUSDT",
+        "TAGUSDT",
         d("0.02"),
         d("100"),
         d("99"),
@@ -434,6 +439,7 @@ fn close_tags_opener_strategy_id_not_running_lens() {
         close.strategy_id, 4,
         "close must keep opener S4, not running S5: {close:?}"
     );
+    set_active(None);
 }
 
 #[cfg(unix)]
@@ -533,16 +539,17 @@ fn s5_close_persists_mfe_mae_r_from_1h_bars() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trades.jsonl");
     set_active(Some(path.clone()));
+    // Distinct symbol — avoid races with other AVAXUSDT journal fixtures.
     on_open(
         5,
-        "AVAXUSDT",
+        "S5MFEUSDT",
         d("100"),
         d("97"),
         d("1"),
         1_700_000_000.0,
         None,
     );
-    let mut pos = Position::long("AVAXUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
+    let mut pos = Position::long("S5MFEUSDT", d("1"), d("100"), Some(d("97")), Some(d("106")));
     pos.opened_bar_time = Some(1_700_000_000_000);
     let bar = Bar {
         open_time: 1_700_000_000_000,
@@ -553,12 +560,12 @@ fn s5_close_persists_mfe_mae_r_from_1h_bars() {
         volume: d("20"),
     };
     let mut snap = MarketSnapshot::empty(d("10000"));
-    snap.tickers = vec![Ticker::new("AVAXUSDT", d("99"), d("-1"), d("50000000"))];
-    snap.universe_bars.insert("AVAXUSDT".into(), vec![bar]);
+    snap.tickers = vec![Ticker::new("S5MFEUSDT", d("99"), d("-1"), d("50000000"))];
+    snap.universe_bars.insert("S5MFEUSDT".into(), vec![bar]);
     update_from_positions(&[pos], &snap, 1_700_003_600.0);
     record_close(
         5,
-        "AVAXUSDT",
+        "S5MFEUSDT",
         d("1"),
         d("100"),
         d("99"),
