@@ -332,6 +332,11 @@ pub fn decide(
         }
         return Ok((Decision::hold("no symbol"), last_scan_ts));
     }
+    if sid == 3 {
+        if let Some(why) = crate::regime::block_alt_entry(snapshot) {
+            return Ok((Decision::hold(why), last_scan_ts));
+        }
+    }
     let mut holds: Vec<(String, String)> = Vec::new();
     for symbol in live {
         let bars = snapshot.bars_for(&symbol);

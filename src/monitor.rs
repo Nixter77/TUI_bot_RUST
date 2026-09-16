@@ -352,17 +352,22 @@ fn setup_skip(
                 _ => None,
             }
         }
-        3 => match trend_decision(
-            snapshot.bars_for(&ticker.symbol),
-            None,
-            &ticker.symbol,
-            None,
-            Some(now),
-        ) {
-            crate::models::Decision::Hold { reason } => Some(reason),
-            crate::models::Decision::EnterLong { .. } => None,
-            _ => None,
-        },
+        3 => {
+            if let Some(why) = crate::regime::block_alt_entry(snapshot) {
+                return Some(why);
+            }
+            match trend_decision(
+                snapshot.bars_for(&ticker.symbol),
+                None,
+                &ticker.symbol,
+                None,
+                Some(now),
+            ) {
+                crate::models::Decision::Hold { reason } => Some(reason),
+                crate::models::Decision::EnterLong { .. } => None,
+                _ => None,
+            }
+        }
         _ => Some("неизвестная стратегия".into()),
     }
 }

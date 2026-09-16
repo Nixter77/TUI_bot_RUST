@@ -169,3 +169,38 @@ fn strategy3_book_is_liquid_usdt_not_three_majors() {
         .any(|s| s.contains("PEPE") || s.contains("FART")));
     assert!(!syms.contains(&"XAUUSDT"));
 }
+
+#[test]
+fn strategy3_book_skips_penny_pumps() {
+    let tickers = vec![
+        Ticker::new(
+            "AVAXUSDT",
+            Decimal::from(20),
+            Decimal::from(2),
+            Decimal::from(5_000_000),
+        ),
+        Ticker::new(
+            "AINUSDT",
+            "0.17".parse().unwrap(),
+            Decimal::from(34),
+            Decimal::from(8_000_000_000u64),
+        ),
+        Ticker::new(
+            "POWERUSDT",
+            "0.18".parse().unwrap(),
+            Decimal::from(29),
+            Decimal::from(7_000_000_000u64),
+        ),
+        Ticker::new(
+            "BTCUSDT",
+            Decimal::from(50000),
+            Decimal::from(1),
+            Decimal::from(800_000),
+        ),
+    ];
+    let book = pick_strategy3_book(&tickers, &[]);
+    let syms: Vec<_> = book.iter().map(|t| t.symbol.as_str()).collect();
+    assert_eq!(syms, vec!["AVAXUSDT", "BTCUSDT"]);
+    assert!(!syms.contains(&"AINUSDT"));
+    assert!(!syms.contains(&"POWERUSDT"));
+}

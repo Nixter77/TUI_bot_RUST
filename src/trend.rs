@@ -14,7 +14,7 @@ pub const ENTRY_GRACE_SEC: f64 = 2.0 * 3_600.0;
 pub const DAY_SEC: f64 = 86_400.0;
 /// Skip 2-ATR stops that are a third of the coin (TestNet microcap pumps).
 pub fn max_stop_pct() -> Decimal {
-    Decimal::new(15, 2)
+    Decimal::new(10, 2)
 }
 /// Live ticker may not have already run away from the closed daily close.
 pub fn max_close_extension_pct() -> Decimal {

@@ -11,6 +11,16 @@ pub const LIQUID_MAJORS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 /// Cap bounds 1d kline weight; junk / 1000x stay out via `is_tradable_symbol`.
 pub const S3_BOOK_CAP: usize = 80;
 
+/// Same floor as S4: TestNet pennies (AIN 0.17, POWER 0.18) are not a daily trend.
+pub fn s3_min_price() -> Decimal {
+    Decimal::new(5, 1)
+}
+
+/// Skip the already-pumped daily spike. AIN +34% / POWER +29% were not turtles.
+pub fn s3_max_change_percent() -> Decimal {
+    Decimal::from(20)
+}
+
 /// Majors Strategy 4 never enters (alts-only book).
 pub fn is_major_symbol(symbol: &str) -> bool {
     let s = symbol.trim().to_ascii_uppercase();
@@ -320,9 +330,8 @@ pub fn pick_trend_ticker(tickers: &[Ticker], exclude: &[String]) -> Option<Ticke
     pick_strategy3_book(tickers, exclude).into_iter().next()
 }
 
-/// Strategy 3 book: every tradable USDT-M name with tape, ranked by 24h quote
-/// volume. Includes BTC/ETH/SOL. Not the S1 three-major whitelist and not the
-/// 24h % tape. Skip-list and junk/1000x are out.
+/// Strategy 3 book: liquid USDT-M (majors included), ranked by 24h quote volume.
+/// Pennies and already-pumped 24h spikes stay out — TestNet volume is not quality.
 pub fn pick_strategy3_book(tickers: &[Ticker], exclude: &[String]) -> Vec<Ticker> {
     let skip = exclude_set(exclude);
     let mut rows: Vec<Ticker> = tickers
@@ -332,6 +341,12 @@ pub fn pick_strategy3_book(tickers: &[Ticker], exclude: &[String]) -> Vec<Ticker
                 return false;
             }
             if !is_tradable_symbol(&t.symbol) {
+                return false;
+            }
+            if t.last_price < s3_min_price() {
+                return false;
+            }
+            if t.price_change_percent > s3_max_change_percent() {
                 return false;
             }
             t.last_price > Decimal::ZERO && t.quote_volume > Decimal::ZERO

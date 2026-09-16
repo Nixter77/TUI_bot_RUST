@@ -1232,6 +1232,53 @@ fn s3_skips_when_live_price_ran_away_from_close() {
 }
 
 #[test]
+fn s3_blocks_new_entry_when_btc_is_bear() {
+    let live = range_then_breakout();
+    let mark = live.last().unwrap().close;
+    let mut snap = s3_alt_breakout_snap(mark);
+    let mut btc_px = d("50000");
+    let mut htf = Vec::new();
+    for i in 0..40 {
+        let nxt = btc_px - d("120");
+        htf.push(Bar {
+            open_time: 1_700_000_000_000 + i * 4 * 3_600_000,
+            open: btc_px,
+            high: btc_px + d("50"),
+            low: nxt - d("50"),
+            close: nxt,
+            volume: d("100"),
+        });
+        btc_px = nxt;
+    }
+    let btc_last = htf.last().unwrap().close;
+    for t in &mut snap.tickers {
+        if t.symbol == "BTCUSDT" {
+            t.last_price = btc_last;
+        }
+    }
+    snap.htf_bars.insert("BTCUSDT".into(), htf);
+    let empty = HashMap::new();
+    let (decision, _) = decide(
+        3,
+        &snap,
+        1.0,
+        0.0,
+        None,
+        None,
+        Some(&trend_loose()),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    assert!(
+        is_hold(&decision) && decision.reason().contains("BTC regime bear"),
+        "{}",
+        decision.reason()
+    );
+}
+
+#[test]
 fn s3_manages_tradable_alts_junk_is_tail() {
     let none = HashSet::new();
     assert!(strategy_manages_long(3, "AVAXUSDT", &none));

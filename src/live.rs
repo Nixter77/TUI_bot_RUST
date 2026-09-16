@@ -1860,12 +1860,32 @@ fn flatten_missing_protectives(
         Err(e) => format!("; close: {e}"),
     };
     cancel_leftover_sells(client, &live.symbol);
-    journal::record_flatten(
-        state.strategy_id,
-        &[live.symbol.clone()],
-        cfg.live,
-        "нет protectives — flatten",
-    );
+    let exit_px = if live.qty > Decimal::ZERO {
+        live.entry_price + live.unrealized_pnl / live.qty
+    } else {
+        live.entry_price
+    };
+    if live.qty > Decimal::ZERO && live.entry_price > Decimal::ZERO && exit_px > Decimal::ZERO {
+        journal::record_close(
+            state.strategy_id,
+            &live.symbol,
+            live.qty,
+            live.entry_price,
+            exit_px,
+            "нет protectives — flatten",
+            cfg.live,
+            live.stop_loss,
+            live.take_profit,
+            false,
+        );
+    } else {
+        journal::record_flatten(
+            state.strategy_id,
+            &[live.symbol.clone()],
+            cfg.live,
+            "нет protectives — flatten",
+        );
+    }
     push_recent(
         state,
         format!("нет protectives — flatten {}{close_note}", live.symbol),
@@ -1874,6 +1894,7 @@ fn flatten_missing_protectives(
         "rearm budget exhausted ({} fails / {}s): {detail}{close_note}",
         REARM_FAIL_MAX, REARM_FAIL_BUDGET_SEC as i64
     ));
+    arm_entry_pause(state, unix_now());
     drop_symbol(state, &live.symbol);
 }
 
