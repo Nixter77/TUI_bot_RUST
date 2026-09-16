@@ -163,7 +163,9 @@ fn strategy3_book_is_liquid_usdt_not_three_majors() {
     ];
     let book = pick_strategy3_book(&tickers, &["XAUUSDT".into()]);
     let syms: Vec<_> = book.iter().map(|t| t.symbol.as_str()).collect();
-    assert_eq!(syms, vec!["AVAXUSDT", "LINKUSDT", "BTCUSDT"]);
+    // Majors first (BTC), then volume (AVAX 50M > LINK 5M). TestNet volume
+    // must not bury BTC behind alts.
+    assert_eq!(syms, vec!["BTCUSDT", "AVAXUSDT", "LINKUSDT"]);
     assert!(!syms
         .iter()
         .any(|s| s.contains("PEPE") || s.contains("FART")));
@@ -200,7 +202,7 @@ fn strategy3_book_skips_penny_pumps() {
     ];
     let book = pick_strategy3_book(&tickers, &[]);
     let syms: Vec<_> = book.iter().map(|t| t.symbol.as_str()).collect();
-    assert_eq!(syms, vec!["AVAXUSDT", "BTCUSDT"]);
+    assert_eq!(syms, vec!["BTCUSDT", "AVAXUSDT"]);
     assert!(!syms.contains(&"AINUSDT"));
     assert!(!syms.contains(&"POWERUSDT"));
 }

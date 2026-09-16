@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 pub const LIQUID_MAJORS: [&str; 3] = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 
-/// Strategy 3 Donchian desk: tradable USDT-M by 24h quote volume (majors included).
+/// Strategy 3 Donchian desk: majors first, then tradable USDT-M by 24h volume.
 /// Cap bounds 1d kline weight; junk / 1000x stay out via `is_tradable_symbol`.
 pub const S3_BOOK_CAP: usize = 80;
 
@@ -330,36 +330,55 @@ pub fn pick_trend_ticker(tickers: &[Ticker], exclude: &[String]) -> Option<Ticke
     pick_strategy3_book(tickers, exclude).into_iter().next()
 }
 
-/// Strategy 3 book: liquid USDT-M (majors included), ranked by 24h quote volume.
-/// Pennies and already-pumped 24h spikes stay out — TestNet volume is not quality.
+/// Strategy 3 book: liquid USDT-M.
+/// Majors (BTC/ETH/SOL) always lead — TestNet quote volume is fake and would
+/// otherwise drop them behind penny pumps. Remaining names by volume. Cap 80.
+/// Pennies and already-pumped 24h spikes stay out.
 pub fn pick_strategy3_book(tickers: &[Ticker], exclude: &[String]) -> Vec<Ticker> {
     let skip = exclude_set(exclude);
-    let mut rows: Vec<Ticker> = tickers
-        .iter()
-        .filter(|t| {
-            if skip.contains(&t.symbol) {
-                return false;
-            }
-            if !is_tradable_symbol(&t.symbol) {
-                return false;
-            }
-            if t.last_price < s3_min_price() {
-                return false;
-            }
-            if t.price_change_percent > s3_max_change_percent() {
-                return false;
-            }
-            t.last_price > Decimal::ZERO && t.quote_volume > Decimal::ZERO
-        })
-        .cloned()
-        .collect();
-    rows.sort_by(|a, b| {
+    let mut majors: Vec<Ticker> = Vec::new();
+    let mut rest: Vec<Ticker> = Vec::new();
+    for t in tickers {
+        if skip.contains(&t.symbol) {
+            continue;
+        }
+        if !is_tradable_symbol(&t.symbol) {
+            continue;
+        }
+        if t.last_price < s3_min_price() {
+            continue;
+        }
+        if t.price_change_percent > s3_max_change_percent() {
+            continue;
+        }
+        if t.last_price <= Decimal::ZERO || t.quote_volume <= Decimal::ZERO {
+            continue;
+        }
+        if is_s1_symbol(&t.symbol) {
+            majors.push(t.clone());
+        } else {
+            rest.push(t.clone());
+        }
+    }
+    majors.sort_by(|a, b| {
+        let ia = LIQUID_MAJORS
+            .iter()
+            .position(|s| *s == a.symbol.as_str())
+            .unwrap_or(usize::MAX);
+        let ib = LIQUID_MAJORS
+            .iter()
+            .position(|s| *s == b.symbol.as_str())
+            .unwrap_or(usize::MAX);
+        ia.cmp(&ib).then(a.symbol.cmp(&b.symbol))
+    });
+    rest.sort_by(|a, b| {
         b.quote_volume
             .cmp(&a.quote_volume)
             .then(b.symbol.cmp(&a.symbol))
     });
-    rows.truncate(S3_BOOK_CAP);
-    rows
+    majors.extend(rest);
+    majors.truncate(S3_BOOK_CAP);
+    majors
 }
 
 pub fn pick_chart_ticker(

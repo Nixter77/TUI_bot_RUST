@@ -112,22 +112,29 @@ fn not_enough_bars() {
 }
 
 #[test]
-fn default_needs_ema100_and_channel_40() {
+fn default_is_donchian_40_ema50() {
     let p = tui_bot::trend::TrendParams::default();
     assert_eq!(p.channel, 40);
     assert_eq!(p.exit_channel, 20);
-    assert_eq!(p.ema_filter, 100);
+    assert_eq!(p.ema_filter, 50);
     assert_eq!(p.entry_grace_sec, tui_bot::trend::ENTRY_GRACE_SEC);
     assert_eq!(p.max_stop_pct, tui_bot::trend::max_stop_pct());
-    // 60 range bars is enough for Donchian 20, not for EMA100.
-    let decision = trend_decision(&range_then_breakout(), None, "ETHUSDT", None, None);
-    match decision {
-        Decision::Hold { reason } => assert!(
-            reason.contains("not enough bars") || reason.contains("EMA"),
-            "{reason}"
-        ),
-        other => panic!("default must not fire on a 61-bar 20-breakout: {other:?}"),
+    // 40 bars: not enough for EMA50 (51) or Donchian 40 (42).
+    let short = range_then_breakout()[..40].to_vec();
+    match trend_decision(&short, None, "ETHUSDT", None, None) {
+        Decision::Hold { reason } => assert!(reason.contains("not enough bars"), "{reason}"),
+        other => panic!("short history must hold: {other:?}"),
     }
+}
+
+#[test]
+fn breakout_extension_is_close_over_prior_high() {
+    let bars = range_then_breakout();
+    let ext = tui_bot::trend::breakout_extension(&bars, 20).expect("ext");
+    // last close 102.1, prior 20-high 100.5
+    let expect = (d("102.1") - d("100.5")) / d("100.5");
+    assert_eq!(ext, expect);
+    assert!(ext > Decimal::ZERO);
 }
 
 #[test]

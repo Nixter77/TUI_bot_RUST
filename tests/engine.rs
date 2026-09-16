@@ -1309,6 +1309,61 @@ fn s3_open_alt_is_managed_not_tail() {
 }
 
 #[test]
+fn s3_picks_least_extended_breakout_not_volume() {
+    // AVAX: 102.1 close, huge TestNet volume (old code took this).
+    // LINK: 100.8 close, tiny volume — just cleared Donchian 20 (100.5).
+    let dead = grind_down();
+    let pumped = range_then_breakout();
+    let mut mild = range_then_breakout();
+    {
+        let last = mild.last_mut().unwrap();
+        last.close = d("100.8");
+        last.high = d("100.9");
+        last.open = d("100.3");
+    }
+    let pumped_px = pumped.last().unwrap().close;
+    let mild_px = mild.last().unwrap().close;
+    let mut snap = MarketSnapshot::empty(d("10000"));
+    let mut tickers = majors();
+    tickers.push(Ticker::new("AVAXUSDT", pumped_px, d("5.0"), d("900000000")));
+    tickers.push(Ticker::new("LINKUSDT", mild_px, d("1.0"), d("1000")));
+    snap.tickers = tickers;
+    snap.bars = dead.clone();
+    snap.account = account();
+    snap.chart_symbol = "BTCUSDT".into();
+    snap.universe_bars = [
+        ("BTCUSDT".into(), dead.clone()),
+        ("ETHUSDT".into(), dead.clone()),
+        ("SOLUSDT".into(), dead),
+        ("AVAXUSDT".into(), pumped),
+        ("LINKUSDT".into(), mild),
+    ]
+    .into_iter()
+    .collect();
+    let empty = HashMap::new();
+    let (decision, _) = decide(
+        3,
+        &snap,
+        1.0,
+        0.0,
+        None,
+        None,
+        Some(&trend_loose()),
+        None,
+        &[],
+        &empty,
+    )
+    .unwrap();
+    match decision {
+        Decision::EnterLong { symbol, .. } => assert_eq!(
+            symbol, "LINKUSDT",
+            "must take the just-broken name, not the volume pump"
+        ),
+        other => panic!("expected LINK enter, got {other:?} {}", other.reason()),
+    }
+}
+
+#[test]
 fn s3_junk_open_is_tail() {
     let junk = Position::long(
         "1000PEPEUSDT",

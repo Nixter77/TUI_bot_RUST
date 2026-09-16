@@ -273,7 +273,7 @@ fn collect_s4_history(
 }
 
 fn s3_bars_fresh(bars: &[Bar], now: f64) -> bool {
-    // EMA100 + Donchian 40 need >101 closed 1d bars; forming bar is already dropped.
+    // EMA50 + Donchian 40 need >51 closed 1d bars; keep 110 so ATR is stable.
     if bars.len() < 110 {
         return false;
     }

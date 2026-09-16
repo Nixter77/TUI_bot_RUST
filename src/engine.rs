@@ -10,10 +10,12 @@ use crate::models::{
 };
 use crate::momentum::mark_for;
 use crate::profit::current_equity;
-use crate::ranking::{is_tradable_symbol, iter_liquid_majors, pick_strategy3_book};
+use crate::ranking::{is_s1_symbol, is_tradable_symbol, iter_liquid_majors, pick_strategy3_book};
 use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::HourWindow;
-use crate::trend::{live_left_daily_close, max_close_extension_pct, trend_decision, TrendParams};
+use crate::trend::{
+    breakout_extension, live_left_daily_close, max_close_extension_pct, trend_decision, TrendParams,
+};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -338,6 +340,13 @@ pub fn decide(
         }
     }
     let mut holds: Vec<(String, String)> = Vec::new();
+    // S3: several names can print a Donchian close on the same UTC day.
+    // Taking the first volume row is how TestNet picked AIN. Take the
+    // least-extended valid breakout instead (just cleared the channel).
+    let mut s3_best: Option<(Decimal, bool, String, Decision)> = None;
+    let s3_channel = trend
+        .map(|t| t.channel)
+        .unwrap_or_else(|| TrendParams::default().channel);
     for symbol in live {
         let bars = snapshot.bars_for(&symbol);
         if bars.is_empty() {
@@ -355,10 +364,35 @@ pub fn decide(
                     holds.push((symbol, why));
                     continue;
                 }
+                let ext = breakout_extension(bars, s3_channel).unwrap_or(Decimal::MAX);
+                let major = is_s1_symbol(&symbol);
+                let take = match &s3_best {
+                    None => true,
+                    Some((best_ext, best_major, best_sym, _)) => {
+                        if ext < *best_ext {
+                            true
+                        } else if ext > *best_ext {
+                            false
+                        } else if major && !*best_major {
+                            true
+                        } else if major == *best_major && symbol < *best_sym {
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if take {
+                    s3_best = Some((ext, major, symbol, decision));
+                }
+                continue;
             }
             return Ok((decision, last_scan_ts));
         }
         holds.push((symbol, decision.reason().to_string()));
+    }
+    if let Some((_, _, _, decision)) = s3_best {
+        return Ok((decision, last_scan_ts));
     }
     Ok((Decision::hold(combine_holds(&holds)), last_scan_ts))
 }
