@@ -811,6 +811,26 @@ pub fn tick_decisions(
             kept
         };
     }
+    // Research desk schedule: block EnterLong when this lens is not the hour owner.
+    // Manage/exit/trail always keep running (filtered only is_enter_long).
+    if crate::desk_schedule::desk_schedule_enabled()
+        && !crate::desk_schedule::may_enter_long_at(sid, now)
+    {
+        let kept: Vec<Decision> = decisions
+            .into_iter()
+            .filter(|d| !d.is_enter_long())
+            .collect();
+        let owner = crate::desk_schedule::desk_owner_at(now);
+        decisions = if kept.is_empty() {
+            vec![Decision::hold(format!(
+                "desk schedule: hour owner S{} — no new opens on S{}",
+                owner.as_i32(),
+                sid
+            ))]
+        } else {
+            kept
+        };
+    }
     if now < state.retry_until {
         let kept: Vec<Decision> = decisions
             .into_iter()
