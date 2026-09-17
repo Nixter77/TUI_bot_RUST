@@ -1,7 +1,13 @@
 # Desk schedule — how to launch
 
 **Code tip:** on `main` since merge `16f8540` (`feat/desk-schedule`).  
-**Flag:** `DESK_SCHEDULE=1` (default **off**). Gates **new EnterLong** only; manage/exit stay on opening `strategy_id`.  
+**Flag / env:** exactly `DESK_SCHEDULE` (not `DESK_SCHED`, not a strategy env). Set `export DESK_SCHEDULE=1` in the **same** shell as `cargo run` / the binary. Default **off**.
+
+Gates **new EnterLong** only; manage/exit stay on opening `strategy_id`.
+
+**Alive check:** when the lens is not the hour owner, decisions hold with:
+`desk schedule: hour owner S{N} — no new opens on S{M}`
+If you never see that string outside owner hours, the flag did not load (wrong env name / different shell / flag unset).  
 **edge?** no claim. Live multi-strat + desk heat / double-book gate = **not landed**.
 
 Owner clock (UTC, half-open):
