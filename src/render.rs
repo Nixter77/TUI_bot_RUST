@@ -745,11 +745,17 @@ pub fn render_frame(view: &ViewModel) -> String {
         footer.push(format!("  {part}"));
     }
     footer.extend([
-        format!(
-            "Текущая: {} — {}",
-            view.strategy_id,
-            strategy_title(view.strategy_id)
-        ),
+        {
+            let mut cur = format!(
+                "Текущая: {} — {}",
+                view.strategy_id,
+                strategy_title(view.strategy_id)
+            );
+            if crate::desk_orchestrator::desk_orchestrator_enabled() {
+                cur.push_str("  |  DESK_ORCHESTRATOR");
+            }
+            cur
+        },
         format!(
             "Каденс стратегии 1: {} с (1 или 2 минуты)",
             view.poll_seconds

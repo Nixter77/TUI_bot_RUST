@@ -131,6 +131,9 @@ pub fn build_view(
     if cfg.credentials.is_none() {
         note.push_str(" BINANCE_API_KEY/SECRET не заданы.");
     }
+    if crate::desk_orchestrator::desk_orchestrator_enabled() {
+        note.push_str(" DESK_ORCHESTRATOR=1 (paper-first; live multi BLOCK).");
+    }
     let (ui_error, logged_error, error_source) = footer_errors(snapshot, state);
     let shown = view_positions_with(snapshot, &state.positions);
     let tail = unmanaged_positions(&shown, &state.positions);
@@ -160,10 +163,18 @@ pub fn build_view(
         poll_seconds: cfg.poll_seconds,
         last_decision: {
             let reg = crate::regime::classify_snapshot(snapshot).as_str();
-            if last_decision.is_empty() || last_decision == "—" {
+            let base = if last_decision.is_empty() || last_decision == "—" {
                 format!("BTC {reg}")
             } else {
                 format!("{last_decision}  |  BTC {reg}")
+            };
+            if crate::desk_orchestrator::desk_orchestrator_enabled()
+                && !base.contains("desk orch:")
+            {
+                let owner = crate::desk_schedule::desk_owner_at(crate::sessions::unix_now());
+                format!("desk orch: owner S{}  |  {base}", owner.as_i32())
+            } else {
+                base
             }
         },
         mode_note: note,

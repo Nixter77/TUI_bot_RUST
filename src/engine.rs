@@ -475,7 +475,7 @@ fn expire_entries_paused(paused: bool, cooldown_until: f64, now: f64) -> bool {
     }
 }
 
-fn continuation_params(strategy_id: i32, momentum: Option<&MomentumParams>) -> ContinuationParams {
+pub(crate) fn continuation_params_for(strategy_id: i32, momentum: Option<&MomentumParams>) -> ContinuationParams {
     let s4 = momentum.map(|m| m.s4_interval).unwrap_or_default();
     let mut p = continuation_trade_params(strategy_id, s4);
     if let Some(m) = momentum {
@@ -594,11 +594,63 @@ pub fn tick_decisions(
     };
 
     // Isolation: S1/S2 majors-only; S3 tradable USDT-M; S4/S5 tagged-only. Foreign longs → tails.
-    merged_list
-        .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
+    // Desk orchestrator: keep all desk-owned longs (manage by opening sid).
+    if crate::desk_orchestrator::desk_orchestrator_enabled() {
+        merged_list.retain(|p| crate::desk_orchestrator::manages_long(&p.symbol));
+    } else {
+        merged_list
+            .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
+    }
 
     let merged = merged_list.first().cloned();
     crate::openmeta::update_from_positions(&merged_list, snapshot, now);
+
+    // Desk orchestrator owns the rest of the tick (owner entries + manage-by-opening-sid).
+    if crate::desk_orchestrator::desk_orchestrator_enabled() {
+        let pause_sec = base_cooldown(state.strategy_id, momentum, scalp, trend);
+        let loss_windows: Vec<crate::sessions::HourWindow> =
+            crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec();
+        let limit = momentum
+            .map(|m| m.daily_loss_usdt)
+            .unwrap_or_else(default_daily_loss_usdt);
+        let limit_r = momentum
+            .map(|m| m.daily_loss_r)
+            .unwrap_or_else(default_daily_loss_r);
+        let risk_pct = momentum
+            .map(|m| m.risk_pct)
+            .unwrap_or_else(default_risk_pct);
+        if snapshot.account_ok {
+            apply_day_risk(
+                &mut state,
+                now,
+                current_equity(
+                    snapshot.account.wallet_balance,
+                    snapshot.account.unrealized_pnl,
+                ),
+                limit,
+                limit_r,
+                risk_pct,
+            );
+        }
+        let entries_paused =
+            expire_entries_paused(state.entries_paused, state.cooldown_until, now);
+        return crate::desk_orchestrator::tick_orchestrated(
+            &state,
+            snapshot,
+            now,
+            momentum,
+            scalp,
+            trend,
+            merged_list,
+            inflight,
+            state.cooldowns.clone(),
+            state.cooldown_until,
+            entries_paused,
+            pause_sec,
+            &loss_windows,
+        );
+    }
+
     let mut work = snapshot.clone();
     work.position = merged.clone();
     let prev_syms: HashSet<String> = remembered
@@ -753,7 +805,7 @@ pub fn tick_decisions(
             .filter(|s| s.as_str() != "*")
             .cloned()
             .collect();
-        let cont = continuation_params(sid, momentum);
+        let cont = continuation_params_for(sid, momentum);
         let (d, ts, leaders) = continuation_decisions(
             snapshot,
             &merged_list,
