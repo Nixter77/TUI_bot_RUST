@@ -4,6 +4,7 @@
 //! their opening `strategy_id`. No live multi-strat claim; edge unproven.
 
 use crate::sessions::{hour_in_windows, utc_datetime, HourWindow, DEFAULT_ENTRY_WINDOWS};
+use chrono::Timelike;
 use std::env;
 
 /// S4 open windows (same default as `STRATEGY4_ENTRY_HOURS` / `DEFAULT_ENTRY_HOURS`).
@@ -145,17 +146,17 @@ mod tests {
         }
     }
 
+    // Env flag tests must not race under --test-threads > 1.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
-    fn may_enter_respects_flag_off_by_default() {
-        // Unset in unit tests → allow any sid
+    fn may_enter_flag_off_and_on() {
+        let _g = ENV_LOCK.lock().unwrap();
         env::remove_var("DESK_SCHEDULE");
         assert!(may_enter_long(1, 3));
         assert!(may_enter_long(2, 0));
         assert!(may_enter_long(4, 22));
-    }
 
-    #[test]
-    fn may_enter_with_flag_only_owner() {
         env::set_var("DESK_SCHEDULE", "1");
         assert!(may_enter_long(4, 0));
         assert!(!may_enter_long(2, 0));
