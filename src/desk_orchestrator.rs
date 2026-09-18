@@ -13,8 +13,7 @@
 use crate::continuation::continuation_decisions;
 use crate::desk_schedule::{desk_owner_at, DeskSid};
 use crate::engine::{continuation_params_for, MomentumParams};
-use crate::models::{self, Decision, EngineState, MarketSnapshot, Position, Side};
-use crate::momentum::mark_for;
+use crate::models::{Decision, EngineState, MarketSnapshot, Position, Side};
 use crate::openmeta;
 use crate::scalp::{scalp_decision, ScalpParams};
 use crate::sessions::utc_datetime;
@@ -23,16 +22,16 @@ use chrono::Timelike;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fmt;
+
+#[cfg(test)]
 use std::sync::Mutex;
 
-/// Env flag tests must not race under `--test-threads > 1`.
-pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn desk_orchestrator_enabled() -> bool {
-    matches!(
-        env::var("DESK_ORCHESTRATOR").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    crate::config::env_flag_on("DESK_ORCHESTRATOR")
 }
 
 fn parse_usize_env(name: &str, default: usize) -> usize {
@@ -83,17 +82,17 @@ pub enum SkipReason {
     HeatSid { sid: i32, open: usize, max: usize },
 }
 
-impl SkipReason {
-    pub fn as_str(&self) -> String {
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SkipReason::DoubleBook(sym) => {
-                format!("desk orch: double-book {sym} — fail-closed")
+                write!(f, "desk orch: double-book {sym} — fail-closed")
             }
             SkipReason::HeatDesk { open, max } => {
-                format!("desk orch: heat {open}/{max} — no new opens")
+                write!(f, "desk orch: heat {open}/{max} — no new opens")
             }
             SkipReason::HeatSid { sid, open, max } => {
-                format!("desk orch: S{sid} heat {open}/{max} — no new opens")
+                write!(f, "desk orch: S{sid} heat {open}/{max} — no new opens")
             }
         }
     }
@@ -102,10 +101,7 @@ impl SkipReason {
 /// Fail-closed: symbol already open in this desk book.
 pub fn check_double_book(symbol: &str, open_symbols: &[String]) -> Result<(), SkipReason> {
     let want = symbol.to_ascii_uppercase();
-    if open_symbols
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(&want))
-    {
+    if open_symbols.iter().any(|s| s.eq_ignore_ascii_case(&want)) {
         return Err(SkipReason::DoubleBook(want));
     }
     Ok(())
@@ -138,13 +134,13 @@ pub fn status_line(now: f64, skip: Option<&str>) -> String {
     let hour = utc_datetime(now).hour();
     match skip {
         Some(why) if !why.is_empty() => {
-            format!("desk orch: owner S{} @{:02}h UTC — {why}", owner.as_i32(), hour)
+            format!(
+                "desk orch: owner S{} @{:02}h UTC — {why}",
+                owner.as_i32(),
+                hour
+            )
         }
-        _ => format!(
-            "desk orch: owner S{} @{:02}h UTC",
-            owner.as_i32(),
-            hour
-        ),
+        _ => format!("desk orch: owner S{} @{:02}h UTC", owner.as_i32(), hour),
     }
 }
 
@@ -214,7 +210,7 @@ fn manage_by_opening_sid(
             snapshot,
             &held,
             now,
-            0.0, // manage path ignores scan cadence when allow_enter=false + non-empty
+            0.0,
             &[],
             &HashMap::new(),
             Some(&cont),
@@ -277,15 +273,14 @@ fn filter_enter(
     for d in decisions {
         if let Decision::EnterLong { symbol, .. } = &d {
             if let Err(e) = check_double_book(symbol, open_syms) {
-                skip = Some(e.as_str());
+                skip = Some(e.to_string());
                 continue;
             }
             if let Err(e) = check_heat(entry_sid, open_sids) {
-                skip = Some(e.as_str());
+                skip = Some(e.to_string());
                 continue;
             }
             out.push(d);
-            // One new enter per tick (desk heat updates conceptually).
             break;
         } else if !d.is_hold() {
             out.push(d);
@@ -342,7 +337,6 @@ fn entry_for_owner(
             (enters, ts, leaders)
         }
         DeskSid::Scalp | DeskSid::Trend => {
-            // Flat entry scan via engine::decide (manage already done).
             let mut work = snapshot.clone();
             work.position = None;
             work.open_positions = owner_positions.to_vec();
@@ -358,328 +352,134 @@ fn entry_for_owner(
                 exclude,
                 cooldowns,
             ) {
-                Ok((d, ts)) if d.is_enter_long() => (vec![d], ts, recent_leaders.to_vec()),
-                Ok((d, ts)) => {
-                    // Surface hold reason for TUI visibility.
-                    (vec![d], ts, recent_leaders.to_vec())
-                }
-                Err(e) => (vec![Decision::hold(e)], last_scan_ts, recent_leaders.to_vec()),
+                Ok((d, ts)) => (vec![d], ts, recent_leaders.to_vec()),
+                Err(e) => (
+                    vec![Decision::hold(e)],
+                    last_scan_ts,
+                    recent_leaders.to_vec(),
+                ),
             }
         }
     }
 }
 
-/// Orchestrated tick body (called from `tick_decisions` when flag on).
-///
-/// - `state.strategy_id` becomes active owner (entries + journal tagging).
-/// - Manage/exit/trail use opening sid from open_meta.
-/// - Heat + double-book fail-closed on EnterLong.
-pub fn tick_orchestrated(
+/// Owner entries + manage-by-opening-sid. Engine owns book merge, closes,
+/// day-risk, tails, halt/retry, and state rebuild.
+pub fn collect_decisions(
     state: &EngineState,
     snapshot: &MarketSnapshot,
     now: f64,
     momentum: Option<&MomentumParams>,
     scalp: Option<&ScalpParams>,
     trend: Option<&TrendParams>,
-    merged_list: Vec<Position>,
-    mut inflight: Vec<String>,
-    mut cooldowns: HashMap<String, f64>,
-    mut cooldown_until: f64,
-    entries_paused: bool,
-    pause_sec: f64,
-    loss_windows: &[crate::sessions::HourWindow],
-) -> (EngineState, Vec<Decision>) {
+    merged_list: &[Position],
+    inflight: &[String],
+    cooldowns: &HashMap<String, f64>,
+    cooldown_until: f64,
+) -> (Vec<Decision>, f64, Vec<String>) {
     let owner = desk_owner_at(now);
     let owner_sid = owner.as_i32();
-    let mut state = state.clone();
-    // Soft switch: do not clear cooldowns / scaled latches (hour rotate must keep manage).
-    state.strategy_id = owner_sid;
-
-    let remembered = models::remembered_positions(state.position.as_ref(), &state.positions);
-    let prev_syms: HashSet<String> = remembered
-        .iter()
-        .map(|p| p.symbol.to_ascii_uppercase())
-        .collect();
-    let now_syms: HashSet<String> = merged_list
-        .iter()
-        .map(|p| p.symbol.to_ascii_uppercase())
-        .collect();
-
-    for symbol in prev_syms.difference(&now_syms) {
-        inflight.retain(|s| !s.eq_ignore_ascii_case(symbol));
-        let up = symbol.to_ascii_uppercase();
-        state.scaled_one_r.remove(&up);
-        state.hour1_trail_bar.remove(&up);
-        state.s4_inherited.remove(&up);
-        state.rearm_miss_since.remove(&up);
-        state.rearm_fail_count.remove(&up);
-        let remembered_pos = remembered
-            .iter()
-            .find(|p| p.symbol.eq_ignore_ascii_case(symbol));
-        let mark = mark_for(symbol, &snapshot.tickers, None).unwrap_or(Decimal::ZERO);
-        let won = remembered_pos
-            .map(|p| crate::journal::long_close_was_win(p.entry_price, mark, p.take_profit))
-            .unwrap_or(false);
-        let close_sid = opening_sid_or(symbol, owner_sid);
-        let sid_pause = match close_sid {
-            2 => scalp.map(|s| s.cooldown_sec).unwrap_or(1200.0),
-            3 => trend.map(|t| t.cooldown_sec).unwrap_or(3600.0),
-            _ => pause_sec,
-        };
-        if sid_pause > 0.0 {
-            let until =
-                crate::journal::symbol_cooldown_until_for(close_sid, now, won, sid_pause);
-            let key = symbol.to_ascii_uppercase();
-            let cur = cooldowns.get(&key).copied().unwrap_or(0.0);
-            cooldowns.insert(key, cur.max(until));
-            if !won {
-                let until = crate::sessions::pause_until_after_loss(now, loss_windows, sid_pause);
-                cooldown_until = cooldown_until.max(until);
-            }
-        }
-    }
-
-    for pos in &merged_list {
-        if pos.side != Side::Long || pos.qty <= Decimal::ZERO {
-            continue;
-        }
-        let key = pos.symbol.to_ascii_uppercase();
-        let sid = opening_sid_or(&pos.symbol, owner_sid);
-        if let Some(sl) = pos.stop_loss {
-            if sl >= pos.entry_price {
-                state.scaled_one_r.insert(key.clone());
-                continue;
-            }
-        }
-        if openmeta::meta_scaled_for_entry(&key, pos.entry_price, sid) {
-            state.scaled_one_r.insert(key);
-        }
-    }
-
-    let now_flat = merged_list.is_empty();
-    let open_syms = open_symbol_list(&merged_list);
-    let open_sids = open_sid_list(&merged_list, owner_sid);
+    let open_syms = open_symbol_list(merged_list);
+    let open_sids = open_sid_list(merged_list, owner_sid);
 
     let mut skip_reason: Option<String> = None;
-    let mut decisions: Vec<Decision> = Vec::new();
+    let mut decisions = manage_by_opening_sid(
+        snapshot,
+        merged_list,
+        now,
+        owner_sid,
+        momentum,
+        scalp,
+        trend,
+        &state.scaled_one_r,
+        &state.hour1_trail_bar,
+        &state.s4_inherited,
+    );
+
+    if let Err(e) = check_heat(owner_sid, &open_sids) {
+        skip_reason = Some(e.to_string());
+    }
+
     let mut scan_ts = state.last_scan_ts;
     let mut next_leaders = state.recent_leaders.clone();
-
-    if entries_paused {
-        decisions = vec![Decision::hold(status_line(
-            now,
-            Some("вход на паузе после закрытия всех"),
-        ))];
-    } else if inflight == ["*".to_string()] && now_flat {
-        decisions = vec![Decision::hold(status_line(now, Some("entry in flight")))];
-    } else {
-        // (1) Manage by opening sid — never flatten foreign sids on hour switch.
-        let managed = manage_by_opening_sid(
+    if !state.daily_halt && skip_reason.is_none() {
+        let owner_positions: Vec<Position> = merged_list
+            .iter()
+            .filter(|p| opening_sid_or(&p.symbol, owner_sid) == owner_sid)
+            .cloned()
+            .collect();
+        let inflight_f: Vec<String> = inflight
+            .iter()
+            .filter(|s| s.as_str() != "*")
+            .cloned()
+            .collect();
+        let (entry_decs, ts, leaders) = entry_for_owner(
+            owner,
             snapshot,
-            &merged_list,
+            &owner_positions,
             now,
-            owner_sid,
+            state.last_scan_ts,
+            &inflight_f,
+            cooldowns,
             momentum,
             scalp,
             trend,
+            &state.skip_symbols,
+            true,
+            cooldown_until,
             &state.scaled_one_r,
             &state.hour1_trail_bar,
             &state.s4_inherited,
+            &state.recent_leaders,
         );
-        decisions.extend(managed);
-
-        // (2) Entry for active owner only (after heat / double-book).
-        let allow_enter = !state.daily_halt;
-        let heat_block = check_heat(owner_sid, &open_sids).err().map(|e| e.as_str());
-        if let Some(ref why) = heat_block {
-            skip_reason = Some(why.clone());
+        scan_ts = ts;
+        next_leaders = leaders;
+        let (kept, skip) = filter_enter(entry_decs, owner_sid, &open_syms, &open_sids);
+        if skip.is_some() {
+            skip_reason = skip;
         }
-
-        if allow_enter && heat_block.is_none() {
-            let owner_positions: Vec<Position> = merged_list
-                .iter()
-                .filter(|p| opening_sid_or(&p.symbol, owner_sid) == owner_sid)
-                .cloned()
-                .collect();
-            let inflight_f: Vec<String> = inflight
-                .iter()
-                .filter(|s| s.as_str() != "*")
-                .cloned()
-                .collect();
-            let (entry_decs, ts, leaders) = entry_for_owner(
-                owner,
-                snapshot,
-                &owner_positions,
-                now,
-                state.last_scan_ts,
-                &inflight_f,
-                &cooldowns,
-                momentum,
-                scalp,
-                trend,
-                &state.skip_symbols,
-                true,
-                cooldown_until,
-                &state.scaled_one_r,
-                &state.hour1_trail_bar,
-                &state.s4_inherited,
-                &state.recent_leaders,
-            );
-            scan_ts = ts;
-            next_leaders = leaders;
-            let (kept, skip) = filter_enter(entry_decs, owner_sid, &open_syms, &open_sids);
-            if skip.is_some() {
-                skip_reason = skip;
-            }
-            for d in kept {
-                if d.is_enter_long() {
-                    decisions.push(d);
-                } else if decisions.is_empty() && d.is_hold() {
-                    // Visible owner + strategy hold reason when flat.
-                    decisions.push(Decision::hold(status_line(now, Some(d.reason()))));
-                }
-            }
-        }
-
-        if decisions.is_empty() {
-            decisions.push(Decision::hold(status_line(
-                now,
-                skip_reason.as_deref(),
-            )));
-        } else if let Some(ref why) = skip_reason {
-            // Annotate a pure-hold tip so TUI shows skip even when manage ran.
-            if decisions.iter().all(|d| d.is_hold()) {
-                decisions = vec![Decision::hold(status_line(now, Some(why)))];
+        for d in kept {
+            if d.is_enter_long() {
+                decisions.push(d);
+            } else if decisions.is_empty() && d.is_hold() {
+                decisions.push(Decision::hold(status_line(now, Some(d.reason()))));
             }
         }
     }
 
-    if state.daily_halt {
-        let kept: Vec<Decision> = decisions
-            .into_iter()
-            .filter(|d| !d.is_enter_long())
-            .collect();
-        decisions = if kept.is_empty() {
-            vec![Decision::hold(status_line(
-                now,
-                Some("стоп дня. Новых входов нет до 00:00 UTC."),
-            ))]
-        } else {
-            kept
-        };
-    }
-
-    if now < state.retry_until {
-        let kept: Vec<Decision> = decisions
-            .into_iter()
-            .filter(|d| !d.is_enter_long())
-            .collect();
-        decisions = if kept.iter().any(|d| !d.is_hold()) {
-            kept
-        } else {
-            vec![Decision::hold(status_line(
-                now,
-                Some("сеть: повтор входа после сбоя"),
-            ))]
-        };
-    }
-
-    for decision in &decisions {
-        if let Decision::EnterLong { symbol, .. } = decision {
-            if !inflight.iter().any(|s| s.eq_ignore_ascii_case(symbol)) {
-                inflight.push(symbol.clone());
-            }
-        }
-        if let Decision::ReduceLong { symbol, .. } = decision {
-            let key = symbol.to_ascii_uppercase();
-            state.scaled_one_r.insert(key.clone());
-            openmeta::mark_scaled(&key);
-        }
-        if let Decision::AmendStop { symbol, reason, .. } = decision {
-            if owner_sid == 5 && reason.contains("trail по минимуму") {
-                if let Some(bar) = models::last_closed_bar(snapshot.bars_for(symbol)) {
-                    state
-                        .hour1_trail_bar
-                        .insert(symbol.to_ascii_uppercase(), bar.open_time);
-                }
-            }
+    if decisions.is_empty() {
+        decisions.push(Decision::hold(status_line(now, skip_reason.as_deref())));
+    } else if let Some(ref why) = skip_reason {
+        if decisions.iter().all(|d| d.is_hold()) {
+            decisions = vec![Decision::hold(status_line(now, Some(why)))];
         }
     }
-
-    let mut actions = state.recent_actions.clone();
-    for decision in &decisions {
-        if !decision.is_hold() {
-            models::push_recent(&mut actions, now, decision.describe());
-        }
-    }
-    let book: Vec<Position> = merged_list
-        .into_iter()
-        .filter(|p| p.qty > Decimal::ZERO)
-        .collect();
-    let mut last_error = if let Some(s) = state.last_error.as_deref() {
-        if crate::errors::is_retry_error(Some(s)) && now >= state.retry_until {
-            None
-        } else {
-            Some(s.to_string())
-        }
-    } else {
-        None
-    };
-    if last_error.is_none() {
-        last_error = crate::journal::take_last_error();
-    }
-    if last_error.is_none() {
-        last_error = crate::telegram::take_last_error();
-    }
-
-    let new_state = EngineState {
-        last_scan_ts: scan_ts,
-        positions: book.clone(),
-        position: book.first().cloned(),
-        last_error,
-        recent_actions: actions,
-        entry_inflight: !inflight.is_empty() && now_flat,
-        cooldown_until,
-        inflight_symbols: inflight.into_iter().filter(|s| s != "*").collect(),
-        cooldowns,
-        strategy_id: owner_sid,
-        entries_paused,
-        skip_symbols: state.skip_symbols,
-        skip_reasons: state.skip_reasons,
-        day_utc: state.day_utc,
-        day_start_equity: state.day_start_equity,
-        daily_halt: state.daily_halt,
-        recent_leaders: next_leaders,
-        sized_stops: state.sized_stops,
-        retry_until: state.retry_until,
-        retry_strikes: state.retry_strikes,
-        rearm_miss_since: state.rearm_miss_since,
-        rearm_fail_count: state.rearm_fail_count,
-        scaled_one_r: state.scaled_one_r,
-        hour1_trail_bar: state.hour1_trail_bar,
-        s4_inherited: state.s4_inherited,
-    };
-    (new_state, decisions)
+    (decisions, scan_ts, next_leaders)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::desk_schedule::{desk_owner, DeskSid};
+    use rust_decimal::Decimal;
+    use std::env;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn owner_reuses_desk_schedule_clock() {
         assert_eq!(desk_owner(0), DeskSid::Continuation);
         assert_eq!(desk_owner(3), DeskSid::Scalp);
         assert_eq!(desk_owner(22), DeskSid::Trend);
-        // orchestrator must not invent a second table
         assert_eq!(desk_owner(14).as_i32(), 4);
         assert_eq!(desk_owner(11).as_i32(), 2);
     }
 
     #[test]
     fn flag_off_by_default() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::remove_var("DESK_ORCHESTRATOR");
         assert!(!desk_orchestrator_enabled());
         env::set_var("DESK_ORCHESTRATOR", "1");
@@ -699,7 +499,7 @@ mod tests {
 
     #[test]
     fn heat_desk_and_per_sid() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::remove_var("DESK_HEAT_MAX");
         env::remove_var("DESK_HEAT_MAX_PER_SID");
         // defaults 3 / 2
@@ -732,19 +532,20 @@ mod tests {
 
     #[test]
     fn orchestrator_owner_switch_changes_strategy_id() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::set_var("DESK_ORCHESTRATOR", "1");
-        env::remove_var("DESK_SCHEDULE");
 
         let state = EngineState::new(4); // start as S4
         let snap = MarketSnapshot::empty(Decimal::from(10000));
         // 03:00 UTC → S2 owner
         let now = 1_704_078_000.0_f64;
-        let (new_state, decisions) = crate::engine::tick_decisions(
-            &state, &snap, now, None, None, None, None,
-        );
+        let (new_state, decisions) =
+            crate::engine::tick_decisions(&state, &snap, now, None, None, None, None);
         assert_eq!(new_state.strategy_id, 2, "owner switch to S2");
-        let reason = decisions.first().map(|d| d.reason().to_string()).unwrap_or_default();
+        let reason = decisions
+            .first()
+            .map(|d| d.reason().to_string())
+            .unwrap_or_default();
         assert!(
             reason.contains("desk orch: owner S2") || reason.contains("owner S2"),
             "visible owner in hold: {reason}"
@@ -752,29 +553,35 @@ mod tests {
 
         // 00:30 UTC → S4
         let now_s4 = 1_704_067_800.0_f64; // 2024-01-01 00:30 UTC approx
-        let (st2, d2) = crate::engine::tick_decisions(
-            &new_state, &snap, now_s4, None, None, None, None,
-        );
+        let (st2, d2) =
+            crate::engine::tick_decisions(&new_state, &snap, now_s4, None, None, None, None);
         assert_eq!(st2.strategy_id, 4, "owner switch to S4");
-        let r2 = d2.first().map(|d| d.reason().to_string()).unwrap_or_default();
-        assert!(r2.contains("owner S4") || r2.contains("S4"), "visible S4: {r2}");
+        let r2 = d2
+            .first()
+            .map(|d| d.reason().to_string())
+            .unwrap_or_default();
+        assert!(
+            r2.contains("owner S4") || r2.contains("S4"),
+            "visible S4: {r2}"
+        );
 
         env::remove_var("DESK_ORCHESTRATOR");
     }
 
     #[test]
     fn flag_off_leaves_strategy_id_unchanged() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::remove_var("DESK_ORCHESTRATOR");
-        env::remove_var("DESK_SCHEDULE");
         let state = EngineState::new(4);
         let snap = MarketSnapshot::empty(Decimal::from(10000));
         let now = 1_704_078_000.0_f64; // would be S2 if orch on
-        let (new_state, decisions) = crate::engine::tick_decisions(
-            &state, &snap, now, None, None, None, None,
-        );
+        let (new_state, decisions) =
+            crate::engine::tick_decisions(&state, &snap, now, None, None, None, None);
         assert_eq!(new_state.strategy_id, 4);
-        let reason = decisions.first().map(|d| d.reason().to_string()).unwrap_or_default();
+        let reason = decisions
+            .first()
+            .map(|d| d.reason().to_string())
+            .unwrap_or_default();
         assert!(
             !reason.contains("desk orch:"),
             "flag off must not emit orch status: {reason}"
@@ -783,7 +590,8 @@ mod tests {
 
     #[test]
     fn manage_stays_on_opening_sid_across_owner_hour() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
+        let _meta = crate::openmeta::lock_store_for_tests();
         env::set_var("DESK_ORCHESTRATOR", "1");
         let dir = tempfile::tempdir().unwrap();
         openmeta::set_active_path(Some(dir.path().join("open_meta.json")));
@@ -812,9 +620,8 @@ mod tests {
         snap.open_positions = vec![pos];
         // S2 hour — must NOT flatten / drop S4-tagged ETH from book
         let now = 1_704_078_000.0_f64;
-        let (new_state, decisions) = crate::engine::tick_decisions(
-            &state, &snap, now, None, None, None, None,
-        );
+        let (new_state, decisions) =
+            crate::engine::tick_decisions(&state, &snap, now, None, None, None, None);
         assert_eq!(new_state.strategy_id, 2);
         assert!(
             new_state
@@ -845,5 +652,40 @@ mod tests {
         let (kept, skip) = filter_enter(decs, 4, &open, &[2]);
         assert!(kept.is_empty());
         assert!(skip.unwrap().contains("double-book"));
+    }
+
+    #[test]
+    fn live_short_tail_blocks_orch_enter() {
+        let _g = env_lock();
+        env::set_var("DESK_ORCHESTRATOR", "1");
+        let mut snap = MarketSnapshot::empty(Decimal::from(10000));
+        snap.live_book = true;
+        snap.open_positions = vec![Position {
+            symbol: "BTCUSDT".into(),
+            side: Side::Short,
+            qty: Decimal::ONE,
+            entry_price: Decimal::from(50000),
+            stop_loss: None,
+            take_profit: None,
+            unrealized_pnl: Decimal::ZERO,
+            opened_bar_time: None,
+            leverage: 0,
+        }];
+        let now = 1_704_078_000.0_f64;
+        let (_state, decisions) =
+            crate::engine::tick_decisions(&EngineState::new(4), &snap, now, None, None, None, None);
+        let reason = decisions
+            .first()
+            .map(|d| d.reason().to_string())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("хвост"),
+            "live short must block orch entry: {reason}"
+        );
+        assert!(
+            !decisions.iter().any(|d| d.is_enter_long()),
+            "must not enter over a live tail: {decisions:?}"
+        );
+        env::remove_var("DESK_ORCHESTRATOR");
     }
 }

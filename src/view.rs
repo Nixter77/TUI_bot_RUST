@@ -131,7 +131,8 @@ pub fn build_view(
     if cfg.credentials.is_none() {
         note.push_str(" BINANCE_API_KEY/SECRET не заданы.");
     }
-    if crate::desk_orchestrator::desk_orchestrator_enabled() {
+    let orch = crate::desk_orchestrator::desk_orchestrator_enabled();
+    if orch {
         note.push_str(" DESK_ORCHESTRATOR=1 (paper-first; live multi BLOCK).");
     }
     let (ui_error, logged_error, error_source) = footer_errors(snapshot, state);
@@ -145,6 +146,10 @@ pub fn build_view(
         cfg.s4_always_enter,
         &cfg.s4_entry_windows,
     );
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
     ViewModel {
         strategy_id: state.strategy_id,
         wallet_balance: acc.wallet_balance,
@@ -168,10 +173,8 @@ pub fn build_view(
             } else {
                 format!("{last_decision}  |  BTC {reg}")
             };
-            if crate::desk_orchestrator::desk_orchestrator_enabled()
-                && !base.contains("desk orch:")
-            {
-                let owner = crate::desk_schedule::desk_owner_at(crate::sessions::unix_now());
+            if orch && !base.contains("desk orch:") {
+                let owner = crate::desk_schedule::desk_owner_at(now_ts);
                 format!("desk orch: owner S{}  |  {base}", owner.as_i32())
             } else {
                 base
@@ -180,12 +183,7 @@ pub fn build_view(
         mode_note: note,
         flatten_armed,
         entries_paused: state.entries_paused,
-        now_ts: Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0),
-        ),
+        now_ts: Some(now_ts),
         entry_windows: if is_continuation(state.strategy_id) {
             cont_windows
         } else {
@@ -222,5 +220,6 @@ pub fn build_view(
         daily_loss_r: cfg.daily_loss_r,
         day_pnl,
         s4_interval: continuation_interval(state.strategy_id, cfg.s4_interval),
+        desk_orchestrator: orch,
     }
 }

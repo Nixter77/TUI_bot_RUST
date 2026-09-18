@@ -424,6 +424,35 @@ fn base_cooldown(
     }
 }
 
+fn loss_windows_for(
+    strategy_id: i32,
+    momentum: Option<&MomentumParams>,
+    scalp: Option<&ScalpParams>,
+) -> Vec<HourWindow> {
+    if is_continuation(strategy_id) {
+        momentum
+            .map(|m| m.s4_entry_windows.clone())
+            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
+    } else if strategy_id == 2 {
+        scalp
+            .map(|s| s.entry_windows.clone())
+            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
+    } else {
+        momentum
+            .map(|m| m.entry_windows.clone())
+            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
+    }
+}
+
+fn orch_hold(orch: bool, now: f64, why: impl Into<String>) -> Decision {
+    let why = why.into();
+    if orch {
+        Decision::hold(crate::desk_orchestrator::status_line(now, Some(&why)))
+    } else {
+        Decision::hold(why)
+    }
+}
+
 fn cooldown_seconds(decision: &Decision, base: f64) -> f64 {
     if base <= 0.0 {
         return 0.0;
@@ -475,7 +504,10 @@ fn expire_entries_paused(paused: bool, cooldown_until: f64, now: f64) -> bool {
     }
 }
 
-pub(crate) fn continuation_params_for(strategy_id: i32, momentum: Option<&MomentumParams>) -> ContinuationParams {
+pub(crate) fn continuation_params_for(
+    strategy_id: i32,
+    momentum: Option<&MomentumParams>,
+) -> ContinuationParams {
     let s4 = momentum.map(|m| m.s4_interval).unwrap_or_default();
     let mut p = continuation_trade_params(strategy_id, s4);
     if let Some(m) = momentum {
@@ -529,6 +561,10 @@ pub fn tick_decisions(
     _continuation_override: Option<&ContinuationParams>,
 ) -> (EngineState, Vec<Decision>) {
     let mut state = state.clone();
+    let orch = crate::desk_orchestrator::desk_orchestrator_enabled();
+    if orch {
+        state.strategy_id = crate::desk_schedule::desk_owner_at(now).as_i32();
+    }
     let remembered = remembered_positions(state.position.as_ref(), &state.positions);
     let (mut merged_list, mut inflight): (Vec<Position>, Vec<String>) = if snapshot.live_book {
         let mut live_longs: Vec<Position> = snapshot
@@ -594,65 +630,16 @@ pub fn tick_decisions(
     };
 
     // Isolation: S1/S2 majors-only; S3 tradable USDT-M; S4/S5 tagged-only. Foreign longs → tails.
-    // Desk orchestrator: keep all desk-owned longs (manage by opening sid).
-    if crate::desk_orchestrator::desk_orchestrator_enabled() {
+    // Desk orchestrator: keep desk-owned longs and manage them by opening sid.
+    if orch {
         merged_list.retain(|p| crate::desk_orchestrator::manages_long(&p.symbol));
     } else {
         merged_list
             .retain(|p| strategy_manages_long(state.strategy_id, &p.symbol, &state.s4_inherited));
     }
 
-    let merged = merged_list.first().cloned();
     crate::openmeta::update_from_positions(&merged_list, snapshot, now);
 
-    // Desk orchestrator owns the rest of the tick (owner entries + manage-by-opening-sid).
-    if crate::desk_orchestrator::desk_orchestrator_enabled() {
-        let pause_sec = base_cooldown(state.strategy_id, momentum, scalp, trend);
-        let loss_windows: Vec<crate::sessions::HourWindow> =
-            crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec();
-        let limit = momentum
-            .map(|m| m.daily_loss_usdt)
-            .unwrap_or_else(default_daily_loss_usdt);
-        let limit_r = momentum
-            .map(|m| m.daily_loss_r)
-            .unwrap_or_else(default_daily_loss_r);
-        let risk_pct = momentum
-            .map(|m| m.risk_pct)
-            .unwrap_or_else(default_risk_pct);
-        if snapshot.account_ok {
-            apply_day_risk(
-                &mut state,
-                now,
-                current_equity(
-                    snapshot.account.wallet_balance,
-                    snapshot.account.unrealized_pnl,
-                ),
-                limit,
-                limit_r,
-                risk_pct,
-            );
-        }
-        let entries_paused =
-            expire_entries_paused(state.entries_paused, state.cooldown_until, now);
-        return crate::desk_orchestrator::tick_orchestrated(
-            &state,
-            snapshot,
-            now,
-            momentum,
-            scalp,
-            trend,
-            merged_list,
-            inflight,
-            state.cooldowns.clone(),
-            state.cooldown_until,
-            entries_paused,
-            pause_sec,
-            &loss_windows,
-        );
-    }
-
-    let mut work = snapshot.clone();
-    work.position = merged.clone();
     let prev_syms: HashSet<String> = remembered
         .iter()
         .map(|p| p.symbol.to_ascii_uppercase())
@@ -662,20 +649,6 @@ pub fn tick_decisions(
         .map(|p| p.symbol.to_ascii_uppercase())
         .collect();
     let pause_sec = base_cooldown(state.strategy_id, momentum, scalp, trend);
-    let loss_windows: Vec<crate::sessions::HourWindow> = if is_continuation(state.strategy_id) {
-        momentum
-            .map(|m| m.s4_entry_windows.clone())
-            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
-    } else if state.strategy_id == 2 {
-        // S2 session knobs — do not inherit STRATEGY1_ENTRY_HOURS for loss pause.
-        scalp
-            .map(|s| s.entry_windows.clone())
-            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
-    } else {
-        momentum
-            .map(|m| m.entry_windows.clone())
-            .unwrap_or_else(|| crate::sessions::DEFAULT_ENTRY_WINDOWS.to_vec())
-    };
     let mut cooldown_until = state.cooldown_until;
     let mut cooldowns = state.cooldowns.clone();
     for symbol in prev_syms.difference(&now_syms) {
@@ -693,14 +666,21 @@ pub fn tick_decisions(
         let won = remembered_pos
             .map(|p| crate::journal::long_close_was_win(p.entry_price, mark, p.take_profit))
             .unwrap_or(false);
-        if pause_sec > 0.0 {
+        let close_sid = if orch {
+            crate::desk_orchestrator::opening_sid_or(symbol, state.strategy_id)
+        } else {
+            state.strategy_id
+        };
+        let sid_pause = base_cooldown(close_sid, momentum, scalp, trend);
+        if sid_pause > 0.0 {
             set_cooldown(
                 &mut cooldowns,
                 symbol,
-                crate::journal::symbol_cooldown_until_for(state.strategy_id, now, won, pause_sec),
+                crate::journal::symbol_cooldown_until_for(close_sid, now, won, sid_pause),
             );
             if !won {
-                let until = crate::sessions::pause_until_after_loss(now, &loss_windows, pause_sec);
+                let windows = loss_windows_for(close_sid, momentum, scalp);
+                let until = crate::sessions::pause_until_after_loss(now, &windows, sid_pause);
                 cooldown_until = cooldown_until.max(until);
             }
         }
@@ -718,7 +698,12 @@ pub fn tick_decisions(
                 continue;
             }
         }
-        if crate::openmeta::meta_scaled_for_entry(&key, pos.entry_price, state.strategy_id) {
+        let latch_sid = if orch {
+            crate::desk_orchestrator::opening_sid_or(&pos.symbol, state.strategy_id)
+        } else {
+            state.strategy_id
+        };
+        if crate::openmeta::meta_scaled_for_entry(&key, pos.entry_price, latch_sid) {
             state.scaled_one_r.insert(key);
         }
     }
@@ -749,23 +734,21 @@ pub fn tick_decisions(
     }
     let mut tail = Vec::new();
     if snapshot.live_book {
-        // Flat book leftovers OR foreign-strategy longs (S4/S5 isolation).
         tail = unmanaged_positions(&snapshot.open_positions, &merged_list);
-        if !now_flat {
-            // Keep only non-managed rows (foreign / shorts); managed stays in book.
-            // unmanaged_positions already excludes managed longs.
-        }
     }
 
     let mut next_leaders = state.recent_leaders.clone();
     let entries_paused = expire_entries_paused(state.entries_paused, state.cooldown_until, now);
     let (mut decisions, scan_ts) = if entries_paused {
         (
-            vec![Decision::hold("вход на паузе после закрытия всех")],
+            vec![orch_hold(orch, now, "вход на паузе после закрытия всех")],
             state.last_scan_ts,
         )
     } else if inflight == ["*".to_string()] && now_flat {
-        (vec![Decision::hold("entry in flight")], state.last_scan_ts)
+        (
+            vec![orch_hold(orch, now, "entry in flight")],
+            state.last_scan_ts,
+        )
     } else if !tail.is_empty() {
         let names = tail
             .iter()
@@ -773,11 +756,28 @@ pub fn tick_decisions(
             .collect::<Vec<_>>()
             .join(", ");
         (
-            vec![Decision::hold(format!(
-                "на бирже хвост {names}. Стратегия не ведёт шорты. x x закроет."
-            ))],
+            vec![orch_hold(
+                orch,
+                now,
+                format!("на бирже хвост {names}. Стратегия не ведёт шорты. x x закроет."),
+            )],
             state.last_scan_ts,
         )
+    } else if orch {
+        let (d, ts, leaders) = crate::desk_orchestrator::collect_decisions(
+            &state,
+            snapshot,
+            now,
+            momentum,
+            scalp,
+            trend,
+            &merged_list,
+            &inflight,
+            &cooldowns,
+            cooldown_until,
+        );
+        next_leaders = leaders;
+        (d, ts)
     } else if sid == 1 {
         let inflight_f: Vec<String> = inflight
             .iter()
@@ -825,6 +825,8 @@ pub fn tick_decisions(
         next_leaders = leaders;
         (d, ts)
     } else {
+        let mut work = snapshot.clone();
+        work.position = merged_list.first().cloned();
         let (decision, scan_ts) = decide(
             sid,
             &work,
@@ -858,7 +860,11 @@ pub fn tick_decisions(
             .filter(|d| !d.is_enter_long())
             .collect();
         decisions = if kept.is_empty() {
-            vec![Decision::hold("стоп дня. Новых входов нет до 00:00 UTC.")]
+            vec![orch_hold(
+                orch,
+                now,
+                "стоп дня. Новых входов нет до 00:00 UTC.",
+            )]
         } else {
             kept
         };
@@ -891,7 +897,7 @@ pub fn tick_decisions(
         decisions = if kept.iter().any(|d| !d.is_hold()) {
             kept
         } else {
-            vec![Decision::hold("сеть: повтор входа после сбоя")]
+            vec![orch_hold(orch, now, "сеть: повтор входа после сбоя")]
         };
     }
 

@@ -15,6 +15,14 @@ pub const MAINNET_BASE: &str = "https://fapi.binance.com";
 pub const ALLOWED_TESTNET_HOSTS: &[&str] = &["testnet.binancefuture.com", "demo-fapi.binance.com"];
 pub const MAINNET_HOST: &str = "fapi.binance.com";
 
+/// Process-env on-switch: exact `1` / `true` / `TRUE` / `yes` / `YES` (trimmed).
+pub fn env_flag_on(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
 /// Continuation (strategy 4) kline interval. Scalp stays 1m-class, trend stays 1d.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeInterval {
