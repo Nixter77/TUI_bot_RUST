@@ -158,6 +158,15 @@ pub struct EntrySnapshot {
     pub btc_regime: Option<String>,
 }
 
+#[cfg(test)]
+static TEST_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hold while a test mutates the process-global meta store (path or map).
+#[cfg(test)]
+pub fn lock_store_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    TEST_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn set_active_path(path: Option<PathBuf>) {
     *lock_poison(&ACTIVE_PATH) = path;
     // Reload from disk when path changes.
@@ -686,6 +695,7 @@ mod tests {
 
     #[test]
     fn s5_folds_1h_bar_high_low_into_close_mfe_mae_r() {
+        let _g = lock_store_for_tests();
         let dir = tempfile::tempdir().unwrap();
         set_active_path(Some(dir.path().join("open_meta.json")));
         on_open(
@@ -777,6 +787,7 @@ mod tests {
 
     #[test]
     fn continuation_owns_isolates_s4_s5() {
+        let _g = lock_store_for_tests();
         let mut map = HashMap::new();
         map.insert(
             "AAAUSDT".into(),

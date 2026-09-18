@@ -5,7 +5,6 @@
 
 use crate::sessions::{hour_in_windows, utc_datetime, HourWindow, DEFAULT_ENTRY_WINDOWS};
 use chrono::Timelike;
-use std::env;
 
 /// S4 open windows (same default as `STRATEGY4_ENTRY_HOURS` / `DEFAULT_ENTRY_HOURS`).
 pub const S4_OPEN_WINDOWS: [HourWindow; 3] = DEFAULT_ENTRY_WINDOWS;
@@ -29,10 +28,7 @@ impl DeskSid {
 }
 
 pub fn desk_schedule_enabled() -> bool {
-    matches!(
-        env::var("DESK_SCHEDULE").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
+    crate::config::env_flag_on("DESK_SCHEDULE")
 }
 
 pub fn hour_in_s4_open(hour: u8) -> bool {
@@ -87,6 +83,7 @@ pub fn hour_owner_table() -> [(u8, DeskSid); 24] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     #[test]
     fn s4_windows_match_default_entry_hours() {

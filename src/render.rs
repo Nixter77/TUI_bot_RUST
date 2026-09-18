@@ -54,6 +54,8 @@ pub struct ViewModel {
     pub daily_loss_r: Decimal,
     pub day_pnl: Option<Decimal>,
     pub s4_interval: TradeInterval,
+    /// Set by `build_view` from the env flag — render must not re-read process env.
+    pub desk_orchestrator: bool,
 }
 
 impl Default for ViewModel {
@@ -99,6 +101,7 @@ impl Default for ViewModel {
             daily_loss_r: Decimal::from(3),
             day_pnl: None,
             s4_interval: TradeInterval::Minute5,
+            desk_orchestrator: false,
         }
     }
 }
@@ -745,11 +748,17 @@ pub fn render_frame(view: &ViewModel) -> String {
         footer.push(format!("  {part}"));
     }
     footer.extend([
-        format!(
-            "Текущая: {} — {}",
-            view.strategy_id,
-            strategy_title(view.strategy_id)
-        ),
+        {
+            let mut cur = format!(
+                "Текущая: {} — {}",
+                view.strategy_id,
+                strategy_title(view.strategy_id)
+            );
+            if view.desk_orchestrator {
+                cur.push_str("  |  DESK_ORCHESTRATOR");
+            }
+            cur
+        },
         format!(
             "Каденс стратегии 1: {} с (1 или 2 минуты)",
             view.poll_seconds

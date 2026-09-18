@@ -15,6 +15,7 @@ pub mod backtest;
 pub mod config;
 pub mod continuation;
 pub mod dayrisk;
+pub mod desk_orchestrator;
 pub mod desk_schedule;
 pub mod engine;
 pub mod errorlog;

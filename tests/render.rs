@@ -542,3 +542,17 @@ fn position_block_shows_remaining_to_one_r() {
     assert!(frame.contains("до 1R: нет стопа"), "{frame}");
     assert!(frame.contains("DOGEUSDT SHORT"), "{frame}");
 }
+
+#[test]
+fn footer_desk_orchestrator_comes_from_view_not_env() {
+    let off = render_frame(&ViewModel::default());
+    assert!(
+        !off.contains("DESK_ORCHESTRATOR"),
+        "render must not read process env: {off}"
+    );
+    let on = render_frame(&ViewModel {
+        desk_orchestrator: true,
+        ..ViewModel::default()
+    });
+    assert!(on.contains("DESK_ORCHESTRATOR"), "{on}");
+}

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use tui_bot::config::{
-    load_config, load_dotenv_file, ConfigError, TradeInterval, MAINNET_BASE, STRATEGY1_POLL_SECONDS,
+    env_flag_on, load_config, load_dotenv_file, ConfigError, TradeInterval, MAINNET_BASE,
+    STRATEGY1_POLL_SECONDS,
 };
 
 #[test]
@@ -384,4 +385,18 @@ fn telegram_optional_and_paired() {
     env.insert("TELEGRAM_CHAT_ID".into(), "111222333".into());
     let err = load_config(false, None, Some(&env)).unwrap_err();
     assert!(!format!("{err:?}").contains("not-a-token"));
+}
+
+#[test]
+fn env_flag_on_accepts_known_tokens() {
+    const NAME: &str = "TUI_BOT_TEST_ENV_FLAG";
+    std::env::remove_var(NAME);
+    assert!(!env_flag_on(NAME));
+    std::env::set_var(NAME, "1");
+    assert!(env_flag_on(NAME));
+    std::env::set_var(NAME, " yes ");
+    assert!(env_flag_on(NAME));
+    std::env::set_var(NAME, "0");
+    assert!(!env_flag_on(NAME));
+    std::env::remove_var(NAME);
 }
